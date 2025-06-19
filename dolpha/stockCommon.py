@@ -11,7 +11,7 @@ import pandas as pd
 
 ############################################################################################################################################################
 #한국인지 미국인지 구분해 현재 날짜정보를 리턴해 줍니다!
-def GetNowDateStr(area = "KR", type= "NONE" ):
+def GetNowDateStr(area = "KRX", type= "NONE" ):
     timezone_info = timezone('Asia/Seoul')
     if area == "US":
         timezone_info = timezone('America/New_York')
@@ -23,7 +23,7 @@ def GetNowDateStr(area = "KR", type= "NONE" ):
         return now.strftime("%Y-%m-%d")
 
 #현재날짜에서 이전/이후 날짜를 구해서 리턴! (미래의 날짜를 구할 일은 없겠지만..)
-def GetFromNowDateStr(area = "KR", type= "NONE" , days=100):
+def GetFromNowDateStr(area = "KRX", type= "NONE" , days=100):
     timezone_info = timezone('Asia/Seoul')
     if area == "US":
         timezone_info = timezone('America/New_York')
@@ -93,7 +93,7 @@ def GetOhlcv1(area, stock_code, limit = 500, adj_ok = "1"):
     startDate = GetFromNowDateStr(area,"BAR",-limit)
     endDate = GetNowDateStr(area,"BAR")
     df = fdr.DataReader(stock_code, startDate, endDate, exchange=area)
-    print(df)
+    print(df.head())
     if adj_ok == "1":
         
         try :
@@ -138,7 +138,7 @@ def GetOhlcv2(area, stock_code, limit = 500, adj_ok = "1"):
 
     df = None
 
-    if area == "KR":
+    if area == "KRX":
 
         df = web.DataReader(stock_code, "naver", GetFromNowDateStr(area,"BAR",-limit),GetNowDateStr(area,"BAR"))
 
@@ -179,13 +179,6 @@ def GetOhlcv2(area, stock_code, limit = 500, adj_ok = "1"):
 
 def GetStockList(area = "KRX"):
     
-    if area == "KR":
-        df = fdr.StockListing('KRX')
-    elif area == "KOSDAQ":
-        df = fdr.StockListing('KOSDAQ')
-    elif area == "KOSPI":
-        df = fdr.StockListing('KOSPI')
-    else:
-        df = fdr.StockListing('NASDAQ')
+    df = fdr.StockListing(area)
 
     return df
