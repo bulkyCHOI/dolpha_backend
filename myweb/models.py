@@ -26,6 +26,7 @@ class StockOHLCV(models.Model):
     low = models.IntegerField()  # 저가
     close = models.IntegerField()  # 종가
     volume = models.IntegerField()  # 거래량
+    change = models.FloatField(default=0.0)  # 전일 대비 변화율
 
     class Meta:
         # 테이블 이름 지정 (기존 테이블과 매핑)

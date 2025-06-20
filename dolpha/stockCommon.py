@@ -93,7 +93,6 @@ def GetOhlcv1(area, stock_code, limit = 500, adj_ok = "1"):
     startDate = GetFromNowDateStr(area,"BAR",-limit)
     endDate = GetNowDateStr(area,"BAR")
     df = fdr.DataReader(stock_code, startDate, endDate, exchange=area)
-    print(df.head())
     if adj_ok == "1":
         
         try :

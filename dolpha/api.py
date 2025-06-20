@@ -20,38 +20,7 @@ def hello(request):
     return {"message": "Hello, Django Ninja!"}
 
 
-@api.get("/stock/{code}")
-def get_stock_data(request, code: str):
-    """
-    주식 코드에 해당하는 OHLCV 데이터를 반환합니다.
-    """
-    # 데이터 가져오기
-    df = Common.GetOhlcv("KR", code, limit=1, adj_ok="1")
-    
-    if df is None or len(df) == 0:
-        return {"error": "No data found for the given stock code."}
-    
-    # 데이터 프레임을 JSON으로 변환
-    data = df.to_dict(orient='records')
-    
-    # 데이터베이스에 저장
-    # for row in data:
-    #     # 중복 데이터 확인 및 처리
-    #     obj, created = StockOHLCV.objects.update_or_create(
-    #         ticker=code,
-    #         date=row.get("date"),
-    #         defaults={
-    #             "name": row.get("name"),
-    #             "market": row.get("market"),
-    #             "open": row.get("Open"),
-    #             "high": row.get("High"),
-    #             "low": row.get("Low"),
-    #             "close": row.get("Close"),
-    #             "volume": row.get("Volume"),
-    #         }
-    #     )
-    
-    return {"stock_code": code, "data": data}
+
 
 
 # # 오늘 날짜의 데이터만 가져오기
@@ -201,3 +170,158 @@ def get_all_stock_description(request):
             "result": "ERROR",
             "message": f"Failed to process stock data: {str(e)}"
         }
+        
+class ErrorResponse(Schema):
+    error: str
+
+class SuccessResponse(Schema):
+    message: str
+    count_saved: int
+    
+@api.get("/stock", response={200: SuccessResponse, 400: ErrorResponse, 404: ErrorResponse, 500: ErrorResponse})
+def get_stock_data(request, code: str=None, limit: int=1):
+    """
+    주식 코드에 해당하는 OHLCV 데이터를 데이터베이스에 저장합니다.
+    코드를 입력하지 않으면, 모든 회사의 OHLCV 데이터를 가져옵니다.
+    
+    Args:
+        code (str): 주식 코드
+        limit (int): 가져올 데이터의 개수 (기본값: 1)
+    
+    Returns:
+        SuccessResponse: 데이터 저장 성공 시 메시지와 저장된 레코드 수
+        ErrorResponse: 에러 발생 시 에러 메시지
+    """
+    companys = []
+    
+    if code is not None:
+        # code에 맞는 회사의 OHLCV 데이터를 가져옴
+        try:
+            company = Company.objects.get(code=code)
+            companys = [company]  # 단일 회사 객체를 리스트로 감싸서 처리
+        except Company.DoesNotExist:
+            return 404, {"error": f"No company found with code: {code}"}
+    else:
+        # code가 주어지지 않은 경우 모든 회사의 OHLCV 데이터를 가져옴
+        companys = Company.objects.all()
+        
+    print(f"Total companies: {len(companys)}")
+    
+    if len(companys) == 0:
+        return 404, {"error": "No companies found in the database."}
+    
+    for company in companys:
+        print(company.code, company.name)
+        
+        df = Common.GetOhlcv("KR", company.code, limit=limit, adj_ok="1")
+        print(df.head())
+
+        if df is None or len(df) == 0:
+            return 400, {"error": "No OHLCV data found for the given stock code."}
+        
+        # 컬럼명 검증
+        expected_columns = ['open', 'high', 'low', 'close', 'volume', 'change']
+        if not all(col in df.columns for col in expected_columns):
+            return 400, {"error": "Required OHLCV columns are missing in the data."}
+
+        # 데이터 전처리
+        try:
+            df.index = pd.to_datetime(df.index, errors='coerce')    # 인덱스를 Timestamp로 변환
+            if df.index.isna().any():   # 변환 실패 시 NaT가 있는지 확인
+                return 400, {"error": "Invalid date format in OHLCV data index."}
+        except Exception as e:
+            return 400, {"error": f"Failed to process date column: {str(e)}"}
+
+        # 데이터베이스 저장
+        try:
+            with transaction.atomic():
+                # 벌크 데이터 준비
+                stock_ohlcv_list = []
+            
+                # DataFrame에서 NaN 값을 기본값으로 대체
+                df = df.fillna({
+                    'open': 0.0,
+                    'high': 0.0,
+                    'low': 0.0,
+                    'close': 0.0,
+                    'volume': 0,
+                    'change': 0.0
+                })
+                for index, row in df.iterrows():
+                    stock_ohlcv = StockOHLCV(
+                        code=company,
+                        date=index.date(),  # 인덱스(Timestamp)에서 date 추출
+                        open=float(row['open']),
+                        high=float(row['high']),
+                        low=float(row['low']),
+                        close=float(row['close']),
+                        volume=int(row['volume']),
+                        change=float(row['change'] if 'change' in row else 0.0)  # 변화율이 없을 경우 기본값 0.0 사용
+                    )
+                    stock_ohlcv_list.append(stock_ohlcv)
+                
+                # 벌크 삽입
+                if stock_ohlcv_list:
+                    StockOHLCV.objects.bulk_create(stock_ohlcv_list, ignore_conflicts=True)
+        except Exception as e:
+            traceback.print_exc()
+            return 500, {"error": f"Failed to save stock data: {str(e)}"}    
+    return {
+                "message": "Stock data saved successfully.",
+                "count_saved_stocks": len(companys),
+                "count_saved": limit,
+            }
+    # try:
+    #     company = Company.objects.get(code=code)
+    # except Company.DoesNotExist:
+    #     return 404, {"error": f"No company found with code: {code}"}
+
+    # # 데이터 가져오기
+    # df = Common.GetOhlcv("KR", code, limit=limit, adj_ok="1")
+    # print(df.head())
+    # if df is None or len(df) == 0:
+    #     return 400, {"error": "No OHLCV data found for the given stock code."}
+    
+    # # 컬럼명 검증
+    # expected_columns = ['open', 'high', 'low', 'close', 'volume', 'change']
+    # if not all(col in df.columns for col in expected_columns):
+    #     return 400, {"error": "Required OHLCV columns are missing in the data."}
+
+    # # 데이터 전처리
+    # try:
+    #     df.index = pd.to_datetime(df.index, errors='coerce')    # 인덱스를 Timestamp로 변환
+    #     if df.index.isna().any():   # 변환 실패 시 NaT가 있는지 확인
+    #         return 400, {"error": "Invalid date format in OHLCV data index."}
+    # except Exception as e:
+    #     return 400, {"error": f"Failed to process date column: {str(e)}"}
+
+    # # 데이터베이스 저장
+    # try:
+    #     with transaction.atomic():
+    #         # 벌크 데이터 준비
+    #         stock_ohlcv_list = []
+    #         for index, row in df.iterrows():
+    #             stock_ohlcv = StockOHLCV(
+    #                 code=company,
+    #                 date=index.date(),  # 인덱스(Timestamp)에서 date 추출
+    #                 open=float(row['open']),
+    #                 high=float(row['high']),
+    #                 low=float(row['low']),
+    #                 close=float(row['close']),
+    #                 volume=int(row['volume'])
+    #             )
+    #             stock_ohlcv_list.append(stock_ohlcv)
+            
+    #         # 벌크 삽입
+    #         if stock_ohlcv_list:
+    #             StockOHLCV.objects.bulk_create(stock_ohlcv_list, ignore_conflicts=True)
+        
+    #     return {
+    #         "message": "Stock data saved successfully.",
+    #         "count_saved": len(stock_ohlcv_list)
+    #     }
+    # except Exception as e:
+    #     traceback.print_exc()
+    #     return 500, {"error": f"Failed to save stock data: {str(e)}"}
+    
+    
