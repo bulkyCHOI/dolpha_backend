@@ -18,7 +18,11 @@ from django.contrib import admin
 from django.urls import path
 from .api import api  # api.py에서 정의한 api 임포트
 
+from myweb import views
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', api.urls),  # API 엔드포인트 추가
+    path('', views.stock_chart_view, name='stock_chart'),
+    path('data/', views.stock_data, name='stock_data'),
 ]
