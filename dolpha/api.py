@@ -11,6 +11,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from typing import List, Dict, Optional
+from tqdm import tqdm
 
 import traceback
 
@@ -212,11 +213,11 @@ def get_stock_data(request, code: str=None, limit: int=1):
     if len(companies) == 0:
         return 404, {"error": "No companies found in the database."}
     
-    for company in companies:
-        print(company.code, company.name)
+    for company in tqdm(companies, desc="Processing companies..."):
+        # print(company.code, company.name)
         
         df = Common.GetOhlcv("KR", company.code, limit=limit, adj_ok="1")
-        print(df.head())
+        # print(df.head())
 
         if df is None or len(df) == 0:
             return 400, {"error": "No OHLCV data found for the given stock code."}
@@ -335,11 +336,17 @@ def calculate_52w_high_low(data, target_date, period_days=252):
         
         # 지난 252일 데이터 추출
         period_data = data[target_idx - period_days + 1:target_idx + 1]
-        highs = [(record.high, record.date) for record in period_data]
-        lows = [(record.low, record.date) for record in period_data]
         
-        max_high, max_date = max(highs, key=lambda x: x[0]) if highs else (0.0, None)
-        min_low, min_date = min(lows, key=lambda x: x[0]) if lows else (0.0, None)
+        # high와 low가 0이 아닌 데이터만 필터링
+        highs = [(record.high, record.date) for record in period_data if record.high > 0]
+        lows = [(record.low, record.date) for record in period_data if record.low > 0]
+        
+        # 유효한 데이터가 없으면 기본값 반환
+        if not highs or not lows:
+            return {'max_52w': 0.0, 'min_52w': 0.0, 'max_52w_date': None, 'min_52w_date': None}
+        
+        max_high, max_date = max(highs, key=lambda x: x[0])
+        min_low, min_date = min(lows, key=lambda x: x[0])
         
         return {
             'max_52w': float(max_high),
@@ -398,7 +405,34 @@ def calculate_rs_score(data, target_date, period_days):
         return -1
 
 @api.post("/update_stock_analysis", response={200: SuccessResponse, 400: ErrorResponse, 404: ErrorResponse, 500: ErrorResponse})
-def update_stock_analysis(request):
+def update_stock_analysis(request, offset: int=0, limit: int=0):
+    """
+    주식 분석 데이터를 계산하여 StockAnalysis 테이블에 저장합니다.
+    최근 거래일부터 지정된 `limit`만큼의 거래일에 대해 모든 회사의 이동평균, 52주 신고가/신저가, RS 점수,
+    미너비니 트렌드 조건을 계산합니다. 휴일(예: 주말)은 StockOHLCV 데이터가 없으므로 자동으로 제외됩니다.
+
+    Args:
+        request: Ninja API 요청 객체.
+        offset (int, optional): 처리할 데이터의 시작 위치. 기본값: 0.
+        limit (int, optional): 처리할 거래일 수. 0이면 offset 거래일만 처리. 기본값: 0.
+        즉 offset ~ limit 범위의 거래일을 처리합니다.
+        0, 0: 오늘 거래일만 처리합니다.
+        0, 50: 오늘부터 50일 전까지의 거래일을 처리합니다.
+        50, 100: 50일 전부터 100일 전까지의 거래일을 처리합니다.
+
+    Returns:
+        dict: 처리 결과를 포함하는 응답.
+            - message (str): 처리 결과 메시지.
+            - count_saved (int): 저장된 StockAnalysis 레코드 수.
+            - dates_processed (list): 처리된 날짜 목록 (YYYY-MM-DD 형식).
+        tuple: 에러 발생 시 (HTTP 상태 코드, 에러 메시지 딕셔너리).
+
+    Raises:
+        DatabaseError: 데이터베이스 저장 중 오류 발생 시.
+        Exception: 기타 예상치 못한 오류 발생 시.
+    """
+    
+    
     # 모든 회사의 데이터를 가져옴
     companies = Company.objects.all()
         
@@ -415,134 +449,144 @@ def update_stock_analysis(request):
         '1month': 21    # 1개월
     }
     
-    # StockOHLCV의 최신 날짜 가져오기
-    latest_date = StockOHLCV.objects.aggregate(Max('date'))['date__max']
-    if not latest_date:
+    # StockOHLCV의 고유 날짜 목록 가져오기 (최근 순, limit 적용)
+    date_list = StockOHLCV.objects.values('date').distinct().order_by('-date')
+    if limit > 0:
+        date_list = date_list[offset:offset+limit]  # 최근 limit개의 거래일만 선택
+    else:
+        date_list = date_list[offset:offset+1]  # limit=0이면 최신 날짜만
+        
+    if not date_list:
         print("StockOHLCV 데이터가 없습니다.")
-        return
+        return 404, {"error": "No StockOHLCV data found."}
 
-     # RS 점수 저장용 데이터프레임
-    rs_data = []
-    analysis_objects = []
+    total_saved = 0
+    print(f"Start date: {date_list[0]['date']}, End date: {date_list[len(date_list)-1]['date']}") 
+    print(f"Processing {len(date_list)} dates for {len(companies)} companies...")
+    # 각 날짜에 대해 처리
+    for date_entry in tqdm(date_list, desc=f"Processing..."):
+        target_date = date_entry['date']
+        
+        rs_data_all = []  # 모든 날짜, 회사에 대한 RS 데이터
+        analysis_objects = []  # 모든 StockAnalysis 객체
+        
+        # 회사별로 처리
+        for company in tqdm(companies, desc=f"Date: {date_entry['date']}", leave=False):
 
-    
-    for company in companies:
-        print(f"처리 중: {company.code} - {company.name}")
+            # 회사별 OHLCV 데이터 가져오기
+            ohlcv_data = StockOHLCV.objects.filter(code=company).order_by('date')
         
-        # 회사별 OHLCV 데이터 가져오기
-        ohlcv_data = StockOHLCV.objects.filter(code=company)
-        
-        if not ohlcv_data.exists():
-            print(f"{company.code}에 대한 OHLCV 데이터 없음")
-            continue
-        
-        # 최신 종가 가져오기
-        latest_ohlcv = ohlcv_data.filter(date=latest_date).first()
-        latest_close = latest_ohlcv.close if latest_ohlcv else 0.0
-        
-        # 이동평균 계산
-        mas = calculate_moving_averages(ohlcv_data, latest_date)
-        
-        # 52주 신고가/신저가 및 날짜 계산
-        high_low = calculate_52w_high_low(ohlcv_data, latest_date)
-        
-        # 각 기간별 RS 점수 계산
-        rs_scores = {}
-        for period_name, period_days in periods.items():
-            rs_score = calculate_rs_score(ohlcv_data, latest_date, period_days)
-            rs_scores[period_name] = rs_score
-        
-        # 가중평균 RS 점수 계산
-        weighted_score = -1
-        if all(rs_scores[p] != -1 for p in periods):
-            weighted_score = (rs_scores['1month'] * 4 + rs_scores['3month'] * 3 + rs_scores['6month'] * 2 + rs_scores['12month'] * 1) / 10
-        
-        rs_data.append({
-            'code': company.code,
-            'name': company.name,
-            'market': company.market,
-            'rsScore1m': rs_scores['1month'],
-            'rsScore3m': rs_scores['3month'],
-            'rsScore6m': rs_scores['6month'],
-            'rsScore12m': rs_scores['12month'],
-            'rsScore': weighted_score
-        })
-        
-        # 미너비니 트렌드 템플릿 조건 확인
-        is_minervini_trend = (
-            latest_close > mas['ma50'] and
-            latest_close > mas['ma150'] and
-            latest_close > mas['ma200'] and
-            mas['ma50'] > mas['ma150'] > mas['ma200'] and
-            mas['ma200_past'] > 0 and mas['ma200_past'] < mas['ma200'] and
-            latest_close > high_low['min_52w'] * 1.3 and
-            latest_close <= high_low['max_52w'] * 0.75
-        )  # rsRank는 랭킹 계산 후 확인
-        
-        # StockAnalysis 객체 준비
-        analysis_objects.append(StockAnalysis(
-            code=company,
-            date=latest_date,
-            ma50=mas['ma50'],
-            ma150=mas['ma150'],
-            ma200=mas['ma200'],
-            rsScore=weighted_score,
-            rsScore1m=rs_scores['1month'],
-            rsScore3m=rs_scores['3month'],
-            rsScore6m=rs_scores['6month'],
-            rsScore12m=rs_scores['12month'],
-            rsRank=0.0,
-            rsRank1m=0.0,
-            rsRank3m=0.0,
-            rsRank6m=0.0,
-            rsRank12m=0.0,
-            max_52w=high_low['max_52w'],
-            min_52w=high_low['min_52w'],
-            max_52w_date=high_low['max_52w_date'],
-            min_52w_date=high_low['min_52w_date'],
-            is_minervini_trend=is_minervini_trend
-        ))
-        
-    # 랭킹 계산 (market별, 1등=99, 꼴지=1)
-    rs_df = pd.DataFrame(rs_data)
-    for market in rs_df['market'].unique():
-        market_df = rs_df[rs_df['market'] == market]
-        if market_df.empty:
-            continue
-        for period in ['rsScore1m', 'rsScore3m', 'rsScore6m', 'rsScore12m', 'rsScore']:
-            # 랭킹 계산
-            rank_values = market_df[period].rank(ascending=True, na_option='bottom')
-            rs_values = (rank_values * 98 / len(market_df)).apply(np.int64) + 1
+            if not ohlcv_data.exists():
+                print(f"{company.code}에 대한 OHLCV 데이터 없음")
+                continue
             
-            # rs_df에 값 반영
-            rs_df.loc[market_df.index, f'{period}_Rank'] = rank_values
-            rs_df.loc[market_df.index, f'{period}_RS'] = rs_values
-
-    # StockAnalysis 객체에 랭킹 반영
-    for i, obj in enumerate(analysis_objects):
-        row = rs_df[rs_df['code'] == obj.code.code].iloc[0]
-        obj.rsRank = row['rsScore_RS'] if row['rsScore'] != -1 else 0.0
-        obj.rsRank1m = row['rsScore1m_RS'] if row['rsScore1m'] != -1 else 0.0
-        obj.rsRank3m = row['rsScore3m_RS'] if row['rsScore3m'] != -1 else 0.0
-        obj.rsRank6m = row['rsScore6m_RS'] if row['rsScore6m'] != -1 else 0.0
-        obj.rsRank12m = row['rsScore12m_RS'] if row['rsScore12m'] != -1 else 0.0
-        # rsRank >= 70 조건 적용
-        if obj.is_minervini_trend:
-            obj.is_minervini_trend = obj.is_minervini_trend and obj.rsRank >= 70
+            # 해당 날짜의 종가 가져오기
+            latest_ohlcv = ohlcv_data.filter(date=target_date).first()
+            latest_close = latest_ohlcv.close if latest_ohlcv else 0.0
             
-    # 중복된 StockAnalysis 레코드 삭제
-    StockAnalysis.objects.filter(date=latest_date).delete()
+            # 이동평균 계산
+            mas = calculate_moving_averages(ohlcv_data, target_date)
+            
+            # 52주 신고가/신저가 및 날짜 계산
+            high_low = calculate_52w_high_low(ohlcv_data, target_date)
+            
+            # 각 기간별 RS 점수 계산
+            rs_scores = {}
+            for period_name, period_days in periods.items():
+                rs_score = calculate_rs_score(ohlcv_data, target_date, period_days)
+                rs_scores[period_name] = rs_score
+            
+            # 가중평균 RS 점수 계산
+            weighted_score = -1
+            if all(rs_scores[p] != -1 for p in periods):
+                weighted_score = (rs_scores['1month'] * 4 + rs_scores['3month'] * 3 + rs_scores['6month'] * 2 + rs_scores['12month'] * 1) / 10
+            
+            rs_data_all.append({
+                'date': target_date,
+                'code': company.code,
+                'name': company.name,
+                'market': company.market,
+                'rsScore1m': rs_scores['1month'],
+                'rsScore3m': rs_scores['3month'],
+                'rsScore6m': rs_scores['6month'],
+                'rsScore12m': rs_scores['12month'],
+                'rsScore': weighted_score
+            })
+            
+            # 미너비니 트렌드 템플릿 조건 확인
+            is_minervini_trend = (
+                latest_close > mas['ma50'] and
+                latest_close > mas['ma150'] and
+                latest_close > mas['ma200'] and
+                mas['ma50'] > mas['ma150'] > mas['ma200'] and
+                mas['ma200_past'] > 0 and mas['ma200_past'] < mas['ma200'] and
+                latest_close > high_low['min_52w'] * 1.3 and
+                latest_close <= high_low['max_52w'] * 0.75
+            )  # rsRank는 랭킹 계산 후 확인
+            
+            # StockAnalysis 객체 준비
+            analysis_objects.append(StockAnalysis(
+                code=company,
+                date=target_date,
+                ma50=mas['ma50'],
+                ma150=mas['ma150'],
+                ma200=mas['ma200'],
+                rsScore=weighted_score,
+                rsScore1m=rs_scores['1month'],
+                rsScore3m=rs_scores['3month'],
+                rsScore6m=rs_scores['6month'],
+                rsScore12m=rs_scores['12month'],
+                rsRank=0.0,
+                rsRank1m=0.0,
+                rsRank3m=0.0,
+                rsRank6m=0.0,
+                rsRank12m=0.0,
+                max_52w=high_low['max_52w'],
+                min_52w=high_low['min_52w'],
+                max_52w_date=high_low['max_52w_date'],
+                min_52w_date=high_low['min_52w_date'],
+                is_minervini_trend=is_minervini_trend
+            ))
     
-    # Bulk create
-    try:
-        with transaction.atomic():
-            StockAnalysis.objects.bulk_create(analysis_objects)
-        print(f"{len(analysis_objects)}개의 StockAnalysis 레코드 생성 완료: {latest_date}")
-        return {
-            "message": "Stock analysis data saved successfully.",
-            "count_saved": len(analysis_objects),
-        }
-    except Exception as e:
-        traceback.print_exc()
-        return 500, {"error": f"Failed to save stock analysis data: {str(e)}"}
+        # 날짜별로 랭킹 계산
+        rs_df = pd.DataFrame(rs_data_all)
+        for date in tqdm([entry['date'] for entry in date_list], desc=f"Calculating rankings...", leave=False):
+            date_df = rs_df[rs_df['date'] == date]
+            for market in date_df['market'].unique():
+                market_df = date_df[date_df['market'] == market]
+                if market_df.empty:
+                    continue
+                for period in ['rsScore1m', 'rsScore3m', 'rsScore6m', 'rsScore12m', 'rsScore']:
+                    rank_values = market_df[period].rank(ascending=True, na_option='bottom')
+                    rs_values = (rank_values * 98 / len(market_df)).apply(np.int64) + 1
+                    rs_df.loc[market_df.index, f'{period}_Rank'] = rank_values
+                    rs_df.loc[market_df.index, f'{period}_RS'] = rs_values
+
+        # StockAnalysis 객체에 랭킹 반영
+        for obj in tqdm(analysis_objects, desc="Updating rankings and MTT", leave=False):
+            row = rs_df[(rs_df['code'] == obj.code.code) & (rs_df['date'] == obj.date)].iloc[0]
+            obj.rsRank = row['rsScore_RS'] if row['rsScore'] != -1 else 0.0
+            obj.rsRank1m = row['rsScore1m_RS'] if row['rsScore1m'] != -1 else 0.0
+            obj.rsRank3m = row['rsScore3m_RS'] if row['rsScore3m'] != -1 else 0.0
+            obj.rsRank6m = row['rsScore6m_RS'] if row['rsScore6m'] != -1 else 0.0
+            obj.rsRank12m = row['rsScore12m_RS'] if row['rsScore12m'] != -1 else 0.0
+            if obj.is_minervini_trend:
+                obj.is_minervini_trend = obj.is_minervini_trend and obj.rsRank >= 70
+                    
+        # 기존 StockAnalysis 레코드 삭제
+        StockAnalysis.objects.filter(date=target_date).delete()
     
+        # Bulk create
+        try:
+            with transaction.atomic():
+                StockAnalysis.objects.bulk_create(analysis_objects)
+            total_saved += len(analysis_objects)
+        except Exception as e:
+            traceback.print_exc()
+            return 500, {"error": f"주식 분석 데이터 저장 실패: {str(e)}"}
+    
+    return {
+        "message": "주식 분석 데이터가 성공적으로 저장되었습니다.",
+        "count_saved": total_saved,
+        "dates_processed": f"{date_list[0]['date']}, Last date: {date_list[len(date_list)-1]['date']}"
+    }
