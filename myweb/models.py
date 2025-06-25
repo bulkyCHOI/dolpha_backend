@@ -79,3 +79,27 @@ class StockAnalysis(models.Model):
 
     def __str__(self):
         return f"{self.code} ({self.date})"
+    
+    
+class StockFinancialStatement(models.Model):
+    code = models.ForeignKey(Company, on_delete=models.CASCADE, related_name='financial')  # 종목 코드 (Company 모델과 연결)
+    # name = models.CharField(max_length=100)  # 종목명
+    # market = models.CharField(max_length=50)  # 시장 (예: 'NASDAQ')
+    year = models.CharField(max_length=4)  # 연도 (예: '2023', '2022')
+    quarter = models.CharField(max_length=3) # 분기 (예: 'Q1', 'Q2', 'Q3', 'Q4')
+    statement_type = models.CharField(max_length=10) # sj_nm, 재무제표 종류 (예: 재무상태표 또는 손익계산서)
+    account_name = models.CharField(max_length=20) # account_nm, 계정명 (예: 유동자산, 매출액 등)
+    amount = models.BigIntegerField()  # thstrm_amount, 금액
+
+    class Meta:
+        # 테이블 이름 지정 (기존 테이블과 매핑)
+        db_table = 'stock_financial'
+        # 복합 기본 키 설정
+        constraints = [
+            models.UniqueConstraint(fields=['code', 'year', 'quarter', 'statement_type', 'account_name'], name='uniqueFinancial_code_year_quarter')
+        ]
+        # 관리자 패널에서 보기 좋게 정렬
+        ordering = ['year', 'quarter']
+
+    def __str__(self):
+        return f"{self.code} ({self.year}, {self.quarter})"

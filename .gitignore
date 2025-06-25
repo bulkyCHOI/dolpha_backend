@@ -1,1 +1,11 @@
+# 계좌 정보 파일
 myStockInfo.yaml
+
+# 가상 환경
+venv/
+
+# Python 캐시 파일
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

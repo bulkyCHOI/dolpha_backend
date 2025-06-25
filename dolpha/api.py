@@ -5,13 +5,23 @@ from django.db.models import Max
 
 from . import stockCommon as Common
 from myweb.models import *  # Import the StockOHLCV model
+from .schema import *
 
 from typing import Dict
 import pandas as pd
 import numpy as np
-from datetime import datetime
-from typing import List, Dict, Optional
+from datetime import datetime, date
+from typing import List, Dict, Optional, Any
 from tqdm import tqdm
+
+from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font  # Add this import
+from io import BytesIO
+import json
+import pprint
+
+import OpenDartReader
 
 import traceback
 
@@ -23,33 +33,7 @@ def hello(request):
     return {"message": "Hello, Django Ninja!"}
 
 
-
-
-
-# # 오늘 날짜의 데이터만 가져오기
-# df_kospi = Common.GetStockList("KOSPI")
-# print(df_kospi.head())
-# print(len(df_kospi))
-
-# df_kospi = Common.GetOhlcv("KRX", "005930", limit=1, adj_ok="1")
-# print(df_kospi.head())
-# print(len(df_kospi))
-
-class FailedRecord(Schema):
-    index: int
-    code: str
-    error: str
-
-class StockDescriptionResponse(Schema):
-    result: str
-    count_total: int
-    count_created: int
-    count_updated: int
-    count_failed: int
-    failed_records: Optional[List[FailedRecord]] = None
-
-    
-@api.get("/stock_description", response={200: StockDescriptionResponse, 400: Dict, 500: Dict})
+@api.get("/get_stock_description", response={200: StockDescriptionResponse, 400: Dict, 500: Dict})
 def get_all_stock_description(request):
     """
     모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
@@ -174,14 +158,9 @@ def get_all_stock_description(request):
             "message": f"Failed to process stock data: {str(e)}"
         }
         
-class ErrorResponse(Schema):
-    error: str
 
-class SuccessResponse(Schema):
-    message: str
-    count_saved: int
     
-@api.get("/stock", response={200: SuccessResponse, 400: ErrorResponse, 404: ErrorResponse, 500: ErrorResponse})
+@api.get("/get_stock_data", response={200: SuccessResponse, 400: ErrorResponse, 404: ErrorResponse, 500: ErrorResponse})
 def get_stock_data(request, code: str=None, limit: int=1):
     """
     주식 코드에 해당하는 OHLCV 데이터를 데이터베이스에 저장합니다.
@@ -415,10 +394,10 @@ def update_stock_analysis(request, offset: int=0, limit: int=0):
         request: Ninja API 요청 객체.
         offset (int, optional): 처리할 데이터의 시작 위치. 기본값: 0.
         limit (int, optional): 처리할 거래일 수. 0이면 offset 거래일만 처리. 기본값: 0.
-        즉 offset ~ limit 범위의 거래일을 처리합니다.
-        0, 0: 오늘 거래일만 처리합니다.
-        0, 50: 오늘부터 50일 전까지의 거래일을 처리합니다.
-        50, 100: 50일 전부터 100일 전까지의 거래일을 처리합니다.
+        즉 offset ~ limit 범위의 거래일을 처리합니다.\n
+        0, 0: 오늘 거래일만 처리합니다.\n
+        0, 50: 오늘부터 50일 전까지의 거래일을 처리합니다.\n
+        50, 100: 50일 전부터 100일 전까지의 거래일을 처리합니다.\n
 
     Returns:
         dict: 처리 결과를 포함하는 응답.
@@ -590,3 +569,374 @@ def update_stock_analysis(request, offset: int=0, limit: int=0):
         "count_saved": total_saved,
         "dates_processed": f"{date_list[0]['date']}, Last date: {date_list[len(date_list)-1]['date']}"
     }
+
+@api.get("/find_stock_inMTT", response={200: SuccessResponseStockAnalysis, 404: ErrorResponse, 500: ErrorResponse})
+def find_stock_inMTT(request, date: str = None, format: str = "json"):
+    try:
+        # Validate format parameter
+        if format.lower() not in ["json", "excel"]:
+            return 400, ErrorResponse(status="error", message="Invalid format. Use 'json' or 'excel'")
+
+        # Convert date string to date object if provided
+        query_date = None
+        if date:
+            try:
+                query_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                return 400, ErrorResponse(status="error", message="Invalid date format. Use YYYY-MM-DD")
+
+        # Build query
+        queryset = StockAnalysis.objects.filter(is_minervini_trend=True).order_by('-rsRank')
+        
+        # If date is provided, filter by specific date
+        # If not, get the latest date
+        if query_date:
+            queryset = queryset.filter(date=query_date)
+        else:
+            latest_date = StockAnalysis.objects.latest('date').date
+            queryset = queryset.filter(date=latest_date)
+
+        # Check if any records exist
+        if not queryset.exists():
+            return 404, ErrorResponse(status="error", message="No stocks found matching Minervini Trend Template")
+
+        # Combine with Company data using select_related
+        results = []
+        for analysis in queryset.select_related('code'):
+            combined_data = {
+                # Company fields
+                'code': analysis.code.code,
+                'name': analysis.code.name,
+                'market': analysis.code.market,
+                'sector': analysis.code.sector,
+                'industry': analysis.code.industry,
+                # StockAnalysis fields
+                'date': str(analysis.date),
+                'ma50': analysis.ma50,
+                'ma150': analysis.ma150,
+                'ma200': analysis.ma200,
+                'rsScore': analysis.rsScore,
+                'rsScore1m': analysis.rsScore1m,
+                'rsScore3m': analysis.rsScore3m,
+                'rsScore6m': analysis.rsScore6m,
+                'rsScore12m': analysis.rsScore12m,
+                'rsRank': analysis.rsRank,
+                'rsRank1m': analysis.rsRank1m,
+                'rsRank3m': analysis.rsRank3m,
+                'rsRank6m': analysis.rsRank6m,
+                'rsRank12m': analysis.rsRank12m,
+                'max_52w': analysis.max_52w,
+                'min_52w': analysis.min_52w,
+                'max_52w_date': str(analysis.max_52w_date) if analysis.max_52w_date else None,
+                'min_52w_date': str(analysis.min_52w_date) if analysis.min_52w_date else None,
+                'is_minervini_trend': analysis.is_minervini_trend
+            }
+            results.append(combined_data)
+        # Handle Excel output
+        if format.lower() == "excel":
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Stock Analysis"
+
+            # Define headers
+            headers = [
+                'Code', 'Name', 'Market', 'Sector', 'Industry', 'Date',
+                'MA50', 'MA150', 'MA200', 'RS Score', 'RS Score 1M', 'RS Score 3M',
+                'RS Score 6M', 'RS Score 12M', 'RS Rank', 'RS Rank 1M', 'RS Rank 3M',
+                'RS Rank 6M', 'RS Rank 12M', '52W Max', '52W Min', '52W Max Date',
+                '52W Min Date', 'Minervini Trend'
+            ]
+            
+            # Write headers
+            for col_num, header in enumerate(headers, 1):
+                col_letter = get_column_letter(col_num)
+                ws[f"{col_letter}1"] = header
+                ws[f"{col_letter}1"].font = Font(bold=True)
+
+            # Write data
+            for row_num, data in enumerate(results, 2):
+                ws[f"A{row_num}"] = data['code']
+                ws[f"B{row_num}"] = data['name']
+                ws[f"C{row_num}"] = data['market']
+                ws[f"D{row_num}"] = data['sector']
+                ws[f"E{row_num}"] = data['industry']
+                ws[f"F{row_num}"] = data['date']
+                ws[f"G{row_num}"] = data['ma50']
+                ws[f"H{row_num}"] = data['ma150']
+                ws[f"I{row_num}"] = data['ma200']
+                ws[f"J{row_num}"] = data['rsScore']
+                ws[f"K{row_num}"] = data['rsScore1m']
+                ws[f"L{row_num}"] = data['rsScore3m']
+                ws[f"M{row_num}"] = data['rsScore6m']
+                ws[f"N{row_num}"] = data['rsScore12m']
+                ws[f"O{row_num}"] = data['rsRank']
+                ws[f"P{row_num}"] = data['rsRank1m']
+                ws[f"Q{row_num}"] = data['rsRank3m']
+                ws[f"R{row_num}"] = data['rsRank6m']
+                ws[f"S{row_num}"] = data['rsRank12m']
+                ws[f"T{row_num}"] = data['max_52w']
+                ws[f"U{row_num}"] = data['min_52w']
+                ws[f"V{row_num}"] = data['max_52w_date']
+                ws[f"W{row_num}"] = data['min_52w_date']
+                ws[f"X{row_num}"] = data['is_minervini_trend']
+
+            # Auto-adjust column widths
+            for col in ws.columns:
+                max_length = 0
+                column = col[0].column_letter
+                for cell in col:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = (max_length + 2)
+                ws.column_dimensions[column].width = adjusted_width
+
+            # Save to BytesIO
+            output = BytesIO()
+            wb.save(output)
+            output.seek(0)
+
+            # Return Excel file
+            filename = f"stock_analysis_{query_date or latest_date}.xlsx"
+            response = HttpResponse(
+                content=output.read(),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            return response
+        
+        return 200, SuccessResponseStockAnalysis(
+            status="success",
+            data=results
+        )
+
+    except Exception as e:
+        return 500, ErrorResponse(status="error", message=str(e))
+
+# @api.get("/get_stock_dartData", response={200: SuccessResponseStockDart, 404: ErrorResponse, 500: ErrorResponse})
+# def get_stock_dartData(request, code: str = None):
+#     """
+#     OpenDART에서 재무제표 데이터를 가져와 데이터베이스에 저장합니다.
+    
+#     Args:
+#         code (str): 종목코드 (예: '005930')
+        
+#     Returns:
+#         SuccessResponse: 성공 시 저장된 데이터
+#         ErrorResponse: 에러 발생 시 에러 메시지
+#     """
+#     try:
+#         dart = OpenDartReader("b6533c6c78ba430e7c63ef16db7bb893ae440d43")
+        
+#         # 보고서 코드 리스트
+#         reprt_list = ['11013', '11012', '11014', '11011']  # 1분기, 반기, 3분기, 사업보고서
+
+#         years = [2024, 2025]
+#         filtered_data = []
+        
+#         # code = "064350"
+#         code = "005930"
+        
+#         for year in years:
+#             for reprt in reprt_list:
+#                 try:
+#                     # 재무제표 데이터 조회
+#                     df = dart.finstate(code, year, reprt_code=reprt)
+                    
+#                     if df is None or df.empty:
+#                         print(f"No data found for {code}, year {year}, report {reprt}")
+#                         continue
+                    
+#                     # Add 'year' and 'quarter' columns
+#                     df['year'] = df['bsns_year']
+#                     def get_quarter(reprt_code):
+#                         mapping = {
+#                             '11011': '4Q',
+#                             '11012': '2Q',
+#                             '11013': '1Q',
+#                             '11014': '3Q'
+#                         }
+#                         return mapping.get(reprt_code, 'Unknown')
+#                     df['quarter'] = df['reprt_code'].apply(get_quarter)
+        
+#                     # Create pivot table
+#                     df_pivot = pd.pivot_table(
+#                         df,
+#                         values='thstrm_amount',
+#                         # index=['year', 'quarter'],
+#                         columns=['year', 'quarter', 'sj_nm', 'account_nm'],
+#                         aggfunc='first',
+#                         fill_value=0
+#                     )
+                    
+#                     # JSON으로 변환
+#                     result = json.loads(df_pivot.to_json(orient='records'))
+#                     filtered_data.extend(result)
+                    
+#                 except Exception as e:
+#                     print(f"Error fetching data for report {reprt}: {str(e)}")
+#                     continue  # 개별 보고서 에러는 무시하고 다음 보고서로 진행
+        
+#         if not filtered_data:
+#             return 404, {"error": f"No data available for {code} in {year}"}
+        
+#         # 성공 응답
+#         return {
+#             "status": "success",
+#             "data": filtered_data
+#         }
+    
+#     except Exception as e:
+#         traceback.print_exc()
+#         return 500, {"error": f"Failed to fetch DART data: {str(e)}"}
+    
+@api.get("/get_stock_dartData", response={200: SuccessResponse, 404: ErrorResponse, 500: ErrorResponse})
+def get_stock_dartData(request, code: str = "005930"):
+    """
+    OpenDART에서 재무제표 데이터를 가져와 4분기 값을 조정하고 피벗 테이블로 반환합니다.
+    
+    Args:
+        code (str): 종목코드 (예: '005930')
+        
+    Returns:
+        SuccessResponseStockDart: 성공 시 피벗 테이블 데이터
+        ErrorResponse: 에러 발생 시 에러 메시지
+    """
+    try:
+        # 종목코드가 없는 경우 에러 반환
+        if not code:
+            return 404, ErrorResponse(status="error", message="종목 코드를 입력해야 합니다.")
+
+        # OpenDART API 초기화
+        dart = OpenDartReader("b6533c6c78ba430e7c63ef16db7bb893ae440d43")
+        
+        # 보고서 코드 리스트: 1분기, 2분기, 3분기, 4분기(사업보고서)
+        reprt_list = ['11013', '11012', '11014', '11011']
+        # 현재 년도와 전년도로 설정
+        year = datetime.now().year
+        years = [year, year - 1]  # 현재 년도와 전년도
+        all_dfs = pd.DataFrame()
+        
+        codeModel = Company.objects.get(code=code)  # 종목코드로 Company 객체 조회
+        code = codeModel.code  # Company 객체에서 종목코드 추출
+
+        for year in years:
+            year_data = []
+            for reprt in reprt_list:
+                try:
+                    # 재무제표 데이터 조회 (연결재무제표)
+                    df = dart.finstate(code, year, reprt_code=reprt)
+                    
+                    if df is None or df.empty:
+                        print(f"{code}, {year}년, 보고서 {reprt}에 데이터가 없습니다.")
+                        continue
+                    
+                    if sum(df['fs_nm'] == '연결재무제표') > 0:
+                        df = df.loc[df['fs_nm'] == '연결재무제표']
+                    else:
+                        df = df.loc[df['fs_nm'] == '재무제표']
+                    
+                    # thstrm_amount의 쉼표 제거 및 정수 변환
+                    if 'thstrm_amount' in df.columns:
+                        df['thstrm_amount'] = df['thstrm_amount'].astype(str).str.replace(',', '').replace('-', '0').astype(int)
+                    else:
+                        print(f"{code}, {year}년, 보고서 {reprt}에 thstrm_amount 열이 없습니다.")
+                        continue
+
+                    # '년도'와 '분기' 필드 추가
+                    df['year'] = df['bsns_year'].astype(str)
+                    def get_quarter(reprt_code):
+                        mapping = {
+                            '11011': '4Q',  # 사업보고서
+                            '11012': '2Q',
+                            '11013': '1Q',
+                            '11014': '3Q'
+                        }
+                        return mapping.get(reprt_code, 'Unknown')
+                    df['quarter'] = df['reprt_code'].apply(get_quarter)
+
+                    # print(df[['year', 'quarter', 'fs_nm', 'sj_nm', 'account_nm', 'thstrm_amount']])
+                    year_data.append(df)
+                
+                except Exception as e:
+                    traceback.print_exc()
+                    print(f"보고서 {reprt} 데이터 조회 중 오류: {str(e)}")
+                    continue  # 개별 보고서 오류는 무시하고 다음으로 진행
+
+            if not year_data:
+                continue
+
+            # 연도별 모든 분기 데이터를 하나로 합침
+            df_year = pd.concat(year_data, ignore_index=True)
+
+            # 4분기 값 조정: 1Q+2Q+3Q 합계를 4Q에서 뺌
+            if '4Q' in df_year['quarter'].values:
+                # 1Q, 2Q, 3Q 데이터 합계 계산
+                q123 = df_year[df_year['quarter'].isin(['1Q', '2Q', '3Q'])][['sj_nm', 'account_nm', 'thstrm_amount']]
+                q123_sum = q123.groupby(['sj_nm', 'account_nm'])['thstrm_amount'].sum().reset_index()
+                q123_sum.rename(columns={'thstrm_amount': 'q123_total'}, inplace=True)
+                # print(q123_sum[['sj_nm', 'account_nm', 'q123_total']])
+
+                # 4Q 데이터와 합계 병합
+                q4 = df_year[df_year['quarter'] == '4Q'][['sj_nm', 'account_nm', 'thstrm_amount']]
+                q4 = q4.merge(q123_sum, on=['sj_nm', 'account_nm'], how='left')
+                q4['q123_total'] = q4['q123_total'].fillna(0).astype(int)
+                
+                # 재무상태표와 손익계산서 분리 > 1Q+2Q+3Q 합산 데이터가 아님 >> 그대로 유지
+                q4_jm = q4.loc[q4['sj_nm'] == '재무상태표', ['sj_nm', 'account_nm', 'thstrm_amount']]
+                
+                # 손익계산서에서 1Q+2Q+3Q 합계를 뺌
+                q4_si = q4.loc[q4['sj_nm'] == '손익계산서', ['sj_nm', 'account_nm', 'thstrm_amount', 'q123_total']]
+                q4_si['thstrm_amount'] = q4_si['thstrm_amount'] - q4_si['q123_total']
+                q4_si = q4_si.drop(columns=['q123_total'])
+                
+                # 재무상태표와 손익계산서 데이터를 합침
+                q4_merged = pd.concat([q4_jm, q4_si], ignore_index=True)
+                q4_merged['year'] = str(year)  # 연도 설정
+                q4_merged['quarter'] = '4Q'  # 4Q로 분기 설정
+
+                # 'year', 'quarter', 'sj_nm', 'account_nm', 'thstrm_amount' 필드만 남기기
+                df_year = df_year[['year', 'quarter', 'sj_nm', 'account_nm', 'thstrm_amount']]
+                # 4Q 데이터는 지우고
+                df_year = df_year[df_year['quarter'] != '4Q']  # 4Q 데이터 제거
+                # 계산된 4Q 데이터를 업데이트
+                df_year = pd.concat([df_year, q4_merged], ignore_index=True)
+            else:
+                df_year = df_year[['year', 'quarter', 'sj_nm', 'account_nm', 'thstrm_amount']]
+                
+            # 데이터 합치기
+            all_dfs = pd.concat([all_dfs, df_year], ignore_index=True)
+            # print(all_dfs)
+            
+        # 모든 연도 데이터 합침
+        # df = pd.concat(all_dfs, ignore_index=True)
+        print(all_dfs)
+
+        # StockFinancialStatement 모델에 저장
+        for _, row in all_dfs.iterrows():
+            try:
+                # 이미 존재하는 데이터는 업데이트
+                StockFinancialStatement.objects.update_or_create(
+                    code=codeModel,
+                    year=row['year'],
+                    quarter=row['quarter'],
+                    statement_type=row['sj_nm'],
+                    account_name=row['account_nm'],
+                    amount=row['thstrm_amount']
+                )
+            except Exception as e:
+                traceback.print_exc()
+                print(f"데이터 저장 오류: {str(e)}")
+                
+        # 성공 응답
+        return {
+            "message": "success",
+            "count_saved": 0
+        }
+    
+    except Exception as e:
+        traceback.print_exc()
+        return 500, ErrorResponse(status="error", message=f"DART 데이터 조회 실패: {str(e)}")
+    
