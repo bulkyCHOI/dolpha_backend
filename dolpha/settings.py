@@ -11,6 +11,8 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+import platform
+import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -90,6 +92,26 @@ DATABASES = {
         },
     }
 }
+
+# 환경 변수 또는 OS에 따라 DB 설정 변경
+if platform.system() in ['Windows', 'Darwin']:  # Windows 또는 macOS
+    DATABASES['default'] = {
+        'ENGINE': 'django.db.backends.mysql',  # 또는 'django.db.backends.mysql' (MariaDB와 호환)
+        'NAME': 'dolpha',  # 데이터베이스 이름
+        'USER': 'root',  # 또는 'root'
+        'PASSWORD': 'qwe123!@#',  # 사용자 비밀번호
+        'HOST': 'localhost',
+        'PORT': '3306',  # MariaDB 기본 포트
+    }
+else:  # Ubuntu (Docker 환경)
+    DATABASES['default'] = {
+        'ENGINE': 'django.db.backends.mysql',  # 또는 'django.db.backends.mysql'
+        'NAME': 'dolpha_db',
+        'USER': 'dolpha',
+        'PASSWORD': 'dolpha123',
+        'HOST': 'mariadb',
+        'PORT': 3306,
+    }
 
 
 # Password validation

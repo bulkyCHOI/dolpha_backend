@@ -1,11 +1,11 @@
-from ninja import NinjaAPI, Router, Schema
+from ninja import NinjaAPI, Router
 from django.db import transaction
 from django.http import HttpResponse
 from django.db.models import Max
 
 from . import stockCommon as Common
 from myweb.models import *  # Import the StockOHLCV model
-from .schema import *
+from .schemas import *
 
 from typing import Dict
 import pandas as pd
