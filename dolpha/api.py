@@ -33,7 +33,7 @@ def hello(request):
     return {"message": "Hello, Django Ninja!"}
 
 
-@api.postpostpostpostpostpostpostpost("/get_stock_description", response={200: StockDescriptionResponse, 400: Dict, 500: Dict})
+@api.post("/get_stock_description", response={200: StockDescriptionResponse, 400: Dict, 500: Dict})
 def get_all_stock_description(request):
     """
     모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
