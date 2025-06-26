@@ -33,7 +33,7 @@ def hello(request):
     return {"message": "Hello, Django Ninja!"}
 
 
-@api.get("/get_stock_description", response={200: StockDescriptionResponse, 400: Dict, 500: Dict})
+@api.postpostpostpostpostpostpostpost("/get_stock_description", response={200: StockDescriptionResponse, 400: Dict, 500: Dict})
 def get_all_stock_description(request):
     """
     모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
@@ -163,7 +163,7 @@ def get_all_stock_description(request):
         
 
     
-@api.get("/get_stock_data", response={200: SuccessResponse, 400: ErrorResponse, 404: ErrorResponse, 500: ErrorResponse})
+@api.post("/get_stock_data", response={200: SuccessResponse, 400: ErrorResponse, 404: ErrorResponse, 500: ErrorResponse})
 def get_stock_data(request, code: str=None, limit: int=1):
     """
     주식 코드에 해당하는 OHLCV 데이터를 데이터베이스에 저장합니다.
@@ -400,7 +400,7 @@ def update_stock_analysis(request, offset: int=0, limit: int=0):
         즉 offset ~ limit 범위의 거래일을 처리합니다.\n
         0, 0: 오늘 거래일만 처리합니다.\n
         0, 50: 오늘부터 50일 전까지의 거래일을 처리합니다.\n
-        50, 100: 50일 전부터 100일 전까지의 거래일을 처리합니다.\n
+        50, 100: 50일 전부터 150(50+100)일 전까지의 거래일을 처리합니다.\n
 
     Returns:
         dict: 처리 결과를 포함하는 응답.
@@ -796,7 +796,7 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
 #         traceback.print_exc()
 #         return 500, {"error": f"Failed to fetch DART data: {str(e)}"}
     
-@api.get("/get_stock_dartData", response={200: SuccessResponse, 404: ErrorResponse, 500: ErrorResponse})
+@api.post("/get_stock_dartData", response={200: SuccessResponse, 404: ErrorResponse, 500: ErrorResponse})
 def get_stock_dartData(request, code: str = None):
     """
     OpenDART에서 재무제표 데이터를 가져와 4분기 값을 조정하고 피벗 테이블로 반환합니다.
