@@ -5,6 +5,7 @@ myStockInfo.yaml
 venv/
 
 # Python 캐시 파일
+dolpha/__pycache__/
 __pycache__/
 *.pyc
 *.pyo

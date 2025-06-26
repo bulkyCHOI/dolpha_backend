@@ -90,6 +90,9 @@ def get_all_stock_description(request):
                 # if not isinstance(row['homepage'], str) or not row['homepage'].startswith('http'):
                 #     row['homepage'] = 'https://example.com'  # 기본값
 
+                # if row['market'] in ['KONEX']:
+                #     continue  # KONEX 시장은 제외
+                
                 company_data = {
                     'code': str(row['code']),
                     'name': str(row['name']),
@@ -630,6 +633,7 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 'max_52w_date': str(analysis.max_52w_date) if analysis.max_52w_date else None,
                 'min_52w_date': str(analysis.min_52w_date) if analysis.min_52w_date else None,
                 'is_minervini_trend': analysis.is_minervini_trend
+                # StockFinancialStatement fields 
             }
             results.append(combined_data)
         # Handle Excel output
@@ -793,7 +797,7 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
 #         return 500, {"error": f"Failed to fetch DART data: {str(e)}"}
     
 @api.get("/get_stock_dartData", response={200: SuccessResponse, 404: ErrorResponse, 500: ErrorResponse})
-def get_stock_dartData(request, code: str = "005930"):
+def get_stock_dartData(request, code: str = None):
     """
     OpenDART에서 재무제표 데이터를 가져와 4분기 값을 조정하고 피벗 테이블로 반환합니다.
     
@@ -805,131 +809,145 @@ def get_stock_dartData(request, code: str = "005930"):
         ErrorResponse: 에러 발생 시 에러 메시지
     """
     try:
-        # 종목코드가 없는 경우 에러 반환
-        if not code:
-            return 404, ErrorResponse(status="error", message="종목 코드를 입력해야 합니다.")
-
+        companies = []
+        
         # OpenDART API 초기화
         dart = OpenDartReader("b6533c6c78ba430e7c63ef16db7bb893ae440d43")
+    
+        if code is not None:
+            # code에 맞는 회사의 OHLCV 데이터를 가져옴
+            try:
+                company = Company.objects.get(code=code)
+                companies = [company]  # 단일 회사 객체를 리스트로 감싸서 처리
+            except Company.DoesNotExist:
+                return 404, {"error": f"No company found with code: {code}"}
+        else:
+            # code가 주어지지 않은 경우 모든 회사의 OHLCV 데이터를 가져옴
+            companies = Company.objects.all()
+            
+        print(f"Total companies: {len(companies)}")
         
-        # 보고서 코드 리스트: 1분기, 2분기, 3분기, 4분기(사업보고서)
-        reprt_list = ['11013', '11012', '11014', '11011']
-        # 현재 년도와 전년도로 설정
-        year = datetime.now().year
-        years = [year, year - 1]  # 현재 년도와 전년도
-        all_dfs = pd.DataFrame()
-        
-        codeModel = Company.objects.get(code=code)  # 종목코드로 Company 객체 조회
-        code = codeModel.code  # Company 객체에서 종목코드 추출
+        if len(companies) == 0:
+            return 404, {"error": "No companies found in the database."}
 
-        for year in years:
-            year_data = []
-            for reprt in reprt_list:
-                try:
-                    # 재무제표 데이터 조회 (연결재무제표)
-                    df = dart.finstate(code, year, reprt_code=reprt)
-                    
-                    if df is None or df.empty:
-                        print(f"{code}, {year}년, 보고서 {reprt}에 데이터가 없습니다.")
-                        continue
-                    
-                    if sum(df['fs_nm'] == '연결재무제표') > 0:
-                        df = df.loc[df['fs_nm'] == '연결재무제표']
-                    else:
-                        df = df.loc[df['fs_nm'] == '재무제표']
-                    
-                    # thstrm_amount의 쉼표 제거 및 정수 변환
-                    if 'thstrm_amount' in df.columns:
-                        df['thstrm_amount'] = df['thstrm_amount'].astype(str).str.replace(',', '').replace('-', '0').astype(int)
-                    else:
-                        print(f"{code}, {year}년, 보고서 {reprt}에 thstrm_amount 열이 없습니다.")
-                        continue
+        for company in tqdm(companies, desc="Processing companies..."):
+            # 보고서 코드 리스트: 1분기, 2분기, 3분기, 4분기(사업보고서)
+            reprt_list = ['11013', '11012', '11014', '11011']
+            # 현재 년도와 전년도로 설정
+            year = datetime.now().year
+            years = [year, year - 1]  # 현재 년도와 전년도
+            all_dfs = pd.DataFrame()
+            
+            code = company.code  # Company 객체에서 종목코드 추출
 
-                    # '년도'와 '분기' 필드 추가
-                    df['year'] = df['bsns_year'].astype(str)
-                    def get_quarter(reprt_code):
-                        mapping = {
-                            '11011': '4Q',  # 사업보고서
-                            '11012': '2Q',
-                            '11013': '1Q',
-                            '11014': '3Q'
-                        }
-                        return mapping.get(reprt_code, 'Unknown')
-                    df['quarter'] = df['reprt_code'].apply(get_quarter)
+            for year in years:
+                year_data = []
+                for reprt in reprt_list:
+                    try:
+                        # 재무제표 데이터 조회 (연결재무제표)
+                        df = dart.finstate(code, year, reprt_code=reprt)
+                        
+                        if df is None or df.empty:
+                            # print(f"{code}, {year}년, 보고서 {reprt}에 데이터가 없습니다.")
+                            continue
+                        
+                        if sum(df['fs_nm'] == '연결재무제표') > 0:
+                            df = df.loc[df['fs_nm'] == '연결재무제표']
+                        else:
+                            df = df.loc[df['fs_nm'] == '재무제표']
+                        
+                        # thstrm_amount의 쉼표 제거 및 정수 변환
+                        if 'thstrm_amount' in df.columns:
+                            df['thstrm_amount'] = df['thstrm_amount'].astype(str).str.replace(',', '').replace('-', '0').astype(int)
+                        else:
+                            # print(f"{code}, {year}년, 보고서 {reprt}에 thstrm_amount 열이 없습니다.")
+                            continue
 
-                    # print(df[['year', 'quarter', 'fs_nm', 'sj_nm', 'account_nm', 'thstrm_amount']])
-                    year_data.append(df)
+                        # '년도'와 '분기' 필드 추가
+                        df['year'] = df['bsns_year'].astype(str)
+                        def get_quarter(reprt_code):
+                            mapping = {
+                                '11011': '4Q',  # 사업보고서
+                                '11012': '2Q',
+                                '11013': '1Q',
+                                '11014': '3Q'
+                            }
+                            return mapping.get(reprt_code, 'Unknown')
+                        df['quarter'] = df['reprt_code'].apply(get_quarter)
+
+                        # print(df[['year', 'quarter', 'fs_nm', 'sj_nm', 'account_nm', 'thstrm_amount']])
+                        year_data.append(df)
+                    
+                    except Exception as e:
+                        traceback.print_exc()
+                        # print(f"보고서 {reprt} 데이터 조회 중 오류: {str(e)}")
+                        continue  # 개별 보고서 오류는 무시하고 다음으로 진행
+
+                if not year_data:
+                    continue
+
+                # 연도별 모든 분기 데이터를 하나로 합침
+                df_year = pd.concat(year_data, ignore_index=True)
+
+                # 4분기 값 조정: 1Q+2Q+3Q 합계를 4Q에서 뺌
+                if '4Q' in df_year['quarter'].values:
+                    # 1Q, 2Q, 3Q 데이터 합계 계산
+                    q123 = df_year[df_year['quarter'].isin(['1Q', '2Q', '3Q'])][['sj_nm', 'account_nm', 'thstrm_amount']]
+                    q123_sum = q123.groupby(['sj_nm', 'account_nm'])['thstrm_amount'].sum().reset_index()
+                    q123_sum.rename(columns={'thstrm_amount': 'q123_total'}, inplace=True)
+                    # print(q123_sum[['sj_nm', 'account_nm', 'q123_total']])
+
+                    # 4Q 데이터와 합계 병합
+                    q4 = df_year[df_year['quarter'] == '4Q'][['sj_nm', 'account_nm', 'thstrm_amount']]
+                    q4 = q4.merge(q123_sum, on=['sj_nm', 'account_nm'], how='left')
+                    q4['q123_total'] = q4['q123_total'].fillna(0).astype(int)
+                    
+                    # 재무상태표와 손익계산서 분리 > 1Q+2Q+3Q 합산 데이터가 아님 >> 그대로 유지
+                    q4_jm = q4.loc[q4['sj_nm'] == '재무상태표', ['sj_nm', 'account_nm', 'thstrm_amount']]
+                    
+                    # 손익계산서에서 1Q+2Q+3Q 합계를 뺌
+                    q4_si = q4.loc[q4['sj_nm'] == '손익계산서', ['sj_nm', 'account_nm', 'thstrm_amount', 'q123_total']]
+                    q4_si['thstrm_amount'] = q4_si['thstrm_amount'] - q4_si['q123_total']
+                    q4_si = q4_si.drop(columns=['q123_total'])
+                    
+                    # 재무상태표와 손익계산서 데이터를 합침
+                    q4_merged = pd.concat([q4_jm, q4_si], ignore_index=True)
+                    q4_merged['year'] = str(year)  # 연도 설정
+                    q4_merged['quarter'] = '4Q'  # 4Q로 분기 설정
+
+                    # 'year', 'quarter', 'sj_nm', 'account_nm', 'thstrm_amount' 필드만 남기기
+                    df_year = df_year[['year', 'quarter', 'sj_nm', 'account_nm', 'thstrm_amount']]
+                    # 4Q 데이터는 지우고
+                    df_year = df_year[df_year['quarter'] != '4Q']  # 4Q 데이터 제거
+                    # 계산된 4Q 데이터를 업데이트
+                    df_year = pd.concat([df_year, q4_merged], ignore_index=True)
+                else:
+                    df_year = df_year[['year', 'quarter', 'sj_nm', 'account_nm', 'thstrm_amount']]
+                    
+                # 데이터 합치기
+                all_dfs = pd.concat([all_dfs, df_year], ignore_index=True)
+                # print(all_dfs)
                 
+            # 모든 연도 데이터 합침
+            # df = pd.concat(all_dfs, ignore_index=True)
+            # print(all_dfs)
+
+            # StockFinancialStatement 모델에 저장
+            for _, row in all_dfs.iterrows():
+                try:
+                    # 이미 존재하는 데이터는 업데이트
+                    StockFinancialStatement.objects.update_or_create(
+                        code=company,
+                        year=row['year'],
+                        quarter=row['quarter'],
+                        statement_type=row['sj_nm'],
+                        account_name=row['account_nm'],
+                        amount=row['thstrm_amount']
+                    )
                 except Exception as e:
                     traceback.print_exc()
-                    print(f"보고서 {reprt} 데이터 조회 중 오류: {str(e)}")
-                    continue  # 개별 보고서 오류는 무시하고 다음으로 진행
-
-            if not year_data:
-                continue
-
-            # 연도별 모든 분기 데이터를 하나로 합침
-            df_year = pd.concat(year_data, ignore_index=True)
-
-            # 4분기 값 조정: 1Q+2Q+3Q 합계를 4Q에서 뺌
-            if '4Q' in df_year['quarter'].values:
-                # 1Q, 2Q, 3Q 데이터 합계 계산
-                q123 = df_year[df_year['quarter'].isin(['1Q', '2Q', '3Q'])][['sj_nm', 'account_nm', 'thstrm_amount']]
-                q123_sum = q123.groupby(['sj_nm', 'account_nm'])['thstrm_amount'].sum().reset_index()
-                q123_sum.rename(columns={'thstrm_amount': 'q123_total'}, inplace=True)
-                # print(q123_sum[['sj_nm', 'account_nm', 'q123_total']])
-
-                # 4Q 데이터와 합계 병합
-                q4 = df_year[df_year['quarter'] == '4Q'][['sj_nm', 'account_nm', 'thstrm_amount']]
-                q4 = q4.merge(q123_sum, on=['sj_nm', 'account_nm'], how='left')
-                q4['q123_total'] = q4['q123_total'].fillna(0).astype(int)
-                
-                # 재무상태표와 손익계산서 분리 > 1Q+2Q+3Q 합산 데이터가 아님 >> 그대로 유지
-                q4_jm = q4.loc[q4['sj_nm'] == '재무상태표', ['sj_nm', 'account_nm', 'thstrm_amount']]
-                
-                # 손익계산서에서 1Q+2Q+3Q 합계를 뺌
-                q4_si = q4.loc[q4['sj_nm'] == '손익계산서', ['sj_nm', 'account_nm', 'thstrm_amount', 'q123_total']]
-                q4_si['thstrm_amount'] = q4_si['thstrm_amount'] - q4_si['q123_total']
-                q4_si = q4_si.drop(columns=['q123_total'])
-                
-                # 재무상태표와 손익계산서 데이터를 합침
-                q4_merged = pd.concat([q4_jm, q4_si], ignore_index=True)
-                q4_merged['year'] = str(year)  # 연도 설정
-                q4_merged['quarter'] = '4Q'  # 4Q로 분기 설정
-
-                # 'year', 'quarter', 'sj_nm', 'account_nm', 'thstrm_amount' 필드만 남기기
-                df_year = df_year[['year', 'quarter', 'sj_nm', 'account_nm', 'thstrm_amount']]
-                # 4Q 데이터는 지우고
-                df_year = df_year[df_year['quarter'] != '4Q']  # 4Q 데이터 제거
-                # 계산된 4Q 데이터를 업데이트
-                df_year = pd.concat([df_year, q4_merged], ignore_index=True)
-            else:
-                df_year = df_year[['year', 'quarter', 'sj_nm', 'account_nm', 'thstrm_amount']]
-                
-            # 데이터 합치기
-            all_dfs = pd.concat([all_dfs, df_year], ignore_index=True)
-            # print(all_dfs)
-            
-        # 모든 연도 데이터 합침
-        # df = pd.concat(all_dfs, ignore_index=True)
-        print(all_dfs)
-
-        # StockFinancialStatement 모델에 저장
-        for _, row in all_dfs.iterrows():
-            try:
-                # 이미 존재하는 데이터는 업데이트
-                StockFinancialStatement.objects.update_or_create(
-                    code=codeModel,
-                    year=row['year'],
-                    quarter=row['quarter'],
-                    statement_type=row['sj_nm'],
-                    account_name=row['account_nm'],
-                    amount=row['thstrm_amount']
-                )
-            except Exception as e:
-                traceback.print_exc()
-                print(f"데이터 저장 오류: {str(e)}")
-                
+                    print(f"데이터 저장 오류: {str(e)}")
+                    
         # 성공 응답
         return {
             "message": "success",
