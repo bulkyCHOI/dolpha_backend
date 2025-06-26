@@ -10,3 +10,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+#dart
+docs_cache/
