@@ -11,6 +11,7 @@ charset-normalizer==3.4.2
 colorama==0.4.6
 curl_cffi==0.11.3
 dart-fss==0.4.13
+setuptools>=61.0
 Django==5.2.3
 django-ninja==1.4.3
 et_xmlfile==2.0.0
