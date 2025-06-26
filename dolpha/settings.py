@@ -82,14 +82,20 @@ DATABASES = {
     # }
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'dolpha',  # 데이터베이스 이름
-        'USER': 'root',  # 또는 'root'
-        'PASSWORD': 'qwe123!@#',  # 사용자 비밀번호
+        # 'NAME': 'dolpha',  # 데이터베이스 이름
+        # 'USER': 'root',  # 또는 'root'
+        # 'PASSWORD': 'qwe123!@#',  # 사용자 비밀번호
+        # 'HOST': 'localhost',
+        # 'PORT': '3306',  # MariaDB 기본 포트
+        # 'OPTIONS': {
+        #     'charset': 'utf8mb4',
+        # },
+        
+        'NAME': 'dolpha_db',  # 데이터베이스 이름
+        'USER': 'dolpha',  # 또는 'root'
+        'PASSWORD': 'dolpha123',  # 사용자 비밀번호
         'HOST': 'localhost',
         'PORT': '3306',  # MariaDB 기본 포트
-        'OPTIONS': {
-            'charset': 'utf8mb4',
-        },
     }
 }
 
@@ -97,9 +103,9 @@ DATABASES = {
 if platform.system() in ['Windows', 'Darwin']:  # Windows 또는 macOS
     DATABASES['default'] = {
         'ENGINE': 'django.db.backends.mysql',  # 또는 'django.db.backends.mysql' (MariaDB와 호환)
-        'NAME': 'dolpha',  # 데이터베이스 이름
-        'USER': 'root',  # 또는 'root'
-        'PASSWORD': 'qwe123!@#',  # 사용자 비밀번호
+        'NAME': 'dolpha_db',  # 데이터베이스 이름
+        'USER': 'dolpha',  # 또는 'root'
+        'PASSWORD': 'dolpha123',  # 사용자 비밀번호
         'HOST': 'localhost',
         'PORT': '3306',  # MariaDB 기본 포트
     }
