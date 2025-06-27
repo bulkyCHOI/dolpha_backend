@@ -747,7 +747,7 @@ def get_stock_dartData(request, code: str = None):
 
 def growth_rate(current, previous):
     if abs(previous) == 0:
-        return "N/A"
+        return 0.0
     return ((current - previous) / abs(previous)) * 100
 # 미너비니 트렌드 템플릿에 해당하는 종목을 조회합니다.
 @api.get("/find_stock_inMTT", response={200: SuccessResponseStockAnalysis, 404: ErrorResponse, 500: ErrorResponse})
@@ -799,8 +799,8 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
             finance = StockFinancialStatement.objects.filter(code=analysis.code).order_by('-year', '-quarter')
             매출 = finance.filter(account_name="매출액").values_list('amount', flat=True).distinct()
             영업이익 = finance.filter(account_name="영업이익").values_list('amount', flat=True).distinct()
-            매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else "N/A"
-            영업이익증가율 = growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else "N/A"
+            매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else 0.0
+            영업이익증가율 = growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
 
 
             combined_data = {
@@ -915,6 +915,7 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
         )
 
     except Exception as e:
+        traceback.print_exc()
         return 500, ErrorResponse(status="error", message=str(e))
     
 
