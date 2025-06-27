@@ -1,25 +1,37 @@
 from ninja import Schema
 from typing import List, Dict, Optional, Any
 
+# =====================================================================
+# response를 담는 스키마
+
 class FailedRecord(Schema):
     index: int
     code: str
     error: str
 
 class StockDescriptionResponse(Schema):
-    result: str
+    status: str
     count_total: int
     count_created: int
     count_updated: int
     count_failed: int
     failed_records: Optional[List[FailedRecord]] = None
     
-class ErrorResponse(Schema):
-    error: str
-
 class SuccessResponse(Schema):
+    status: str
     message: str
     count_saved: int
+
+class ErrorResponse(Schema):
+    status: str
+    message: str
+    
+class SuccessResponseStockDart(Schema):
+    status: str
+    data: List[Dict[str, Any]]  # JSON 형태를 표현
+
+# =====================================================================
+# 데이터를 담는 스키마
 
 class CompanySchema(Schema):
     code: str
@@ -57,12 +69,5 @@ class SuccessResponseStockAnalysis(Schema):
     status: str
     data: List[CombinedStockAnalysisSchema]
 
-class ErrorResponse(Schema):
-    status: str
-    message: str
-    
-class SuccessResponseStockDart(Schema):
-    status: str
-    data: List[Dict[str, Any]]  # JSON 형태를 표현
-    
+
 
