@@ -744,6 +744,10 @@ def get_stock_dartData(request, code: str = None):
         traceback.print_exc()
         return 500, ErrorResponse(status="error", message=f"DART 데이터 조회 실패: {str(e)}")
 
+def growth_rate(current, previous):
+    if abs(previous) == 0:
+        return "N/A"
+    return ((current - previous) / abs(previous)) * 100
 # 미너비니 트렌드 템플릿에 해당하는 종목을 조회합니다.
 @api.get("/find_stock_inMTT", response={200: SuccessResponseStockAnalysis, 404: ErrorResponse, 500: ErrorResponse})
 def find_stock_inMTT(request, date: str = None, format: str = "json"):
@@ -794,6 +798,9 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
             finance = StockFinancialStatement.objects.filter(code=analysis.code).order_by('-year', '-quarter')
             매출 = finance.filter(account_name="매출액").values_list('amount', flat=True).distinct()
             영업이익 = finance.filter(account_name="영업이익").values_list('amount', flat=True).distinct()
+            매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else "N/A"
+            영업이익증가율 = growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else "N/A"
+
 
             combined_data = {
                 # Company fields
@@ -808,24 +815,22 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 'ma150': analysis.ma150,
                 'ma200': analysis.ma200,
                 'rsScore': analysis.rsScore,
-                'rsScore1m': analysis.rsScore1m,
-                'rsScore3m': analysis.rsScore3m,
-                'rsScore6m': analysis.rsScore6m,
-                'rsScore12m': analysis.rsScore12m,
+                # 'rsScore1m': analysis.rsScore1m,
+                # 'rsScore3m': analysis.rsScore3m,
+                # 'rsScore6m': analysis.rsScore6m,
+                # 'rsScore12m': analysis.rsScore12m,
                 'rsRank': analysis.rsRank,
-                'rsRank1m': analysis.rsRank1m,
-                'rsRank3m': analysis.rsRank3m,
-                'rsRank6m': analysis.rsRank6m,
-                'rsRank12m': analysis.rsRank12m,
+                # 'rsRank1m': analysis.rsRank1m,
+                # 'rsRank3m': analysis.rsRank3m,
+                # 'rsRank6m': analysis.rsRank6m,
+                # 'rsRank12m': analysis.rsRank12m,
                 'max_52w': analysis.max_52w,
                 'min_52w': analysis.min_52w,
                 'max_52w_date': str(analysis.max_52w_date) if analysis.max_52w_date else None,
                 'min_52w_date': str(analysis.min_52w_date) if analysis.min_52w_date else None,
                 'is_minervini_trend': analysis.is_minervini_trend,
-                '금분기_매출': 매출[0] if len(매출) > 0 else 0,
-                '전분기_매출': 매출[1] if len(매출) > 1 else 0,
-                '금분기_영업이익': 영업이익[0] if len(영업이익) > 0 else 0,
-                '전분기_영업이익': 영업이익[1] if len(영업이익) > 1 else 0,
+                '매출증가율': 매출증가율,
+                '영업이익증가율': 영업이익증가율,
                 # StockFinancialStatement fields 
             }
             results.append(combined_data)
@@ -840,10 +845,12 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
             # Define headers
             headers = [
                 'Code', 'Name', 'Market', 'Sector', 'Industry', 'Date',
-                'MA50', 'MA150', 'MA200', 'RS Score', 'RS Score 1M', 'RS Score 3M',
-                'RS Score 6M', 'RS Score 12M', 'RS Rank', 'RS Rank 1M', 'RS Rank 3M',
-                'RS Rank 6M', 'RS Rank 12M', '52W Max', '52W Min', '52W Max Date',
-                '52W Min Date', 'Minervini Trend', '금분기_매출', '전분기_매출', '금분기_영업이익', '전분기_영업이익'
+                'MA50', 'MA150', 'MA200', 'RS Score',
+                # 'RS Score 1M', 'RS Score 3M', 'RS Score 6M', 'RS Score 12M', 
+                'RS Rank', 
+                # 'RS Rank 1M', 'RS Rank 3M', 'RS Rank 6M', 'RS Rank 12M', 
+                '52W Max', '52W Min', '52W Max Date', '52W Min Date', 
+                'Minervini Trend', '매출증가율', '영업이익증가율'
             ]
             
             # Write headers
@@ -864,25 +871,15 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 ws[f"H{row_num}"] = data['ma150']
                 ws[f"I{row_num}"] = data['ma200']
                 ws[f"J{row_num}"] = data['rsScore']
-                ws[f"K{row_num}"] = data['rsScore1m']
-                ws[f"L{row_num}"] = data['rsScore3m']
-                ws[f"M{row_num}"] = data['rsScore6m']
-                ws[f"N{row_num}"] = data['rsScore12m']
-                ws[f"O{row_num}"] = data['rsRank']
-                ws[f"P{row_num}"] = data['rsRank1m']
-                ws[f"Q{row_num}"] = data['rsRank3m']
-                ws[f"R{row_num}"] = data['rsRank6m']
-                ws[f"S{row_num}"] = data['rsRank12m']
-                ws[f"T{row_num}"] = data['max_52w']
-                ws[f"U{row_num}"] = data['min_52w']
-                ws[f"V{row_num}"] = data['max_52w_date']
-                ws[f"W{row_num}"] = data['min_52w_date']
-                ws[f"X{row_num}"] = data['is_minervini_trend']
+                ws[f"K{row_num}"] = data['rsRank']
+                ws[f"L{row_num}"] = data['max_52w']
+                ws[f"M{row_num}"] = data['min_52w']
+                ws[f"N{row_num}"] = data['max_52w_date']
+                ws[f"O{row_num}"] = data['min_52w_date']
+                ws[f"P{row_num}"] = data['is_minervini_trend']
                 # '금분기_매출', '전분기_매출', '금분기_영업이익', '전분기_영업이익'
-                ws[f"Y{row_num}"] = data['금분기_매출']
-                ws[f"Z{row_num}"] = data['전분기_매출']
-                ws[f"AA{row_num}"] = data['금분기_영업이익']
-                ws[f"AB{row_num}"] = data['전분기_영업이익']
+                ws[f"Q{row_num}"] = data['매출증가율']
+                ws[f"R{row_num}"] = data['영업이익증가율']
 
             # Auto-adjust column widths
             for col in ws.columns:

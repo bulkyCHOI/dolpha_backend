@@ -48,15 +48,15 @@ class StockAnalysisSchema(Schema):
     ma150: float
     ma200: float
     rsScore: float
-    rsScore1m: float
-    rsScore3m: float
-    rsScore6m: float
-    rsScore12m: float
+    # rsScore1m: float
+    # rsScore3m: float
+    # rsScore6m: float
+    # rsScore12m: float
     rsRank: float
-    rsRank1m: float
-    rsRank3m: float
-    rsRank6m: float
-    rsRank12m: float
+    # rsRank1m: float
+    # rsRank3m: float
+    # rsRank6m: float
+    # rsRank12m: float
     max_52w: float
     min_52w: float
     max_52w_date: str = None
@@ -64,11 +64,8 @@ class StockAnalysisSchema(Schema):
     is_minervini_trend: bool
 
 class FinancialDataSchema(Schema):
-    # '금분기_매출', '전분기_매출', '금분기_영업이익', '전분기_영업이익'
-    금분기_매출: float
-    전분기_매출: float
-    금분기_영업이익: float 
-    전분기_영업이익: float    
+    매출증가율: float = 0.0
+    영업이익증가율: float = 0.0
 
 class CombinedStockAnalysisSchema(FinancialDataSchema, StockAnalysisSchema, CompanySchema):
     pass
