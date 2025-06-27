@@ -541,11 +541,15 @@ def calculate_stock_analysis(request, offset: int=0, limit: int=0):
                 market_df = date_df[date_df['market'] == market]
                 if market_df.empty:
                     continue
-                for period in ['rsScore1m', 'rsScore3m', 'rsScore6m', 'rsScore12m', 'rsScore']:
-                    rank_values = market_df[period].rank(ascending=True, na_option='bottom')
-                    rs_values = (rank_values * 98 / len(market_df)).apply(np.int64) + 1
-                    rs_df.loc[market_df.index, f'{period}_Rank'] = rank_values
-                    rs_df.loc[market_df.index, f'{period}_RS'] = rs_values
+                # for period in ['rsScore1m', 'rsScore3m', 'rsScore6m', 'rsScore12m', 'rsScore']:
+                #     rank_values = market_df[period].rank(ascending=True, na_option='bottom')
+                #     rs_values = (rank_values * 98 / len(market_df)).apply(np.int64) + 1
+                #     rs_df.loc[market_df.index, f'{period}_Rank'] = rank_values
+                #     rs_df.loc[market_df.index, f'{period}_RS'] = rs_values
+                rank_values = market_df['rsScore'].rank(ascending=True, na_option='bottom')
+                rs_values = (rank_values * 98 / len(market_df)).apply(np.int64) + 1
+                rs_df.loc[market_df.index, f'{'rsScore'}_Rank'] = rank_values
+                rs_df.loc[market_df.index, f'{'rsScore'}_RS'] = rs_values
 
         # StockAnalysis 객체에 랭킹 반영
         for obj in tqdm(analysis_objects, desc="Updating rankings and MTT", leave=False):
