@@ -582,8 +582,8 @@ def calculate_stock_analysis(request, offset: int=0, limit: int=0):
     }
 
 # OpenDART에서 재무제표 데이터를 가져와 4분기 값을 조정하고 피벗 테이블로 반환합니다.
-@api.post("/get_stock_dartData", response={200: SuccessResponse, 404: ErrorResponse, 500: ErrorResponse})
-def get_stock_dartData(request, code: str = None):
+@api.post("/getAndSave_stock_dartData", response={200: SuccessResponse, 404: ErrorResponse, 500: ErrorResponse})
+def getAndSave_stock_dartData(request, code: str = None):
     """
     OpenDART에서 재무제표 데이터를 가져와 4분기 값을 조정하고 피벗 테이블로 반환합니다.
     

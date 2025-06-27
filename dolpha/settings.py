@@ -40,7 +40,13 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'myweb',
+    'django_apscheduler',
 ]
+
+# APScheduler 설정
+APSCHEDULER_DATETIME_FORMAT = "N j, Y, f:s a"  # 관리자 인터페이스에서 표시되는 시간 형식
+APSCHEDULER_RUN_NOW_TIMEOUT = 25  # 작업 실행 타임아웃 (초 단위, 필요에 따라 조정)
+SCHEDULER_DEFAULT = True  # 앱 시작 시 스케줄러 자동 실행
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -103,10 +109,15 @@ DATABASES = {
 if platform.system() in ['Windows', 'Darwin']:  # Windows 또는 macOS
     DATABASES['default'] = {
         'ENGINE': 'django.db.backends.mysql',  # 또는 'django.db.backends.mysql' (MariaDB와 호환)
-        'NAME': 'dolpha_db',  # 데이터베이스 이름
-        'USER': 'dolpha',  # 또는 'root'
-        'PASSWORD': 'dolpha123',  # 사용자 비밀번호
-        'HOST': '121.160.171.18',
+        # 'NAME': 'dolpha_db',  # 데이터베이스 이름
+        # 'USER': 'dolpha',  # 또는 'root'
+        # 'PASSWORD': 'dolpha123',  # 사용자 비밀번호
+        # 'HOST': '121.160.171.18',
+        # 'PORT': '3306',  # MariaDB 기본 포트
+        'NAME': 'dolpha',  # 데이터베이스 이름
+        'USER': 'root',  # 또는 'root'
+        'PASSWORD': 'qwe123!@#',  # 사용자 비밀번호
+        'HOST': 'localhost',
         'PORT': '3306',  # MariaDB 기본 포트
     }
 else:  # Ubuntu (Docker 환경)
