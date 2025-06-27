@@ -27,6 +27,7 @@ api = NinjaAPI()
 
 @api.get("/hello")
 def hello(request):
+    # 왜안되니
     return {"message": "Hello, Django Ninja!"}
 
 # 모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
