@@ -62,7 +62,14 @@ class StockAnalysisSchema(Schema):
     min_52w_date: str = None
     is_minervini_trend: bool
 
-class CombinedStockAnalysisSchema(CompanySchema, StockAnalysisSchema):
+class FinancialDataSchema(Schema):
+    # '금분기_매출', '전분기_매출', '금분기_영업이익', '전분기_영업이익'
+    금분기_매출: float
+    전분기_매출: float
+    금분기_영업이익: float 
+    전분기_영업이익: float    
+
+class CombinedStockAnalysisSchema(FinancialDataSchema, StockAnalysisSchema, CompanySchema):
     pass
 
 class SuccessResponseStockAnalysis(Schema):

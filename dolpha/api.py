@@ -781,6 +781,10 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
         # Combine with Company data using select_related
         results = []
         for analysis in queryset.select_related('code'):
+            finance = StockFinancialStatement.objects.filter(code=analysis.code).order_by('-year', '-quarter')
+            매출 = finance.filter(account_name="매출액").values_list('amount', flat=True).distinct()
+            영업이익 = finance.filter(account_name="영업이익").values_list('amount', flat=True).distinct()
+
             combined_data = {
                 # Company fields
                 'code': analysis.code.code,
@@ -807,10 +811,16 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 'min_52w': analysis.min_52w,
                 'max_52w_date': str(analysis.max_52w_date) if analysis.max_52w_date else None,
                 'min_52w_date': str(analysis.min_52w_date) if analysis.min_52w_date else None,
-                'is_minervini_trend': analysis.is_minervini_trend
+                'is_minervini_trend': analysis.is_minervini_trend,
+                '금분기_매출': 매출[0] if len(매출) > 0 else 0,
+                '전분기_매출': 매출[1] if len(매출) > 1 else 0,
+                '금분기_영업이익': 영업이익[0] if len(영업이익) > 0 else 0,
+                '전분기_영업이익': 영업이익[1] if len(영업이익) > 1 else 0,
                 # StockFinancialStatement fields 
             }
             results.append(combined_data)
+        print(results)
+        
         # Handle Excel output
         if format.lower() == "excel":
             wb = Workbook()
@@ -823,7 +833,7 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 'MA50', 'MA150', 'MA200', 'RS Score', 'RS Score 1M', 'RS Score 3M',
                 'RS Score 6M', 'RS Score 12M', 'RS Rank', 'RS Rank 1M', 'RS Rank 3M',
                 'RS Rank 6M', 'RS Rank 12M', '52W Max', '52W Min', '52W Max Date',
-                '52W Min Date', 'Minervini Trend'
+                '52W Min Date', 'Minervini Trend', '금분기_매출', '전분기_매출', '금분기_영업이익', '전분기_영업이익'
             ]
             
             # Write headers
@@ -858,6 +868,11 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 ws[f"V{row_num}"] = data['max_52w_date']
                 ws[f"W{row_num}"] = data['min_52w_date']
                 ws[f"X{row_num}"] = data['is_minervini_trend']
+                # '금분기_매출', '전분기_매출', '금분기_영업이익', '전분기_영업이익'
+                ws[f"Y{row_num}"] = data['금분기_매출']
+                ws[f"Z{row_num}"] = data['전분기_매출']
+                ws[f"AA{row_num}"] = data['금분기_영업이익']
+                ws[f"AB{row_num}"] = data['전분기_영업이익']
 
             # Auto-adjust column widths
             for col in ws.columns:
@@ -887,7 +902,7 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
             return response
         
         return 200, SuccessResponseStockAnalysis(
-            status="success",
+            status="OK",
             data=results
         )
 
