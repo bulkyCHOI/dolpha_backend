@@ -469,27 +469,32 @@ def calculate_stock_analysis(request, offset: int=0, limit: int=0):
             # 52주 신고가/신저가 및 날짜 계산
             high_low = calculate_52w_high_low(ohlcv_data, target_date)
             
-            # 각 기간별 RS 점수 계산
-            rs_scores = {}
-            for period_name, period_days in periods.items():
-                rs_score = calculate_rs_score(ohlcv_data, target_date, period_days)
-                rs_scores[period_name] = rs_score
+            # # 각 기간별 RS 점수 계산
+            # rs_scores = {}
+            # for period_name, period_days in periods.items():
+            #     rs_score = calculate_rs_score(ohlcv_data, target_date, period_days)
+            #     rs_scores[period_name] = rs_score
             
-            # 가중평균 RS 점수 계산
-            weighted_score = -1
-            if all(rs_scores[p] != -1 for p in periods):
-                weighted_score = (rs_scores['1month'] * 4 + rs_scores['3month'] * 3 + rs_scores['6month'] * 2 + rs_scores['12month'] * 1) / 10
+            # # 가중평균 RS 점수 계산
+            # weighted_score = -1
+            # if all(rs_scores[p] != -1 for p in periods):
+            #     weighted_score = (rs_scores['1month'] * 4 + rs_scores['3month'] * 3 + rs_scores['6month'] * 2 + rs_scores['12month'] * 1) / 10
             
+            # 위에서는 1개월, 3개월, 6개월, 12개월 4번을 구했지만 12개월 1번만 구하면 된다.
+            rs_score = calculate_rs_score(ohlcv_data, target_date, periods['12month'])
+
+
             rs_data_all.append({
                 'date': target_date,
                 'code': company.code,
                 'name': company.name,
                 'market': company.market,
-                'rsScore1m': rs_scores['1month'],
-                'rsScore3m': rs_scores['3month'],
-                'rsScore6m': rs_scores['6month'],
-                'rsScore12m': rs_scores['12month'],
-                'rsScore': weighted_score
+                'rsScore': rs_score
+                # 'rsScore1m': rs_scores['1month'],
+                # 'rsScore3m': rs_scores['3month'],
+                # 'rsScore6m': rs_scores['6month'],
+                # 'rsScore12m': rs_scores['12month'],
+                # 'rsScore': weighted_score
             })
             
             # 미너비니 트렌드 템플릿 조건 확인
@@ -510,16 +515,17 @@ def calculate_stock_analysis(request, offset: int=0, limit: int=0):
                 ma50=mas['ma50'],
                 ma150=mas['ma150'],
                 ma200=mas['ma200'],
-                rsScore=weighted_score,
-                rsScore1m=rs_scores['1month'],
-                rsScore3m=rs_scores['3month'],
-                rsScore6m=rs_scores['6month'],
-                rsScore12m=rs_scores['12month'],
+                rsScore=rs_score,
+                # rsScore=weighted_score,
+                # rsScore1m=rs_scores['1month'],
+                # rsScore3m=rs_scores['3month'],
+                # rsScore6m=rs_scores['6month'],
+                # rsScore12m=rs_scores['12month'],
                 rsRank=0.0,
-                rsRank1m=0.0,
-                rsRank3m=0.0,
-                rsRank6m=0.0,
-                rsRank12m=0.0,
+                # rsRank1m=0.0,
+                # rsRank3m=0.0,
+                # rsRank6m=0.0,
+                # rsRank12m=0.0,
                 max_52w=high_low['max_52w'],
                 min_52w=high_low['min_52w'],
                 max_52w_date=high_low['max_52w_date'],
@@ -545,10 +551,10 @@ def calculate_stock_analysis(request, offset: int=0, limit: int=0):
         for obj in tqdm(analysis_objects, desc="Updating rankings and MTT", leave=False):
             row = rs_df[(rs_df['code'] == obj.code.code) & (rs_df['date'] == obj.date)].iloc[0]
             obj.rsRank = row['rsScore_RS'] if row['rsScore'] != -1 else 0.0
-            obj.rsRank1m = row['rsScore1m_RS'] if row['rsScore1m'] != -1 else 0.0
-            obj.rsRank3m = row['rsScore3m_RS'] if row['rsScore3m'] != -1 else 0.0
-            obj.rsRank6m = row['rsScore6m_RS'] if row['rsScore6m'] != -1 else 0.0
-            obj.rsRank12m = row['rsScore12m_RS'] if row['rsScore12m'] != -1 else 0.0
+            # obj.rsRank1m = row['rsScore1m_RS'] if row['rsScore1m'] != -1 else 0.0
+            # obj.rsRank3m = row['rsScore3m_RS'] if row['rsScore3m'] != -1 else 0.0
+            # obj.rsRank6m = row['rsScore6m_RS'] if row['rsScore6m'] != -1 else 0.0
+            # obj.rsRank12m = row['rsScore12m_RS'] if row['rsScore12m'] != -1 else 0.0
             if obj.is_minervini_trend:
                 obj.is_minervini_trend = obj.is_minervini_trend and obj.rsRank >= 70
                     
