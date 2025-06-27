@@ -30,6 +30,7 @@ class SuccessResponseStockDart(Schema):
     status: str
     data: List[Dict[str, Any]]  # JSON 형태를 표현
 
+
 # =====================================================================
 # 데이터를 담는 스키마
 
@@ -77,4 +78,29 @@ class SuccessResponseStockAnalysis(Schema):
     data: List[CombinedStockAnalysisSchema]
 
 
+class StockOhlcvSchema(Schema):
+    code: str
+    date: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+    change: float
 
+class SuccessResponseStockOhlcvSchema(Schema):
+    status: str
+    data: List[StockOhlcvSchema]  # JSON 형태를 표현
+
+
+class StockFinancialStatementSchema(Schema):
+    code: str
+    year: str
+    quarter: str
+    statement_type: str
+    account_name: str
+    amount: int
+
+class SuccessResponseStockFinancialSchema(Schema):
+    status: str
+    data: List[StockFinancialStatementSchema]  # JSON 형태를 표현

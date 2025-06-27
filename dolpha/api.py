@@ -908,3 +908,99 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
 
     except Exception as e:
         return 500, ErrorResponse(status="error", message=str(e))
+    
+
+@api.get("/find_stock_ohlcv", response={200: SuccessResponseStockOhlcvSchema, 404: ErrorResponse, 500: ErrorResponse})
+def find_stock_ohlcv(request, code: str = "005930"):
+    """
+    주식 OHLCV 데이터를 조회합니다.
+    Args:
+        request: Ninja API 요청 객체.
+        code (str, optional): 종목코드 (예: '005930'). 기본값: None (모든 종목 조회).
+    Returns:
+        SuccessResponseStockOHLCV: 성공 시 OHLCV 데이터.
+        ErrorResponse: 에러 발생 시 에러 메시지.
+    Raises:
+        ValueError: 잘못된 날짜 형식이 입력된 경우.
+        Exception: 기타 예상치 못한 오류 발생 시.
+    """
+    try:
+        # 종목코드가 주어지지 않은 경우 404 에러 반환
+        if code is not None:
+            queryset = StockOHLCV.objects.filter(code=code).order_by('-date')[:21]
+        else:
+            return 404, ErrorResponse(status="error", message="종목코드가 필요합니다.")
+
+        # 데이터가 없으면 404 에러 반환
+        if not queryset.exists():
+            return 404, ErrorResponse(status="error", message="No OHLCV data found for the given code")
+
+        # 결과를 리스트로 변환
+        results = []
+        for record in queryset:
+            results.append({
+                'code': record.code.code,
+                'date': str(record.date),
+                'open': record.open,
+                'high': record.high,
+                'low': record.low,
+                'close': record.close,
+                'volume': record.volume,
+                'change': record.change,
+            })
+
+        return 200, SuccessResponseStockOhlcvSchema(
+            status="OK",
+            data=results
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        return 500, ErrorResponse(status="error", message=str(e))
+    
+
+@api.get("/find_stock_financial", response={200: SuccessResponseStockFinancialSchema, 404: ErrorResponse, 500: ErrorResponse})
+def find_stock_financial(request, code: str = "005930"):
+    """
+    주식 재무제표 데이터를 조회합니다.
+    Args:
+        request: Ninja API 요청 객체.
+        code (str, optional): 종목코드 (예: '005930'). 기본값: None (모든 종목 조회).
+    Returns:
+        SuccessResponseStockFinancial: 성공 시 재무제표 데이터.
+        ErrorResponse: 에러 발생 시 에러 메시지.
+    Raises:
+        ValueError: 잘못된 날짜 형식이 입력된 경우.
+        Exception: 기타 예상치 못한 오류 발생 시.
+    """
+    try:
+        # 종목코드가 주어지지 않은 경우 404 에러 반환
+        if code is not None:
+            queryset = StockFinancialStatement.objects.filter(code=code).order_by('-year', '-quarter')
+        else:
+            return 404, ErrorResponse(status="error", message="종목코드가 필요합니다.")
+
+        # 데이터가 없으면 404 에러 반환
+        if not queryset.exists():
+            return 404, ErrorResponse(status="error", message="No financial data found for the given code")
+
+        # 결과를 리스트로 변환
+        results = []
+        for record in queryset:
+            results.append({
+                'code': record.code.code,
+                'year': record.year,
+                'quarter': record.quarter,
+                'statement_type': record.statement_type,
+                'account_name': record.account_name,
+                'amount': record.amount,
+            })
+
+        return 200, SuccessResponseStockFinancialSchema(
+            status="OK",
+            data=results
+        )
+
+    except Exception as e:
+        traceback.print_exc()
+        return 500, ErrorResponse(status="error", message=str(e))
