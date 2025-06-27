@@ -819,7 +819,7 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 # StockFinancialStatement fields 
             }
             results.append(combined_data)
-        print(results)
+        # print(results)
         
         # Handle Excel output
         if format.lower() == "excel":
