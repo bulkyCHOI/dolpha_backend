@@ -109,16 +109,16 @@ DATABASES = {
 if platform.system() in ['Windows', 'Darwin']:  # Windows 또는 macOS
     DATABASES['default'] = {
         'ENGINE': 'django.db.backends.mysql',  # 또는 'django.db.backends.mysql' (MariaDB와 호환)
-        # 'NAME': 'dolpha_db',  # 데이터베이스 이름
-        # 'USER': 'dolpha',  # 또는 'root'
-        # 'PASSWORD': 'dolpha123',  # 사용자 비밀번호
-        # 'HOST': '121.160.171.18',
-        # 'PORT': '3306',  # MariaDB 기본 포트
-        'NAME': 'dolpha',  # 데이터베이스 이름
-        'USER': 'root',  # 또는 'root'
-        'PASSWORD': 'qwe123!@#',  # 사용자 비밀번호
-        'HOST': 'localhost',
+        'NAME': 'dolpha_db',  # 데이터베이스 이름
+        'USER': 'dolpha',  # 또는 'root'
+        'PASSWORD': 'dolpha123',  # 사용자 비밀번호
+        'HOST': '121.160.171.18',
         'PORT': '3306',  # MariaDB 기본 포트
+        # 'NAME': 'dolpha',  # 데이터베이스 이름
+        # 'USER': 'root',  # 또는 'root'
+        # 'PASSWORD': 'qwe123!@#',  # 사용자 비밀번호
+        # 'HOST': 'localhost',
+        # 'PORT': '3306',  # MariaDB 기본 포트
     }
 else:  # Ubuntu (Docker 환경)
     DATABASES['default'] = {

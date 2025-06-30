@@ -48,6 +48,25 @@ def my_cron_task_getAndSave_stock_data():
         traceback.print_exc()  # 에러 추적 정보 출력
         print(f"[Cron task] Error in cron task: {str(e)}")
 
+def my_cron_task_calculate_stock_analysis():
+    print(f"[Cron task] calculate_stock_analysis executed at {timezone.now()}!")
+    try:
+        # Request 객체 생성
+        request_factory = RequestFactory()
+        request = request_factory.post('/calculate_stock_analysis')
+        
+        # API 뷰 호출
+        response = calculate_stock_analysis(request)
+        
+        # 응답 처리
+        if response['status'] == "OK":
+            print("[Cron task] Stock analysis successfully calculated.")
+        else:
+            print(f"[Cron task] Failed to execute API: Status {response.status_code}")
+    except Exception as e:
+        traceback.print_exc()  # 에러 추적 정보 출력
+        print(f"[Cron task] Error in cron task: {str(e)}")
+
 def my_cron_task_getAndSave_stock_dartData():
     print(f"[Cron task] getAndSave_stock_dartData executed at {timezone.now()}!")
     try:
@@ -82,34 +101,45 @@ def start():
     # )
     
     # cron 방식 예시 (매일 12:00에 실행)
-    # 전체 종목 설명을 가져오고 저장하는 작업
+    # 전체 종목 설명을 가져오고 저장하는 작업 #약 1분 >> 5분
     scheduler.add_job(
         my_cron_task_getAndSave_stock_description,
         trigger='cron',
-        hour=16,
-        minute=0,
+        hour=15,
+        minute=45,
         id='my_cron_task_getAndSave_stock_description',
         max_instances=1,
         replace_existing=True,
     )
     
-    # 전체 종목의 OHLCV 데이터를 가져오고 저장하는 작업
+    # 전체 종목의 OHLCV 데이터를 가져오고 저장하는 작업 #약 16분 >> 20분
     scheduler.add_job(
         my_cron_task_getAndSave_stock_data,
         trigger='cron',
-        hour=16,
-        minute=10,
+        hour=15,
+        minute=50,
         id='my_cron_task_getAndSave_stock_data',
         max_instances=1,
         replace_existing=True,
     )
     
-    # 전체 종목의 DART 데이터를 가져오고 저장하는 작업
+    # 전체 종목의 기술적 분석 데이터를 계산하는 작업 # 약 4분 >> 10분
+    scheduler.add_job(
+        my_cron_task_calculate_stock_analysis,
+        trigger='cron',
+        hour=16,
+        minute=10,
+        id='my_cron_task_calculate_stock_analysis',
+        max_instances=1,
+        replace_existing=True,
+    )
+    
+    # 전체 종목의 DART 데이터를 가져오고 저장하는 작업 # 약 1시간 >> 1시간 30분
     scheduler.add_job(
         my_cron_task_getAndSave_stock_dartData,
         trigger='cron',
         hour=16,
-        minute=30,
+        minute=20,
         id='my_cron_task_getAndSave_stock_dartData',
         max_instances=1,
         replace_existing=True,
