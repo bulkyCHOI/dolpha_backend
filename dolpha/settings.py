@@ -112,7 +112,7 @@ if platform.system() in ['Windows', 'Darwin']:  # Windows 또는 macOS
         'NAME': 'dolpha_db',  # 데이터베이스 이름
         'USER': 'dolpha',  # 또는 'root'
         'PASSWORD': 'dolpha123',  # 사용자 비밀번호
-        'HOST': '121.160.171.18',
+        'HOST': '218.152.32.218',
         'PORT': '3306',  # MariaDB 기본 포트
         # 'NAME': 'dolpha',  # 데이터베이스 이름
         # 'USER': 'root',  # 또는 'root'
