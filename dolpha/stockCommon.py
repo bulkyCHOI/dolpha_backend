@@ -181,3 +181,13 @@ def GetStockList(area = "KRX"):
     df = fdr.StockListing(area)
 
     return df
+
+def GetSnapDataReader():
+    df = fdr.SnapDataReader('KRX/INDEX/LIST')
+    return df
+
+def GetSnapDataReader_IndexCode(code):
+    # 코스피 대형주 종목 리스트를 가져옵니다.
+    # KRX/INDEX/STOCK/1002 는 코스피 대형주 종목 리스트의 코드입니다.
+    df = fdr.SnapDataReader(f'KRX/INDEX/STOCK/{code}') # 코스피 대형주 종목 리스트
+    return df

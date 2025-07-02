@@ -30,6 +30,101 @@ def hello(request):
     # 왜안되니
     return {"message": "Hello, Django Ninja!"}
 
+# KRX에서 모든 주식의 종목 코드를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
+@api.post("/getAndSave_index_list", response={200: IndexListResponse, 400: ErrorResponse, 500: ErrorResponse})
+def getAndSave_index_list(request):
+    """
+    KRX에서 모든 주식의 종목 코드를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
+    
+    Returns:
+        IndexListResponse: 처리 결과, 저장된 종목 코드 리스트
+    """
+    try:
+        # 종목정보 조회
+        df_krx = Common.GetSnapDataReader()
+        print(df_krx.head(), len(df_krx))
+
+        # 컬럼명 매핑
+        column_mapping = {
+            'Code': 'code',
+            'Name': 'name',
+            'Market': 'market',
+        }
+        df_krx = df_krx.rename(columns=column_mapping)
+
+        # 예상 컬럼 확인
+        expected_columns = list(column_mapping.values())
+        if not all(col in df_krx.columns for col in expected_columns):
+            return 400, {
+                "status": "ERROR",
+                "message": "Required columns are missing in the KRX data"
+            }
+
+        # 데이터 전처리
+        df_krx['code'] = df_krx['code'].astype(str)  # 코드 문자열로 변환
+
+        # 벌크 데이터 준비
+        stockIndex_to_create = []
+        stockIndex_to_update = []
+        existing_codes = set(StockIndex.objects.values_list('code', flat=True))
+
+        for index, row in df_krx.iterrows():
+            try:
+                stockIndex_data = {
+                    'code': str(row['code']),
+                    'name': str(row['name']),
+                    'market': str(row['market']),
+                }
+
+                # 생성 또는 업데이트 분류
+                if row['code'] not in existing_codes:
+                    stockIndex_to_create.append(StockIndex(**stockIndex_data))
+                else:
+                    stockIndex = StockIndex.objects.get(code=row['code'])
+                    stockIndex.name = stockIndex_data['name']
+                    stockIndex.market = stockIndex_data['market']
+                    stockIndex_to_update.append(StockIndex(**stockIndex_data))
+                    
+            except Exception as e:
+                traceback.print_exc()
+                return 500, {
+                    "status": "ERROR",
+                    "message": f"Failed to process row {index}: {str(e)}"
+                }
+
+        # 데이터베이스 트랜잭션
+        with transaction.atomic():
+            if stockIndex_to_create:
+                StockIndex.objects.bulk_create(stockIndex_to_create)
+            elif stockIndex_to_update:
+                StockIndex.objects.bulk_update(stockIndex_to_update, ['name', 'market'])
+        
+        krx_codes = df_krx['code'].tolist()  # KRX 종목 코드 리스트 code: 소문자로 변경했으므로 사용가능
+        for code in krx_codes:
+            df_stocks = Common.GetSnapDataReader_IndexCode(code)    # 1002 코스피 대형주에 속한 종목에 대해 조회가능
+            print(df_stocks.head(), len(df_stocks))
+            
+            stockList = df_stocks['Code'].tolist()  # 종목 코드 리스트
+            index = StockIndex.objects.get(code=code)  # 인덱스 객체 가져오기
+            index.companies.add(*stockList)  # 인덱스에 종목 추가
+            
+            print(index.companies.all())  # 인덱스에 추가된 종목 확인
+            # print(company.indexes.all())  # 종목에 속한 인덱스 확인
+        
+        # 응답 구성
+        response = {
+            "status": "OK",
+            "count_total": len(df_krx),
+            "count_created": len(stockIndex_to_create),
+            "count_updated": len(stockIndex_to_update),
+            "count_failed": 0,  # 실패한 레코드는 없음
+        }
+        return response
+
+    except Exception as e:
+        traceback.print_exc()
+        return
+
 # 모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
 @api.post("/getAndSave_stock_description", response={200: StockDescriptionResponse, 400: ErrorResponse, 500: ErrorResponse})
 def getAndSave_stock_description(request):

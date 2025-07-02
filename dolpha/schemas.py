@@ -9,6 +9,13 @@ class FailedRecord(Schema):
     code: str
     error: str
 
+class IndexListResponse(Schema):
+    status: str
+    count_total: int
+    count_created: int
+    count_updated: int
+    count_failed: int
+
 class StockDescriptionResponse(Schema):
     status: str
     count_total: int

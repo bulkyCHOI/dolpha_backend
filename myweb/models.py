@@ -1,9 +1,16 @@
 from django.db import models
 
 # Create your models here.
+class StockIndex(models.Model):
+    code = models.CharField(max_length=10, primary_key=True)  # 지수 코드
+    name = models.CharField(max_length=100)  # 지수명
+    market = models.CharField(max_length=50)  # 시장 (예: 'KOSPI', 'NASDAQ')
 
+    def __str__(self):
+        return self.name
 class Company(models.Model):
     code = models.CharField(max_length=10, primary_key=True)
+    indices = models.ManyToManyField(StockIndex, related_name='companies')  # 다대다 관계
     name = models.CharField(max_length=100)
     market = models.CharField(max_length=50)
     sector = models.CharField(max_length=100)
