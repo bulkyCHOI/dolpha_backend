@@ -61,11 +61,18 @@ class StockAnalysisSchema(Schema):
     min_52w: float
     max_52w_date: str = None
     min_52w_date: str = None
+    atr: float = 0.0  # 평균 진폭 (Average True Range)
     is_minervini_trend: bool
 
 class FinancialDataSchema(Schema):
     매출증가율: float = 0.0
     영업이익증가율: float = 0.0
+    전전기매출: int
+    전기매출: int
+    당기매출: int
+    전전기영업이익: int
+    전기영업이익: int
+    당기영업이익: int
 
 class CombinedStockAnalysisSchema(FinancialDataSchema, StockAnalysisSchema, CompanySchema):
     pass
@@ -101,3 +108,7 @@ class StockFinancialStatementSchema(Schema):
 class SuccessResponseStockFinancialSchema(Schema):
     status: str
     data: List[StockFinancialStatementSchema]  # JSON 형태를 표현
+
+class SuccessResponseStockAnalysisSchema(Schema):
+    status: str
+    data: List[StockAnalysisSchema]  # JSON 형태를 표현

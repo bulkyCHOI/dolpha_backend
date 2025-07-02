@@ -358,7 +358,7 @@ def calculate_rs_score(data, target_date, period_days):
                 break
         
         if target_idx is None or target_idx < period_days:
-            return -1  # 데이터 부족
+            return -1, [-1, -1, -1, -1]  # 데이터 부족
 
         # 각 구간에 대한 점수 계산
         scores = []
@@ -369,7 +369,7 @@ def calculate_rs_score(data, target_date, period_days):
             previous_idx = target_idx - ((i + 1) * step)
             
             if previous_idx < 0:
-                return -1  # 데이터 부족
+                return -1, [-1, -1, -1, -1]  # 데이터 부족
             
             current_close = data[current_idx].close
             previous_close = data[previous_idx].close
@@ -378,11 +378,60 @@ def calculate_rs_score(data, target_date, period_days):
         
         # RS 점수 계산: (score_1 * 2) + score_2 + score_3 + score_4
         total_score = (scores[0] * 2) + scores[1] + scores[2] + scores[3]
-        return total_score
+        return total_score, scores  # 전체 점수와 각 기간별 점수 반환
 
     except Exception as e:
         print(f"{data[0].code}의 RS 계산 오류: {e}")
+        return -1, [-1, -1, -1, -1]
+# ATR(Average True Range)을 계산하는 함수
+def calculate_atr(data, target_date, period=20):
+    """
+    ATR(Average True Range)을 계산하는 함수
+    df: OHLC(시가, 고가, 저가, 종가) 데이터가 포함된 DataFrame
+    target_date: 기준 날짜 (문자열, 예: '2025-07-02')
+    period: ATR 계산 기간 (기본값: 14)
+    """
+    try:
+        data = list(data.order_by('date').filter(date__lte=target_date))
+        target_idx = None
+        for i, record in enumerate(data):
+            if record.date >= target_date:
+                target_idx = i
+                break
+        
+        if target_idx is None or target_idx < period:
+            return -1
+        
+        # 현재 날짜의 ATR 계산
+        if target_idx + 1 >= period:
+            # True Range 계산
+            tr_values = []
+            for i in range(target_idx, max(-1, target_idx - period), -1):
+                current = data[i]
+                prev = data[i - 1] if i > 0 else None
+                high_low = current.high - current.low
+                high_close = abs(current.high - prev.close) if prev else 0.0
+                low_close = abs(current.low - prev.close) if prev else 0.0
+                tr = max(high_low, high_close, low_close)
+                tr_values.append(tr)
+            return np.mean(tr_values)
+        else:
+            return -1
+        
+    except Exception as e:
+        print(f"ATR 계산 오류: {e}")
+        traceback.print_exc()
         return -1
+
+
+    
+    # True Range는 위 세 값 중 최대값
+    df['TR'] = df[['High-Low', 'High-Close', 'Low-Close']].max(axis=1)
+    
+    # ATR은 TR의 이동평균
+    df['ATR'] = df['TR'].rolling(window=period).mean()
+    
+    return df
 # 주식 분석 데이터를 계산하여 StockAnalysis 테이블에 저장합니다.
 @api.post("/calculate_stock_analysis", response={200: SuccessResponse, 400: ErrorResponse, 404: ErrorResponse, 500: ErrorResponse})
 def calculate_stock_analysis(request, offset: int=0, limit: int=0):
@@ -482,20 +531,22 @@ def calculate_stock_analysis(request, offset: int=0, limit: int=0):
             #     weighted_score = (rs_scores['1month'] * 4 + rs_scores['3month'] * 3 + rs_scores['6month'] * 2 + rs_scores['12month'] * 1) / 10
             
             # 위에서는 1개월, 3개월, 6개월, 12개월 4번을 구했지만 12개월 1번만 구하면 된다.
-            rs_score = calculate_rs_score(ohlcv_data, target_date, periods['12month'])
-
+            rs_score, rsScores = calculate_rs_score(ohlcv_data, target_date, periods['12month'])
+            
+            # ATR(Average True Range) 계산
+            atr = calculate_atr(ohlcv_data, target_date, period=20)
+            # print(f"ATR for {company.code} on {target_date}: {atr}")
 
             rs_data_all.append({
                 'date': target_date,
                 'code': company.code,
                 'name': company.name,
                 'market': company.market,
-                'rsScore': rs_score
-                # 'rsScore1m': rs_scores['1month'],
-                # 'rsScore3m': rs_scores['3month'],
-                # 'rsScore6m': rs_scores['6month'],
-                # 'rsScore12m': rs_scores['12month'],
-                # 'rsScore': weighted_score
+                'rsScore': rs_score,
+                'rsScore1m': rsScores[0],
+                'rsScore3m': rsScores[1],
+                'rsScore6m': rsScores[1],
+                'rsScore12m': rsScores[3],
             })
             
             # 미너비니 트렌드 템플릿 조건 확인
@@ -517,20 +568,20 @@ def calculate_stock_analysis(request, offset: int=0, limit: int=0):
                 ma150=mas['ma150'],
                 ma200=mas['ma200'],
                 rsScore=rs_score,
-                # rsScore=weighted_score,
-                # rsScore1m=rs_scores['1month'],
-                # rsScore3m=rs_scores['3month'],
-                # rsScore6m=rs_scores['6month'],
-                # rsScore12m=rs_scores['12month'],
+                rsScore1m=rsScores[0],
+                rsScore3m=rsScores[1],
+                rsScore6m=rsScores[2],
+                rsScore12m=rsScores[3],
                 rsRank=0.0,
-                # rsRank1m=0.0,
-                # rsRank3m=0.0,
-                # rsRank6m=0.0,
-                # rsRank12m=0.0,
+                rsRank1m=0.0,
+                rsRank3m=0.0,
+                rsRank6m=0.0,
+                rsRank12m=0.0,
                 max_52w=high_low['max_52w'],
                 min_52w=high_low['min_52w'],
                 max_52w_date=high_low['max_52w_date'],
                 min_52w_date=high_low['min_52w_date'],
+                atr=atr,
                 is_minervini_trend=is_minervini_trend
             ))
     
@@ -542,11 +593,11 @@ def calculate_stock_analysis(request, offset: int=0, limit: int=0):
                 market_df = date_df[date_df['market'] == market]
                 if market_df.empty:
                     continue
-                # for period in ['rsScore1m', 'rsScore3m', 'rsScore6m', 'rsScore12m', 'rsScore']:
-                #     rank_values = market_df[period].rank(ascending=True, na_option='bottom')
-                #     rs_values = (rank_values * 98 / len(market_df)).apply(np.int64) + 1
-                #     rs_df.loc[market_df.index, f'{period}_Rank'] = rank_values
-                #     rs_df.loc[market_df.index, f'{period}_RS'] = rs_values
+                for period in ['rsScore1m', 'rsScore3m', 'rsScore6m', 'rsScore12m', 'rsScore']:
+                    rank_values = market_df[period].rank(ascending=True, na_option='bottom')
+                    rs_values = (rank_values * 98 / len(market_df)).apply(np.int64) + 1
+                    rs_df.loc[market_df.index, f'{period}_Rank'] = rank_values
+                    rs_df.loc[market_df.index, f'{period}_RS'] = rs_values
                 rank_values = market_df['rsScore'].rank(ascending=True, na_option='bottom')
                 rs_values = (rank_values * 98 / len(market_df)).apply(np.int64) + 1
                 rs_df.loc[market_df.index, f'{'rsScore'}_Rank'] = rank_values
@@ -556,10 +607,10 @@ def calculate_stock_analysis(request, offset: int=0, limit: int=0):
         for obj in tqdm(analysis_objects, desc="Updating rankings and MTT", leave=False):
             row = rs_df[(rs_df['code'] == obj.code.code) & (rs_df['date'] == obj.date)].iloc[0]
             obj.rsRank = row['rsScore_RS'] if row['rsScore'] != -1 else 0.0
-            # obj.rsRank1m = row['rsScore1m_RS'] if row['rsScore1m'] != -1 else 0.0
-            # obj.rsRank3m = row['rsScore3m_RS'] if row['rsScore3m'] != -1 else 0.0
-            # obj.rsRank6m = row['rsScore6m_RS'] if row['rsScore6m'] != -1 else 0.0
-            # obj.rsRank12m = row['rsScore12m_RS'] if row['rsScore12m'] != -1 else 0.0
+            obj.rsRank1m = row['rsScore1m_RS'] if row['rsScore1m'] != -1 else 0.0
+            obj.rsRank3m = row['rsScore3m_RS'] if row['rsScore3m'] != -1 else 0.0
+            obj.rsRank6m = row['rsScore6m_RS'] if row['rsScore6m'] != -1 else 0.0
+            obj.rsRank12m = row['rsScore12m_RS'] if row['rsScore12m'] != -1 else 0.0
             if obj.is_minervini_trend:
                 obj.is_minervini_trend = obj.is_minervini_trend and obj.rsRank >= 70
                     
@@ -816,111 +867,70 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 'ma150': analysis.ma150,
                 'ma200': analysis.ma200,
                 'rsScore': analysis.rsScore,
-                # 'rsScore1m': analysis.rsScore1m,
-                # 'rsScore3m': analysis.rsScore3m,
-                # 'rsScore6m': analysis.rsScore6m,
-                # 'rsScore12m': analysis.rsScore12m,
+                'rsScore1m': analysis.rsScore1m,
+                'rsScore3m': analysis.rsScore3m,
+                'rsScore6m': analysis.rsScore6m,
+                'rsScore12m': analysis.rsScore12m,
                 'rsRank': analysis.rsRank,
-                # 'rsRank1m': analysis.rsRank1m,
-                # 'rsRank3m': analysis.rsRank3m,
-                # 'rsRank6m': analysis.rsRank6m,
-                # 'rsRank12m': analysis.rsRank12m,
+                'rsRank1m': analysis.rsRank1m,
+                'rsRank3m': analysis.rsRank3m,
+                'rsRank6m': analysis.rsRank6m,
+                'rsRank12m': analysis.rsRank12m,
                 'max_52w': analysis.max_52w,
                 'min_52w': analysis.min_52w,
                 'max_52w_date': str(analysis.max_52w_date) if analysis.max_52w_date else None,
                 'min_52w_date': str(analysis.min_52w_date) if analysis.min_52w_date else None,
+                'atr': analysis.atr,
                 'is_minervini_trend': analysis.is_minervini_trend,
                 '매출증가율': 매출증가율,
                 '영업이익증가율': 영업이익증가율,
+                '전전기매출' : 매출[2] if len(매출) > 2 else 0,
+                '전기매출': 매출[1] if len(매출) > 1 else 0,
+                '당기매출': 매출[0] if 매출 else 0,
+                '전전기영업이익': 영업이익[2] if len(영업이익) > 2 else 0,
+                '전기영업이익': 영업이익[1] if len(영업이익) > 1 else 0,
+                '당기영업이익': 영업이익[0] if 영업이익 else 0,
                 # StockFinancialStatement fields 
             }
             results.append(combined_data)
-        # print(results)
         
-        # Handle Excel output
         if format.lower() == "excel":
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Stock Analysis"
-
-            # Define headers
-            headers = [
-                'Code', 'Name', 'Market', 'Sector', 'Industry', 'Date',
-                'MA50', 'MA150', 'MA200', 'RS Score',
-                # 'RS Score 1M', 'RS Score 3M', 'RS Score 6M', 'RS Score 12M', 
-                'RS Rank', 
-                # 'RS Rank 1M', 'RS Rank 3M', 'RS Rank 6M', 'RS Rank 12M', 
-                '52W Max', '52W Min', '52W Max Date', '52W Min Date', 
-                'Minervini Trend', '매출증가율', '영업이익증가율'
-            ]
-            
-            # Write headers
-            for col_num, header in enumerate(headers, 1):
-                col_letter = get_column_letter(col_num)
-                ws[f"{col_letter}1"] = header
-                ws[f"{col_letter}1"].font = Font(bold=True)
-
-            # Write data
-            for row_num, data in enumerate(results, 2):
-                ws[f"A{row_num}"] = data['code']
-                ws[f"B{row_num}"] = data['name']
-                ws[f"C{row_num}"] = data['market']
-                ws[f"D{row_num}"] = data['sector']
-                ws[f"E{row_num}"] = data['industry']
-                ws[f"F{row_num}"] = data['date']
-                ws[f"G{row_num}"] = data['ma50']
-                ws[f"H{row_num}"] = data['ma150']
-                ws[f"I{row_num}"] = data['ma200']
-                ws[f"J{row_num}"] = data['rsScore']
-                ws[f"K{row_num}"] = data['rsRank']
-                ws[f"L{row_num}"] = data['max_52w']
-                ws[f"M{row_num}"] = data['min_52w']
-                ws[f"N{row_num}"] = data['max_52w_date']
-                ws[f"O{row_num}"] = data['min_52w_date']
-                ws[f"P{row_num}"] = data['is_minervini_trend']
-                # '금분기_매출', '전분기_매출', '금분기_영업이익', '전분기_영업이익'
-                ws[f"Q{row_num}"] = data['매출증가율']
-                ws[f"R{row_num}"] = data['영업이익증가율']
-
-            # Auto-adjust column widths
-            for col in ws.columns:
-                max_length = 0
-                column = col[0].column_letter
-                for cell in col:
-                    try:
-                        if len(str(cell.value)) > max_length:
-                            max_length = len(str(cell.value))
-                    except:
-                        pass
-                adjusted_width = (max_length + 2)
-                ws.column_dimensions[column].width = adjusted_width
-
-            # Save to BytesIO
+            # BytesIO 버퍼 생성
             output = BytesIO()
-            wb.save(output)
+            df = pd.DataFrame(results)
+            filename = f"mtt_stocks_{date or 'latest'}.xlsx"
+            
+            # DataFrame을 BytesIO 버퍼에 쓰기
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False)
+            
+            # 버퍼 포인터를 처음으로 되돌리기
             output.seek(0)
-
-            # Return Excel file
-            filename = f"stock_analysis_{query_date or latest_date}.xlsx"
+            
+            # Excel 파일을 HttpResponse로 반환
             response = HttpResponse(
-                content=output.read(),
+                content=output.getvalue(),
                 content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             response['Content-Disposition'] = f'attachment; filename="{filename}"'
             return response
         
-        return 200, SuccessResponseStockAnalysis(
-            status="OK",
-            data=results
-        )
+        elif format.lower() == "json":
+            # Return JSON response
+            return 200, SuccessResponseStockAnalysis(
+                status="OK",
+                data=results
+            )
+        else:
+            return 400, ErrorResponse(status="error", message="Invalid format. Use 'json' or 'excel'")
 
     except Exception as e:
         traceback.print_exc()
         return 500, ErrorResponse(status="error", message=str(e))
     
-
+# 주식 OHLCV 데이터를 조회합니다.
 @api.get("/find_stock_ohlcv", response={200: SuccessResponseStockOhlcvSchema, 404: ErrorResponse, 500: ErrorResponse})
-def find_stock_ohlcv(request, code: str = "005930"):
+def find_stock_ohlcv(request, code: str = "005930", limit: int = 21):
     """
     주식 OHLCV 데이터를 조회합니다.
     Args:
@@ -936,7 +946,7 @@ def find_stock_ohlcv(request, code: str = "005930"):
     try:
         # 종목코드가 주어지지 않은 경우 404 에러 반환
         if code is not None:
-            queryset = StockOHLCV.objects.filter(code=code).order_by('-date')[:21]
+            queryset = StockOHLCV.objects.filter(code=code).order_by('-date')[:limit]
         else:
             return 404, ErrorResponse(status="error", message="종목코드가 필요합니다.")
 
@@ -966,8 +976,74 @@ def find_stock_ohlcv(request, code: str = "005930"):
     except Exception as e:
         traceback.print_exc()
         return 500, ErrorResponse(status="error", message=str(e))
-    
 
+# 주식 분석 데이터를 조회합니다.
+@api.get("/find_stock_analysis", response={200: SuccessResponseStockAnalysisSchema, 404: ErrorResponse, 500: ErrorResponse})    
+def find_stock_analysis(request, code: str = "005930", limit: int = 21):
+    """
+    주식 분석 데이터를 조회합니다.
+    Args:
+        request: Ninja API 요청 객체.
+        code (str, optional): 종목코드 (예: '005930'). 기본값: None (모든 종목 조회).
+    Returns:
+        SuccessResponseStockAnalysis: 성공 시 주식 분석 데이터.
+        ErrorResponse: 에러 발생 시 에러 메시지.
+    Raises:
+        ValueError: 잘못된 날짜 형식이 입력된 경우.
+        Exception: 기타 예상치 못한 오류 발생 시.
+    """
+    try:
+        # 종목코드가 주어지지 않은 경우 404 에러 반환
+        if code is not None:
+            queryset = StockAnalysis.objects.filter(code__code=code).order_by('-date')[:limit]
+        else:
+            return 404, ErrorResponse(status="error", message="종목코드가 필요합니다.")
+
+        # 데이터가 없으면 404 에러 반환
+        if not queryset.exists():
+            return 404, ErrorResponse(status="error", message="No analysis data found for the given code")
+
+        # 결과를 리스트로 변환
+        results = []
+        for record in queryset:
+            results.append({
+                'code': record.code.code,
+                'name': record.code.name,
+                'market': record.code.market,
+                'sector': record.code.sector,
+                'industry': record.code.industry,
+                'date': str(record.date),
+                'ma50': record.ma50,
+                'ma150': record.ma150,
+                'ma200': record.ma200,
+                'rsScore': record.rsScore,
+                'rsScore1m': record.rsScore1m,
+                'rsScore3m': record.rsScore3m,
+                'rsScore6m': record.rsScore6m,
+                'rsScore12m': record.rsScore12m,
+                'rsRank': record.rsRank,
+                'rsRank1m': record.rsRank1m,
+                'rsRank3m': record.rsRank3m,
+                'rsRank6m': record.rsRank6m,
+                'rsRank12m': record.rsRank12m,
+                'max_52w': record.max_52w,
+                'min_52w': record.min_52w,
+                'max_52w_date': str(record.max_52w_date) if record.max_52w_date else None,
+                'min_52w_date': str(record.min_52w_date) if record.min_52w_date else None,
+                'atr': record.atr,
+                'is_minervini_trend': record.is_minervini_trend,
+                '매출증가율': record.매출증가율 if hasattr(record, '매출증가율') else None,
+                '영업이익증가율': record.영업이익증가율 if hasattr(record, '영업이익증가율') else None,
+            })
+        return 200, SuccessResponseStockAnalysisSchema(
+            status="OK",
+            data=results
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return 500, ErrorResponse(status="error", message=str(e))
+
+# 주식 재무제표 데이터를 조회합니다.
 @api.get("/find_stock_financial", response={200: SuccessResponseStockFinancialSchema, 404: ErrorResponse, 500: ErrorResponse})
 def find_stock_financial(request, code: str = "005930"):
     """

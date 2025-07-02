@@ -51,19 +51,20 @@ class StockAnalysis(models.Model):
     ma150 = models.FloatField(default=0.0)  # 240일 이동평균
     ma200 = models.FloatField(default=0.0)  # 200일 이동평균
     rsScore = models.FloatField(default=0.0)  # 상대강도지수
-    # rsScore1m = models.FloatField(default=0.0)  # 1개월 상대강도지수
-    # rsScore3m = models.FloatField(default=0.0)  # 3개월 상대강도지수
-    # rsScore6m = models.FloatField(default=0.0)  # 6개월 상대강도지수
-    # rsScore12m = models.FloatField(default=0.0)  # 12개월 상대강도지수
+    rsScore1m = models.FloatField(default=0.0)  # 1개월 상대강도지수
+    rsScore3m = models.FloatField(default=0.0)  # 3개월 상대강도지수
+    rsScore6m = models.FloatField(default=0.0)  # 6개월 상대강도지수
+    rsScore12m = models.FloatField(default=0.0)  # 12개월 상대강도지수
     rsRank = models.FloatField(default=0.0)  # 상대강도랭킹
-    # rsRank1m = models.FloatField(default=0.0)  # 1개월 상대강도랭킹
-    # rsRank3m = models.FloatField(default=0.0)  # 3개월 상대강도랭킹
-    # rsRank6m = models.FloatField(default=0.0)  # 6개월 상대강도랭킹
-    # rsRank12m = models.FloatField(default=0.0)  # 12개월 상대강도랭킹
+    rsRank1m = models.FloatField(default=0.0)  # 1개월 상대강도랭킹
+    rsRank3m = models.FloatField(default=0.0)  # 3개월 상대강도랭킹
+    rsRank6m = models.FloatField(default=0.0)  # 6개월 상대강도랭킹
+    rsRank12m = models.FloatField(default=0.0)  # 12개월 상대강도랭킹
     max_52w = models.FloatField(default=0.0)  # 52주 최고가
     min_52w = models.FloatField(default=0.0)  # 52주 최저가
     max_52w_date = models.DateField(null=True, blank=True)  # 52주 최고가 날짜
     min_52w_date = models.DateField(null=True, blank=True)  # 52주 최저가 날짜
+    atr = models.FloatField(default=0.0)  # 평균 진폭 (Average True Range)
     is_minervini_trend = models.BooleanField(default=False)  # 미너비니 트렌드 템플릿 조건 충족 여부
 
 
