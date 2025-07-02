@@ -828,18 +828,15 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 query_date = datetime.strptime(date, "%Y-%m-%d").date()
             except ValueError:
                 return 400, ErrorResponse(status="error", message="Invalid date format. Use YYYY-MM-DD")
+        else:
+            # If no date is provided, use the latest date from StockAnalysis
+            query_date = StockAnalysis.objects.latest('date').date
 
         # Build query
         queryset = StockAnalysis.objects.filter(is_minervini_trend=True).order_by('-rsRank')
         
-        # If date is provided, filter by specific date
-        # If not, get the latest date
-        if query_date:
-            queryset = queryset.filter(date=query_date)
-        else:
-            latest_date = StockAnalysis.objects.latest('date').date
-            queryset = queryset.filter(date=latest_date)
-
+        queryset = queryset.filter(date=query_date)
+        
         # Check if any records exist
         if not queryset.exists():
             return 404, ErrorResponse(status="error", message="No stocks found matching Minervini Trend Template")
