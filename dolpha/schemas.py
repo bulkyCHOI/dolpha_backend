@@ -41,6 +41,11 @@ class SuccessResponseStockDart(Schema):
 # =====================================================================
 # 데이터를 담는 스키마
 
+class StockIndexSchema(Schema):
+    code: str
+    name: str
+    market: str
+
 class CompanySchema(Schema):
     code: str
     name: str
@@ -55,15 +60,15 @@ class StockAnalysisSchema(Schema):
     ma150: float
     ma200: float
     rsScore: float
-    # rsScore1m: float
-    # rsScore3m: float
-    # rsScore6m: float
-    # rsScore12m: float
+    rsScore1m: float
+    rsScore3m: float
+    rsScore6m: float
+    rsScore12m: float
     rsRank: float
-    # rsRank1m: float
-    # rsRank3m: float
-    # rsRank6m: float
-    # rsRank12m: float
+    rsRank1m: float
+    rsRank3m: float
+    rsRank6m: float
+    rsRank12m: float
     max_52w: float
     min_52w: float
     max_52w_date: str = None
@@ -119,3 +124,11 @@ class SuccessResponseStockFinancialSchema(Schema):
 class SuccessResponseStockAnalysisSchema(Schema):
     status: str
     data: List[StockAnalysisSchema]  # JSON 형태를 표현
+
+class SuccessResponseStockIndexSchema(Schema):
+    status: str
+    data: List[StockIndexSchema]  # JSON 형태를 표현
+
+class SuccessResponseIndexOhlcvSchema(Schema):
+    status: str
+    data: List[StockOhlcvSchema]  # JSON 형태를 표현
