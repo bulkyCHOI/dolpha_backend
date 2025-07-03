@@ -42,7 +42,7 @@ def getAndSave_index_list(request):
     try:
         # 종목정보 조회
         df_krx = Common.GetSnapDataReader()
-        print(df_krx.head(), len(df_krx))
+        print(f"조회된 KRX 인덱스 데이터: {len(df_krx)}개")
 
         # 컬럼명 매핑
         column_mapping = {
@@ -63,53 +63,93 @@ def getAndSave_index_list(request):
         # 데이터 전처리
         df_krx['code'] = df_krx['code'].astype(str)  # 코드 문자열로 변환
 
+        # 기존 데이터 한 번만 조회하여 메모리에 캐싱
+        existing_indices = {obj.code: obj for obj in StockIndex.objects.all()}
+        existing_codes = set(existing_indices.keys())
+
         # 벌크 데이터 준비
         stockIndex_to_create = []
         stockIndex_to_update = []
-        existing_codes = set(StockIndex.objects.values_list('code', flat=True))
+        failed_records = []
 
-        for index, row in df_krx.iterrows():
+        # iterrows() 대신 itertuples() 사용 (더 빠름)
+        for row in df_krx.itertuples(index=False):
             try:
-                stockIndex_data = {
-                    'code': str(row['code']),
-                    'name': str(row['name']),
-                    'market': str(row['market']),
-                }
+                code = str(row.code)
+                name = str(row.name)
+                market = str(row.market)
 
                 # 생성 또는 업데이트 분류
-                if row['code'] not in existing_codes:
-                    stockIndex_to_create.append(StockIndex(**stockIndex_data))
+                if code not in existing_codes:
+                    stockIndex_to_create.append(StockIndex(
+                        code=code,
+                        name=name,
+                        market=market
+                    ))
                 else:
-                    stockIndex = StockIndex.objects.get(code=row['code'])
-                    stockIndex.name = stockIndex_data['name']
-                    stockIndex.market = stockIndex_data['market']
-                    stockIndex_to_update.append(StockIndex(**stockIndex_data))
+                    # 변경사항이 있는 경우만 업데이트 대상에 추가
+                    existing_obj = existing_indices[code]
+                    if existing_obj.name != name or existing_obj.market != market:
+                        existing_obj.name = name
+                        existing_obj.market = market
+                        stockIndex_to_update.append(existing_obj)
                     
             except Exception as e:
                 traceback.print_exc()
-                return 500, {
-                    "status": "ERROR",
-                    "message": f"Failed to process row {index}: {str(e)}"
-                }
+                failed_records.append({
+                    'code': getattr(row, 'code', 'N/A'),
+                    'error': str(e)
+                })
 
-        # 데이터베이스 트랜잭션
+        # 데이터베이스 트랜잭션 - 모든 작업을 한 번에 수행
         with transaction.atomic():
+            # 벌크 생성
             if stockIndex_to_create:
-                StockIndex.objects.bulk_create(stockIndex_to_create)
-            elif stockIndex_to_update:
-                StockIndex.objects.bulk_update(stockIndex_to_update, ['name', 'market'])
-        
-        krx_codes = df_krx['code'].tolist()  # KRX 종목 코드 리스트 code: 소문자로 변경했으므로 사용가능
-        for code in krx_codes:
-            df_stocks = Common.GetSnapDataReader_IndexCode(code)    # 1002 코스피 대형주에 속한 종목에 대해 조회가능
-            print(df_stocks.head(), len(df_stocks))
+                StockIndex.objects.bulk_create(stockIndex_to_create, batch_size=1000)
             
-            stockList = df_stocks['Code'].tolist()  # 종목 코드 리스트
-            index = StockIndex.objects.get(code=code)  # 인덱스 객체 가져오기
-            index.companies.add(*stockList)  # 인덱스에 종목 추가
+            # 벌크 업데이트
+            if stockIndex_to_update:
+                StockIndex.objects.bulk_update(stockIndex_to_update, ['name', 'market'], batch_size=1000)
             
-            print(index.companies.all())  # 인덱스에 추가된 종목 확인
-            # print(company.indexes.all())  # 종목에 속한 인덱스 확인
+            # 인덱스별 종목 관계 설정 최적화
+            print("인덱스별 종목 관계 설정 시작...")
+            
+            # 새로 생성된 인덱스들도 포함하여 전체 인덱스 목록 재조회
+            all_indices = {obj.code: obj for obj in StockIndex.objects.all()}
+            
+            # 종목 관계 설정을 위한 데이터 준비
+            for code in tqdm(df_krx['code'], desc="인덱스별 종목 관계 설정"):
+                try:
+                    # 인덱스에 속한 종목 조회
+                    df_stocks = Common.GetSnapDataReader_IndexCode(code)
+                    
+                    if df_stocks is None or df_stocks.empty:
+                        print(f"인덱스 {code}에 대한 종목 데이터가 없습니다.")
+                        continue
+                    
+                    # 종목 코드 리스트 추출
+                    stock_codes = df_stocks['Code'].astype(str).tolist()
+                    
+                    # 인덱스 객체 가져오기
+                    if code in all_indices:
+                        index_obj = all_indices[code]
+                        
+                        # 기존 관계를 모두 지우고 새로 설정 (더 효율적)
+                        index_obj.companies.clear()
+                        
+                        # 유효한 종목 코드만 필터링하여 추가
+                        valid_companies = Company.objects.filter(code__in=stock_codes)
+                        if valid_companies.exists():
+                            index_obj.companies.add(*valid_companies)
+                            print(f"인덱스 {code}에 {valid_companies.count()}개 종목 추가")
+                        
+                except Exception as e:
+                    print(f"인덱스 {code} 처리 중 오류: {str(e)}")
+                    failed_records.append({
+                        'code': code,
+                        'error': f"Index-Company relationship error: {str(e)}"
+                    })
+                    continue
         
         # 응답 구성
         response = {
@@ -117,13 +157,17 @@ def getAndSave_index_list(request):
             "count_total": len(df_krx),
             "count_created": len(stockIndex_to_create),
             "count_updated": len(stockIndex_to_update),
-            "count_failed": 0,  # 실패한 레코드는 없음
+            "count_failed": len(failed_records),
+            "failed_records": failed_records if failed_records else None
         }
         return response
 
     except Exception as e:
         traceback.print_exc()
-        return
+        return 500, {
+            "status": "ERROR",
+            "message": f"Failed to process index data: {str(e)}"
+        }
 
 # 모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
 @api.post("/getAndSave_stock_description", response={200: StockDescriptionResponse, 400: ErrorResponse, 500: ErrorResponse})
@@ -137,9 +181,9 @@ def getAndSave_stock_description(request):
     try:
         # 종목정보 조회
         df_krx_desc = Common.GetStockList("KRX-DESC")
-        print(df_krx_desc.head())
+        print(f"조회된 KRX 주식 설명 데이터: {len(df_krx_desc)}개")
 
-        # 컬럼명 매핑 (이전 데이터: Code, Name 등)
+        # 컬럼명 매핑
         column_mapping = {
             'Code': 'code',
             'Name': 'name',
@@ -163,78 +207,81 @@ def getAndSave_stock_description(request):
             }
 
         # 데이터 전처리
-        # df_krx_desc['listing_date'] = pd.to_datetime(df_krx_desc['listing_date'], errors='coerce')
-        # df_krx_desc = df_krx_desc.dropna(subset=['code'])  # 필수 필드 누락 제거
+        df_krx_desc['code'] = df_krx_desc['code'].astype(str)  # 코드 문자열로 변환
+        
+        # NaN 값 처리
+        df_krx_desc = df_krx_desc.fillna({
+            'sector': '기타',
+            'industry': '기타'
+        })
+        
+        # 기존 데이터를 한 번만 조회하여 메모리에 캐싱
+        existing_companies = {obj.code: obj for obj in Company.objects.all()}
+        existing_codes = set(existing_companies.keys())
 
         # 벌크 데이터 준비
         companies_to_create = []
         companies_to_update = []
         failed_records = []
-        existing_codes = set(Company.objects.values_list('code', flat=True))
 
-        for index, row in df_krx_desc.iterrows():
+        # iterrows() 대신 itertuples() 사용 (더 빠름)
+        for row in tqdm(df_krx_desc.itertuples(index=False), total=len(df_krx_desc), desc="데이터 처리 중"):
             try:
-                # 유효성 검사
-                # print(row['listing_date'], type(row['listing_date']))
-                # if pd.isna(row['listing_date']):
-                #     row['listing_date'] = None
-                # else:
-                #     row['listing_date'] = row['listing_date'].date()
-                # if not isinstance(row['homepage'], str) or not row['homepage'].startswith('http'):
-                #     row['homepage'] = 'https://example.com'  # 기본값
+                code = str(row.code)
+                name = str(row.name)
+                market = str(row.market)
+                sector = str(row.sector)
+                industry = str(row.industry)
 
-                # if row['market'] in ['KONEX']:
-                #     continue  # KONEX 시장은 제외
-                
-                company_data = {
-                    'code': str(row['code']),
-                    'name': str(row['name']),
-                    'market': str(row['market']),
-                    'sector': str(row['sector']),
-                    'industry': str(row['industry']),
-                    # 'listing_date': row['listing_date'].date()
-                    # 'settle_month': str(row['settle_month']),
-                    # 'representative': str(row['representative']),
-                    # 'homepage': str(row['homepage']),
-                    # 'region': str(row['region'])
-                }
+                # KONEX 시장 제외 (선택사항)
+                # if market == 'KONEX':
+                #     continue
 
                 # 생성 또는 업데이트 분류
-                if row['code'] in existing_codes:
-                    companies_to_update.append(company_data)
+                if code not in existing_codes:
+                    companies_to_create.append(Company(
+                        code=code,
+                        name=name,
+                        market=market,
+                        sector=sector,
+                        industry=industry
+                    ))
                 else:
-                    companies_to_create.append(Company(**company_data))
+                    # 변경사항이 있는 경우만 업데이트 대상에 추가
+                    existing_obj = existing_companies[code]
+                    if (existing_obj.name != name or 
+                        existing_obj.market != market or 
+                        existing_obj.sector != sector or 
+                        existing_obj.industry != industry):
+                        
+                        existing_obj.name = name
+                        existing_obj.market = market
+                        existing_obj.sector = sector
+                        existing_obj.industry = industry
+                        companies_to_update.append(existing_obj)
 
             except Exception as e:
                 traceback.print_exc()
                 failed_records.append({
-                    'index': index,
-                    'code': row.get('code', 'N/A'),
+                    'code': getattr(row, 'code', 'N/A'),
                     'error': str(e)
                 })
 
-        # 데이터베이스 트랜잭션
+        # 데이터베이스 트랜잭션 - 모든 작업을 한 번에 수행
         with transaction.atomic():
             # 벌크 생성
             if companies_to_create:
-                Company.objects.bulk_create(companies_to_create)
+                Company.objects.bulk_create(companies_to_create, batch_size=1000)
+                print(f"신규 회사 {len(companies_to_create)}개 생성 완료")
             
-            # 벌크 업데이트
-            for company_data in companies_to_update:
-                Company.objects.update_or_create(
-                    code=company_data['code'],
-                    defaults={
-                        'name': company_data['name'],
-                        'market': company_data['market'],
-                        'sector': company_data['sector'],
-                        'industry': company_data['industry'],
-                        # 'listing_date': company_data['listing_date'],
-                        # 'settle_month': company_data['settle_month'],
-                        # 'representative': company_data['representative'],
-                        # 'homepage': company_data['homepage'],
-                        # 'region': company_data['region']
-                    }
+            # 벌크 업데이트 - update_or_create 대신 bulk_update 사용
+            if companies_to_update:
+                Company.objects.bulk_update(
+                    companies_to_update, 
+                    ['name', 'market', 'sector', 'industry'], 
+                    batch_size=1000
                 )
+                print(f"기존 회사 {len(companies_to_update)}개 업데이트 완료")
 
         # 응답 구성
         response = {
