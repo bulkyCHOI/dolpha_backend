@@ -254,6 +254,101 @@ def getAndSave_stock_description(request):
             "message": f"Failed to process stock data: {str(e)}"
         }
 
+# Index 코드에 해당하는 OHLCV 데이터를 데이터베이스에 저장합니다.
+@api.post("/getAndSave_index_data", response={200: SuccessResponse, 400: ErrorResponse, 404: ErrorResponse, 500: ErrorResponse})
+def getAndSave_index_data(request, code: str=None, limit: int=1):
+    """
+    Index 코드에 해당하는 OHLCV 데이터를 데이터베이스에 저장합니다.
+    코드를 입력하지 않으면, 모든 인덱스의 OHLCV 데이터를 가져옵니다.
+    
+    Args:
+        code (str): 인덱스 코드
+        limit (int): 가져올 데이터의 개수 (기본값: 1)
+    
+    Returns:
+        SuccessResponse: 데이터 저장 성공 시 메시지와 저장된 레코드 수
+        ErrorResponse: 에러 발생 시 에러 메시지
+    """
+    indices = []
+    
+    if code is not None:
+        # code에 맞는 인덱스의 OHLCV 데이터를 가져옴
+        try:
+            index = StockIndex.objects.get(code=code)
+            indices = [index]  # 단일 인덱스 객체를 리스트로 감싸서 처리
+        except StockIndex.DoesNotExist:
+            return 404, {"error": f"No index found with code: {code}"}
+    else:
+        # code가 주어지지 않은 경우 모든 인덱스의 OHLCV 데이터를 가져옴
+        indices = StockIndex.objects.all()
+        
+    print(f"Total indices: {len(indices)}")
+    
+    if len(indices) == 0:
+        return 404, {"error": "No indices found in the database."}
+    
+    for index in tqdm(indices, desc="Processing indices..."):
+        # print(index.code, index.name)
+        
+        df = Common.GetOhlcv("KR", f"KRX-INDEX:{index.code}", limit=limit, adj_ok="1")
+        # print(df.head())
+
+        if df is None or len(df) == 0:
+            return 400, {"error": "No OHLCV data found for the given index code."}
+        
+        # 컬럼명 검증
+        expected_columns = ['open', 'high', 'low', 'close', 'volume', 'change']
+        if not all(col in df.columns for col in expected_columns):
+            return 400, {"error": "Required OHLCV columns are missing in the data."}
+
+        # 데이터 전처리
+        try:
+            df.index = pd.to_datetime(df.index, errors='coerce')    # 인덱스를 Timestamp로 변환
+            if df.index.isna().any():   # 변환 실패 시 NaT가 있는지 확인
+                return 400, {"error": "Invalid date format in OHLCV data index."}
+        except Exception as e:
+            return 400, {"error": f"Failed to process date column: {str(e)}"}
+        # 데이터베이스 저장
+        try:
+            with transaction.atomic():
+                # 벌크 데이터 준비
+                index_ohlcv_list = []
+            
+                # DataFrame에서 NaN 값을 기본값으로 대체
+                df = df.fillna({
+                    'open': 0.0,
+                    'high': 0.0,
+                    'low': 0.0,
+                    'close': 0.0,
+                    'volume': 0,
+                    'change': 0.0
+                })
+                for index, row in df.iterrows():
+                    index_ohlcv = IndexOHLCV(
+                        code=index,
+                        date=index.date(),  # 인덱스(Timestamp)에서 date 추출
+                        open=float(row['open']),
+                        high=float(row['high']),
+                        low=float(row['low']),
+                        close=float(row['close']),
+                        volume=int(row['volume']),
+                        change=float(row['change'] if 'change' in row else 0.0)  # 변화율이 없을 경우 기본값 0.0 사용
+                    )
+                    index_ohlcv_list.append(index_ohlcv)
+                
+                # 벌크 삽입
+                if index_ohlcv_list:
+                    IndexOHLCV.objects.bulk_create(index_ohlcv_list, ignore_conflicts=True)
+        except Exception as e:
+            traceback.print_exc()
+            return 500, {"error": f"Failed to save index data: {str(e)}"}
+        
+    return {
+                "status": "OK",
+                "message": f"Index data {len(indices)} saved successfully.",
+                "count_saved": limit,
+            }
+
 # 주식 코드에 해당하는 OHLCV 데이터를 데이터베이스에 저장합니다.
 @api.post("/getAndSave_stock_data", response={200: SuccessResponse, 400: ErrorResponse, 404: ErrorResponse, 500: ErrorResponse})
 def getAndSave_stock_data(request, code: str=None, limit: int=1):

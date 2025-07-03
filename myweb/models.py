@@ -8,6 +8,29 @@ class StockIndex(models.Model):
 
     def __str__(self):
         return self.name
+
+class IndexOHLCV(models.Model):
+    code = models.ForeignKey(StockIndex, on_delete=models.CASCADE, related_name='index_ohlcv')  # 지수 코드 (StockIndex 모델과 연결)
+    date = models.DateField()  # 날짜
+    open = models.IntegerField()  # 시가
+    high = models.IntegerField()  # 고가
+    low = models.IntegerField()  # 저가
+    close = models.IntegerField()  # 종가
+    volume = models.IntegerField()  # 거래량
+
+    class Meta:
+        # 테이블 이름 지정 (기존 테이블과 매핑)
+        db_table = 'index_ohlcv'
+        # 복합 기본 키 설정
+        constraints = [
+            models.UniqueConstraint(fields=['code', 'date'], name='unique_index_date')
+        ]
+        # 관리자 패널에서 보기 좋게 정렬
+        ordering = ['code', 'date']
+
+    def __str__(self):
+        return f"{self.code} ({self.date})"
+
 class Company(models.Model):
     code = models.CharField(max_length=10, primary_key=True)
     indices = models.ManyToManyField(StockIndex, related_name='companies')  # 다대다 관계
