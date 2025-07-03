@@ -287,11 +287,11 @@ def getAndSave_index_data(request, code: str=None, limit: int=1):
     if len(indices) == 0:
         return 404, {"error": "No indices found in the database."}
     
-    for index in tqdm(indices, desc="Processing indices..."):
+    for stockIndex in tqdm(indices, desc="Processing indices..."):
         # print(index.code, index.name)
         
-        df = Common.GetOhlcv("KR", f"KRX-INDEX:{index.code}", limit=limit, adj_ok="1")
-        # print(df.head())
+        df = Common.GetOhlcv("KR", f"KRX-INDEX:{stockIndex.code}", limit=limit, adj_ok="1")
+        print(df.head())
 
         if df is None or len(df) == 0:
             return 400, {"error": "No OHLCV data found for the given index code."}
@@ -325,7 +325,7 @@ def getAndSave_index_data(request, code: str=None, limit: int=1):
                 })
                 for index, row in df.iterrows():
                     index_ohlcv = IndexOHLCV(
-                        code=index,
+                        code=stockIndex,
                         date=index.date(),  # 인덱스(Timestamp)에서 date 추출
                         open=float(row['open']),
                         high=float(row['high']),
@@ -386,7 +386,7 @@ def getAndSave_stock_data(request, code: str=None, limit: int=1):
         # print(company.code, company.name)
         
         df = Common.GetOhlcv("KR", company.code, limit=limit, adj_ok="1")
-        # print(df.head())
+        print(df.head())
 
         if df is None or len(df) == 0:
             return 400, {"error": "No OHLCV data found for the given stock code."}
