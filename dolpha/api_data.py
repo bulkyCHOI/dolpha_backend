@@ -39,7 +39,14 @@ def getAndSave_index_list(request):
         df_krx = Common.GetSnapDataReader()
         print(f"조회된 KRX 인덱스 데이터: {len(df_krx)}개")
 
-        # 컬럼명 매핑
+        # 입력 데이터 검증
+        if df_krx is None or df_krx.empty:
+            return 400, {
+                "status": "ERROR",
+                "message": "KRX 데이터를 가져올 수 없습니다."
+            }
+
+        # 컬럼명 매핑 및 검증
         column_mapping = {
             'Code': 'code',
             'Name': 'name',
@@ -47,32 +54,38 @@ def getAndSave_index_list(request):
         }
         df_krx = df_krx.rename(columns=column_mapping)
 
-        # 예상 컬럼 확인
         expected_columns = list(column_mapping.values())
         if not all(col in df_krx.columns for col in expected_columns):
             return 400, {
                 "status": "ERROR",
-                "message": "Required columns are missing in the KRX data"
+                "message": "KRX 데이터에 필수 컬럼이 누락되었습니다."
             }
 
-        # 데이터 전처리
-        df_krx['code'] = df_krx['code'].astype(str)  # 코드 문자열로 변환
+        # 데이터 전처리 최적화
+        df_krx['code'] = df_krx['code'].astype(str).str.strip()  # 공백 제거
+        df_krx = df_krx.dropna(subset=['code', 'name'])  # 필수 값이 없는 행 제거
+        df_krx = df_krx.drop_duplicates(subset=['code'])  # 중복 제거
 
-        # 기존 데이터 한 번만 조회하여 메모리에 캐싱
-        existing_indices = {obj.code: obj for obj in StockIndex.objects.all()}
+        # 기존 데이터를 values()로 효율적 조회
+        existing_indices = {
+            obj['code']: obj for obj in 
+            StockIndex.objects.values('code', 'name', 'market')
+        }
         existing_codes = set(existing_indices.keys())
 
-        # 벌크 데이터 준비
+        # 벌크 데이터 준비 최적화
         stockIndex_to_create = []
         stockIndex_to_update = []
         failed_records = []
 
-        # iterrows() 대신 itertuples() 사용 (더 빠름)
-        for row in df_krx.itertuples(index=False):
+        # DataFrame을 딕셔너리로 변환하여 더 빠른 처리
+        df_records = df_krx.to_dict('records')
+        
+        for record in df_records:
             try:
-                code = str(row.code)
-                name = str(row.name)
-                market = str(row.market)
+                code = str(record['code'])
+                name = str(record['name'])
+                market = str(record['market'])
 
                 # 생성 또는 업데이트 분류
                 if code not in existing_codes:
@@ -82,69 +95,99 @@ def getAndSave_index_list(request):
                         market=market
                     ))
                 else:
-                    # 변경사항이 있는 경우만 업데이트 대상에 추가
+                    # 변경사항 확인 (딕셔너리 기반으로 더 빠름)
                     existing_obj = existing_indices[code]
-                    if existing_obj.name != name or existing_obj.market != market:
-                        existing_obj.name = name
-                        existing_obj.market = market
-                        stockIndex_to_update.append(existing_obj)
+                    if existing_obj['name'] != name or existing_obj['market'] != market:
+                        # update용 객체는 실제 모델 인스턴스가 필요
+                        update_obj = StockIndex.objects.get(id=existing_obj['id'])
+                        update_obj.name = name
+                        update_obj.market = market
+                        stockIndex_to_update.append(update_obj)
                     
             except Exception as e:
-                traceback.print_exc()
                 failed_records.append({
-                    'code': getattr(row, 'code', 'N/A'),
+                    'code': record.get('code', 'N/A'),
                     'error': str(e)
                 })
 
-        # 데이터베이스 트랜잭션 - 모든 작업을 한 번에 수행
+        print(f"처리 대상: 생성 {len(stockIndex_to_create)}개, 업데이트 {len(stockIndex_to_update)}개")
+
+        # 데이터베이스 트랜잭션 최적화
         with transaction.atomic():
-            # 벌크 생성
+            # 벌크 생성 (배치 크기 최적화)
             if stockIndex_to_create:
-                StockIndex.objects.bulk_create(stockIndex_to_create, batch_size=1000)
+                StockIndex.objects.bulk_create(stockIndex_to_create, batch_size=500)
+                print(f"인덱스 {len(stockIndex_to_create)}개 생성 완료")
             
             # 벌크 업데이트
             if stockIndex_to_update:
-                StockIndex.objects.bulk_update(stockIndex_to_update, ['name', 'market'], batch_size=1000)
+                StockIndex.objects.bulk_update(stockIndex_to_update, ['name', 'market'], batch_size=500)
+                print(f"인덱스 {len(stockIndex_to_update)}개 업데이트 완료")
             
-            # 인덱스별 종목 관계 설정 최적화
+            # 인덱스-종목 관계 설정 최적화
             print("인덱스별 종목 관계 설정 시작...")
             
-            # 새로 생성된 인덱스들도 포함하여 전체 인덱스 목록 재조회
+            # 모든 인덱스와 회사 데이터를 한 번에 메모리로 로드
             all_indices = {obj.code: obj for obj in StockIndex.objects.all()}
+            all_companies = {obj.code: obj for obj in Company.objects.all()}
             
-            # 종목 관계 설정을 위한 데이터 준비
-            for code in tqdm(df_krx['code'], desc="인덱스별 종목 관계 설정"):
+            # 배치로 관계 데이터 수집
+            relationship_data = []  # [(index_obj, [company_objs])]
+            
+            for code in tqdm(df_krx['code'], desc="인덱스별 종목 관계 데이터 수집"):
                 try:
                     # 인덱스에 속한 종목 조회
                     df_stocks = Common.GetSnapDataReader_IndexCode(code)
                     
                     if df_stocks is None or df_stocks.empty:
-                        print(f"인덱스 {code}에 대한 종목 데이터가 없습니다.")
                         continue
                     
-                    # 종목 코드 리스트 추출
-                    stock_codes = df_stocks['Code'].astype(str).tolist()
+                    # 종목 코드 리스트 추출 및 정리
+                    stock_codes = df_stocks['Code'].astype(str).str.strip().tolist()
                     
                     # 인덱스 객체 가져오기
                     if code in all_indices:
                         index_obj = all_indices[code]
                         
-                        # 기존 관계를 모두 지우고 새로 설정 (더 효율적)
-                        index_obj.companies.clear()
+                        # 유효한 종목만 필터링 (메모리에서 처리)
+                        valid_companies = [
+                            all_companies[stock_code] 
+                            for stock_code in stock_codes 
+                            if stock_code in all_companies
+                        ]
                         
-                        # 유효한 종목 코드만 필터링하여 추가
-                        valid_companies = Company.objects.filter(code__in=stock_codes)
-                        if valid_companies.exists():
-                            index_obj.companies.add(*valid_companies)
-                            print(f"인덱스 {code}에 {valid_companies.count()}개 종목 추가")
+                        if valid_companies:
+                            relationship_data.append((index_obj, valid_companies))
                         
                 except Exception as e:
-                    print(f"인덱스 {code} 처리 중 오류: {str(e)}")
+                    print(f"인덱스 {code} 데이터 수집 중 오류: {str(e)}")
                     failed_records.append({
                         'code': code,
-                        'error': f"Index-Company relationship error: {str(e)}"
+                        'error': f"관계 데이터 수집 오류: {str(e)}"
                     })
                     continue
+            
+            # 관계 설정을 배치로 처리 (DB 액세스 최소화)
+            print(f"관계 설정 시작: {len(relationship_data)}개 인덱스")
+            for index_obj, companies in tqdm(relationship_data, desc="관계 설정 처리"):
+                try:
+                    # 기존 관계를 모두 지우고 새로 설정
+                    index_obj.companies.clear()
+                    
+                    # 배치 크기를 제한하여 메모리 효율성 확보
+                    batch_size = 1000
+                    for i in range(0, len(companies), batch_size):
+                        batch_companies = companies[i:i+batch_size]
+                        index_obj.companies.add(*batch_companies)
+                    
+                except Exception as e:
+                    print(f"인덱스 {index_obj.code} 관계 설정 중 오류: {str(e)}")
+                    failed_records.append({
+                        'code': index_obj.code,
+                        'error': f"관계 설정 오류: {str(e)}"
+                    })
+        
+        print("인덱스별 종목 관계 설정 완료")
         
         # 응답 구성
         response = {
@@ -161,7 +204,7 @@ def getAndSave_index_list(request):
         traceback.print_exc()
         return 500, {
             "status": "ERROR",
-            "message": f"Failed to process index data: {str(e)}"
+            "message": f"인덱스 데이터 처리 실패: {str(e)}"
         }
 
 # 모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
