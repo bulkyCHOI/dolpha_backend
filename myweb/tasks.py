@@ -3,7 +3,15 @@ from django_apscheduler.jobstores import DjangoJobStore, register_events
 from django.utils import timezone
 from django.http import HttpRequest
 from django.test.client import RequestFactory
-from dolpha.api import *  # api.py에서 함수 임포트
+# API 함수들을 분리된 모듈에서 임포트
+from dolpha.api_data import (
+    getAndSave_index_list,
+    getAndSave_stock_description, 
+    getAndSave_stock_data,
+    calculate_stock_analysis,
+    getAndSave_stock_dartData,
+    getAndSave_index_data
+)
 import sys
 import traceback  # 누락된 import 추가
 
