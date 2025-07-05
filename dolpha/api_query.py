@@ -45,6 +45,148 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
        - ValueError: 잘못된 날짜 형식이 입력된 경우.\n
        - Exception: 기타 예상치 못한 오류 발생 시.\n
     """
+    # try:
+    #     # Validate format parameter
+    #     if format.lower() not in ["json", "excel"]:
+    #         return 400, ErrorResponse(status="error", message="Invalid format. Use 'json' or 'excel'")
+
+    #     # Convert date string to date object if provided
+    #     query_date = None
+    #     if date:
+    #         try:
+    #             query_date = datetime.strptime(date, "%Y-%m-%d").date()
+    #         except ValueError:
+    #             return 400, ErrorResponse(status="error", message="Invalid date format. Use YYYY-MM-DD")
+    #     else:
+    #         # If no date is provided, use the latest date from StockAnalysis
+    #         query_date = StockAnalysis.objects.latest('date').date
+
+    #     # Build optimized query with select_related for Company data
+    #     queryset = (StockAnalysis.objects
+    #                .filter(is_minervini_trend=True, date=query_date)
+    #                .select_related('code')
+    #                .order_by('-rsRank'))
+        
+    #     # Check if any records exist
+    #     if not queryset.exists():
+    #         return 404, ErrorResponse(status="error", message="No stocks found matching Minervini Trend Template")
+
+    #     # 모든 종목의 재무 데이터를 한 번에 가져와서 메모리에 캐싱 (N+1 쿼리 문제 해결)
+    #     company_codes = [analysis.code for analysis in queryset]
+        
+    #     # 매출액과 영업이익 데이터를 벌크로 조회
+    #     finance_data = (StockFinancialStatement.objects
+    #                    .filter(code__in=company_codes, 
+    #                           account_name__in=["매출액", "영업이익"])
+    #                    .order_by('code', 'account_name', '-year', '-quarter')
+    #                    .values('code', 'account_name', 'amount'))
+    #     # print(f"Fetched {len(finance_data)} financial records for {len(company_codes)} companies")
+        
+    #     # 재무 데이터를 딕셔너리로 그룹화하여 빠른 조회 가능하게 함
+    #     finance_dict = {}
+    #     for item in finance_data:
+    #         code = item['code']
+    #         account = item['account_name']
+    #         amount = item['amount']
+    #         print(f"Processing {code} - {account}: {amount}")
+            
+    #         if code not in finance_dict:
+    #             finance_dict[code] = {'매출액': [], '영업이익': []}
+            
+    #         if account in finance_dict[code]:
+    #             finance_dict[code][account].append(amount)
+
+    #     # 결과 데이터 구성
+    #     results = []
+    #     for analysis in queryset:
+    #         # 재무 데이터 가져오기 (이미 메모리에 캐싱됨)
+    #         code = analysis.code
+    #         매출 = finance_dict.get(code, {}).get('매출액', [])
+    #         영업이익 = finance_dict.get(code, {}).get('영업이익', [])
+    #         print(f"Processing {code.code} - {code.name}: 매출={매출}, 영업이익={영업이익}")
+            
+    #         # 성장률 계산
+    #         매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else 0.0
+    #         영업이익증가율 = growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
+
+    #         combined_data = {
+    #             # Company fields (select_related로 이미 로드됨)
+    #             'code': analysis.code.code,
+    #             'name': analysis.code.name,
+    #             'market': analysis.code.market,
+    #             'sector': analysis.code.sector,
+    #             'industry': analysis.code.industry,
+    #             # StockAnalysis fields
+    #             'date': str(analysis.date),
+    #             'ma50': analysis.ma50,
+    #             'ma150': analysis.ma150,
+    #             'ma200': analysis.ma200,
+    #             'rsScore': analysis.rsScore,
+    #             'rsScore1m': analysis.rsScore1m,
+    #             'rsScore3m': analysis.rsScore3m,
+    #             'rsScore6m': analysis.rsScore6m,
+    #             'rsScore12m': analysis.rsScore12m,
+    #             'rsRank': analysis.rsRank,
+    #             'rsRank1m': analysis.rsRank1m,
+    #             'rsRank3m': analysis.rsRank3m,
+    #             'rsRank6m': analysis.rsRank6m,
+    #             'rsRank12m': analysis.rsRank12m,
+    #             'max_52w': analysis.max_52w,
+    #             'min_52w': analysis.min_52w,
+    #             'max_52w_date': str(analysis.max_52w_date) if analysis.max_52w_date else None,
+    #             'min_52w_date': str(analysis.min_52w_date) if analysis.min_52w_date else None,
+    #             'atr': analysis.atr,
+    #             'is_minervini_trend': analysis.is_minervini_trend,
+    #             # 재무 데이터 (캐싱된 데이터에서 조회)
+    #             '매출증가율': 매출증가율,
+    #             '영업이익증가율': 영업이익증가율,
+    #             '전전기매출': 매출[2] if len(매출) > 2 else 0,
+    #             '전기매출': 매출[1] if len(매출) > 1 else 0,
+    #             '당기매출': 매출[0] if 매출 else 0,
+    #             '전전기영업이익': 영업이익[2] if len(영업이익) > 2 else 0,
+    #             '전기영업이익': 영업이익[1] if len(영업이익) > 1 else 0,
+    #             '당기영업이익': 영업이익[0] if 영업이익 else 0,
+    #         }
+    #         results.append(combined_data)
+        
+    #     # 응답 형식에 따른 처리
+    #     if format.lower() == "excel":
+    #         # pandas DataFrame으로 변환하여 Excel 생성 최적화
+    #         df = pd.DataFrame(results)
+    #         filename = f"mtt_stocks_{date or 'latest'}.xlsx"
+            
+    #         # BytesIO 버퍼 생성 및 Excel 파일 작성
+    #         output = BytesIO()
+    #         with pd.ExcelWriter(output, engine='openpyxl', options={'remove_timezone': True}) as writer:
+    #             df.to_excel(writer, index=False, sheet_name='MTT_Stocks')
+                
+    #             # 워크시트 스타일링 (선택사항)
+    #             worksheet = writer.sheets['MTT_Stocks']
+    #             # 헤더 스타일 적용
+    #             for cell in worksheet[1]:
+    #                 cell.font = Font(bold=True)
+            
+    #         output.seek(0)
+            
+    #         # Excel 파일을 HttpResponse로 반환
+    #         response = HttpResponse(
+    #             content=output.getvalue(),
+    #             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    #         )
+    #         response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    #         return response
+        
+    #     else:  # format.lower() == "json"
+    #         # JSON 응답 반환
+    #         return 200, SuccessResponseStockAnalysis(
+    #             status="OK",
+    #             data=results
+    #         )
+
+    # except Exception as e:
+    #     traceback.print_exc()
+    #     return 500, ErrorResponse(status="error", message=str(e))
+    
     try:
         # Validate format parameter
         if format.lower() not in ["json", "excel"]:
@@ -61,53 +203,27 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
             # If no date is provided, use the latest date from StockAnalysis
             query_date = StockAnalysis.objects.latest('date').date
 
-        # Build optimized query with select_related for Company data
-        queryset = (StockAnalysis.objects
-                   .filter(is_minervini_trend=True, date=query_date)
-                   .select_related('code')
-                   .order_by('-rsRank'))
+        # Build query
+        queryset = StockAnalysis.objects.filter(is_minervini_trend=True).order_by('-rsRank')
+        
+        queryset = queryset.filter(date=query_date)
         
         # Check if any records exist
         if not queryset.exists():
             return 404, ErrorResponse(status="error", message="No stocks found matching Minervini Trend Template")
 
-        # 모든 종목의 재무 데이터를 한 번에 가져와서 메모리에 캐싱 (N+1 쿼리 문제 해결)
-        company_codes = [analysis.code for analysis in queryset]
-        
-        # 매출액과 영업이익 데이터를 벌크로 조회
-        finance_data = (StockFinancialStatement.objects
-                       .filter(code__in=company_codes, 
-                              account_name__in=["매출액", "영업이익"])
-                       .order_by('code', 'account_name', '-year', '-quarter')
-                       .values('code', 'account_name', 'amount'))
-        
-        # 재무 데이터를 딕셔너리로 그룹화하여 빠른 조회 가능하게 함
-        finance_dict = {}
-        for item in finance_data:
-            code_id = item['code']
-            account = item['account_name']
-            amount = item['amount']
-            
-            if code_id not in finance_dict:
-                finance_dict[code_id] = {'매출액': [], '영업이익': []}
-            
-            if account in finance_dict[code_id]:
-                finance_dict[code_id][account].append(amount)
-
-        # 결과 데이터 구성
+        # Combine with Company data using select_related
         results = []
-        for analysis in queryset:
-            # 재무 데이터 가져오기 (이미 메모리에 캐싱됨)
-            code = analysis.code
-            매출 = finance_dict.get(code, {}).get('매출액', [])
-            영업이익 = finance_dict.get(code, {}).get('영업이익', [])
-            
-            # 성장률 계산
+        for analysis in queryset.select_related('code'):
+            finance = StockFinancialStatement.objects.filter(code=analysis.code).order_by('-year', '-quarter')
+            매출 = finance.filter(account_name="매출액").values_list('amount', flat=True).distinct()
+            영업이익 = finance.filter(account_name="영업이익").values_list('amount', flat=True).distinct()
             매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else 0.0
             영업이익증가율 = growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
 
+
             combined_data = {
-                # Company fields (select_related로 이미 로드됨)
+                # Company fields
                 'code': analysis.code.code,
                 'name': analysis.code.name,
                 'market': analysis.code.market,
@@ -134,35 +250,29 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 'min_52w_date': str(analysis.min_52w_date) if analysis.min_52w_date else None,
                 'atr': analysis.atr,
                 'is_minervini_trend': analysis.is_minervini_trend,
-                # 재무 데이터 (캐싱된 데이터에서 조회)
                 '매출증가율': 매출증가율,
                 '영업이익증가율': 영업이익증가율,
-                '전전기매출': 매출[2] if len(매출) > 2 else 0,
+                '전전기매출' : 매출[2] if len(매출) > 2 else 0,
                 '전기매출': 매출[1] if len(매출) > 1 else 0,
                 '당기매출': 매출[0] if 매출 else 0,
                 '전전기영업이익': 영업이익[2] if len(영업이익) > 2 else 0,
                 '전기영업이익': 영업이익[1] if len(영업이익) > 1 else 0,
                 '당기영업이익': 영업이익[0] if 영업이익 else 0,
+                # StockFinancialStatement fields 
             }
             results.append(combined_data)
         
-        # 응답 형식에 따른 처리
         if format.lower() == "excel":
-            # pandas DataFrame으로 변환하여 Excel 생성 최적화
+            # BytesIO 버퍼 생성
+            output = BytesIO()
             df = pd.DataFrame(results)
             filename = f"mtt_stocks_{date or 'latest'}.xlsx"
             
-            # BytesIO 버퍼 생성 및 Excel 파일 작성
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl', options={'remove_timezone': True}) as writer:
-                df.to_excel(writer, index=False, sheet_name='MTT_Stocks')
-                
-                # 워크시트 스타일링 (선택사항)
-                worksheet = writer.sheets['MTT_Stocks']
-                # 헤더 스타일 적용
-                for cell in worksheet[1]:
-                    cell.font = Font(bold=True)
+            # DataFrame을 BytesIO 버퍼에 쓰기
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False)
             
+            # 버퍼 포인터를 처음으로 되돌리기
             output.seek(0)
             
             # Excel 파일을 HttpResponse로 반환
@@ -173,12 +283,14 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
             response['Content-Disposition'] = f'attachment; filename="{filename}"'
             return response
         
-        else:  # format.lower() == "json"
-            # JSON 응답 반환
+        elif format.lower() == "json":
+            # Return JSON response
             return 200, SuccessResponseStockAnalysis(
                 status="OK",
                 data=results
             )
+        else:
+            return 400, ErrorResponse(status="error", message="Invalid format. Use 'json' or 'excel'")
 
     except Exception as e:
         traceback.print_exc()
