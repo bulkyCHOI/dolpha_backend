@@ -299,7 +299,7 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
     
 # 주식 OHLCV 데이터를 조회합니다.
 @query_router.get("/find_stock_ohlcv", response={200: SuccessResponseStockOhlcvSchema, 404: ErrorResponse, 500: ErrorResponse})
-def find_stock_ohlcv(request, code: str = "005930", limit: int = 21):
+def find_stock_ohlcv(request, code: str = "005930", limit: int = 63):
     """
     주식 OHLCV 데이터를 조회합니다.\n
     ㅇ Args\n
@@ -365,7 +365,7 @@ def find_stock_ohlcv(request, code: str = "005930", limit: int = 21):
 
 # 주식 분석 데이터를 조회합니다.
 @query_router.get("/find_stock_analysis", response={200: SuccessResponseStockAnalysisSchema, 404: ErrorResponse, 500: ErrorResponse})    
-def find_stock_analysis(request, code: str = "005930", limit: int = 21):
+def find_stock_analysis(request, code: str = "005930", limit: int = 63):
     """
     주식 분석 데이터를 조회합니다.\n
     ㅇ Args\n
@@ -485,7 +485,7 @@ def find_stock_analysis(request, code: str = "005930", limit: int = 21):
 
 # 주식 재무제표 데이터를 조회합니다.
 @query_router.get("/find_stock_financial", response={200: SuccessResponseStockFinancialSchema, 404: ErrorResponse, 500: ErrorResponse})
-def find_stock_financial(request, code: str = "005930", limit: int = 50, account_name: str = None, statement_type: str = None):
+def find_stock_financial(request, code: str = "005930", limit: int = 8, account_name: str = None, statement_type: str = None):
     """
     주식 재무제표 데이터를 조회합니다.\n
     ㅇ Args\n
@@ -566,7 +566,7 @@ def find_stock_financial(request, code: str = "005930", limit: int = 50, account
     
 # 주식 종목과 관련된 인덱스 데이터를 조회합니다.
 @query_router.get("/find_stock_index", response={200: SuccessResponseStockIndexSchema, 404: ErrorResponse, 500: ErrorResponse})
-def find_stock_index(request, code: str = "005930", limit: int = 21):
+def find_stock_index(request, code: str = "005930", limit: int = 10):
     """
     주식 종목과 관련된 인덱스의 OHLCV 데이터를 조회합니다.\n
     ㅇ Args\n
@@ -625,7 +625,7 @@ def find_stock_index(request, code: str = "005930", limit: int = 21):
 
 # index OHLCV 데이터를 조회합니다.
 @query_router.get("/find_index_ohlcv", response={200: SuccessResponseIndexOhlcvSchema, 404: ErrorResponse, 500: ErrorResponse})
-def find_index_ohlcv(request, code: str = "1011", limit: int = 21):
+def find_index_ohlcv(request, code: str = "1011", limit: int = 63):
     """
     인덱스 OHLCV 데이터를 조회합니다.\n
     ㅇ Args\n
