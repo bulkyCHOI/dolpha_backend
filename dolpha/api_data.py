@@ -503,7 +503,7 @@ def getAndSave_stock_data(request, code: str=None, limit: int=1):
                 # return 400, {"error": "Invalid date format in OHLCV data index."}
                 continue  # 날짜 형식이 잘못된 경우 다음 회사로 넘어감
         except Exception as e:
-            return 400, {"error": f"Failed to process date column: {str(e)}"}
+            # return 400, {"error": f"Failed to process date column: {str(e)}"}
             continue  # 날짜 처리 실패 시 다음 회사로 넘어감
 
         # 데이터베이스 저장
@@ -539,7 +539,8 @@ def getAndSave_stock_data(request, code: str=None, limit: int=1):
                     StockOHLCV.objects.bulk_create(stock_ohlcv_list, ignore_conflicts=True)
         except Exception as e:
             traceback.print_exc()
-            return 500, {"error": f"Failed to save stock data: {str(e)}"}    
+            # return 500, {"error": f"Failed to save stock data: {str(e)}"}    
+            continue
     return {
                 "status": "OK",
                 "message": f"Stock data {len(companies)} saved successfully.",
