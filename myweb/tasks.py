@@ -107,18 +107,18 @@ def start():
 
     # 작업 스케줄 정의 (시간 순서대로 정렬)
     job_schedule = [
-        (my_cron_task_getAndSave_index_list, 00, 35, "my_cron_task_getAndSave_index_list", "인덱스 리스트 수집 (약 1분)"),
-        (my_cron_task_getAndSave_stock_description, 00, 40, "my_cron_task_getAndSave_stock_description", "주식 설명 수집 (약 5분)"),
-        (my_cron_task_getAndSave_index_data, 00, 45, "my_cron_task_getAndSave_index_data", "인덱스 데이터 수집 (약 10분)"),
-        (my_cron_task_getAndSave_stock_data, 00, 55, "my_cron_task_getAndSave_stock_data", "주식 OHLCV 데이터 수집 (약 20분)"),
-        (my_cron_task_calculate_stock_analysis, 1, 15, "my_cron_task_calculate_stock_analysis", "주식 기술적 분석 계산 (약 10분)"),
-        (my_cron_task_getAndSave_stock_dartData, 1, 30, "my_cron_task_getAndSave_stock_dartData", "DART 데이터 수집 (약 1시간 30분)"),
-        # (my_cron_task_getAndSave_index_list, 15, 35, "my_cron_task_getAndSave_index_list", "인덱스 리스트 수집 (약 1분)"),
-        # (my_cron_task_getAndSave_stock_description, 15, 40, "my_cron_task_getAndSave_stock_description", "주식 설명 수집 (약 5분)"),
-        # (my_cron_task_getAndSave_index_data, 15, 45, "my_cron_task_getAndSave_index_data", "인덱스 데이터 수집 (약 10분)"),
-        # (my_cron_task_getAndSave_stock_data, 15, 55, "my_cron_task_getAndSave_stock_data", "주식 OHLCV 데이터 수집 (약 20분)"),
-        # (my_cron_task_calculate_stock_analysis, 16, 15, "my_cron_task_calculate_stock_analysis", "주식 기술적 분석 계산 (약 10분)"),
-        # (my_cron_task_getAndSave_stock_dartData, 16, 30, "my_cron_task_getAndSave_stock_dartData", "DART 데이터 수집 (약 1시간 30분)"),
+        # (my_cron_task_getAndSave_index_list, 00, 35, "my_cron_task_getAndSave_index_list", "인덱스 리스트 수집 (약 1분)"),
+        # (my_cron_task_getAndSave_stock_description, 00, 40, "my_cron_task_getAndSave_stock_description", "주식 설명 수집 (약 5분)"),
+        # (my_cron_task_getAndSave_index_data, 00, 45, "my_cron_task_getAndSave_index_data", "인덱스 데이터 수집 (약 10분)"),
+        # (my_cron_task_getAndSave_stock_data, 00, 55, "my_cron_task_getAndSave_stock_data", "주식 OHLCV 데이터 수집 (약 20분)"),
+        # (my_cron_task_calculate_stock_analysis, 1, 15, "my_cron_task_calculate_stock_analysis", "주식 기술적 분석 계산 (약 10분)"),
+        # (my_cron_task_getAndSave_stock_dartData, 1, 30, "my_cron_task_getAndSave_stock_dartData", "DART 데이터 수집 (약 1시간 30분)"),
+        (my_cron_task_getAndSave_index_list, 17, 5, "my_cron_task_getAndSave_index_list", "인덱스 리스트 수집 (약 1분)"),
+        (my_cron_task_getAndSave_stock_description, 17, 10, "my_cron_task_getAndSave_stock_description", "주식 설명 수집 (약 5분)"),
+        (my_cron_task_getAndSave_index_data, 17, 15, "my_cron_task_getAndSave_index_data", "인덱스 데이터 수집 (약 10분)"),
+        (my_cron_task_getAndSave_stock_data, 17, 30, "my_cron_task_getAndSave_stock_data", "주식 OHLCV 데이터 수집 (약 20분)"),
+        (my_cron_task_calculate_stock_analysis, 18, 00, "my_cron_task_calculate_stock_analysis", "주식 기술적 분석 계산 (약 10분)"),
+        (my_cron_task_getAndSave_stock_dartData, 18, 30, "my_cron_task_getAndSave_stock_dartData", "DART 데이터 수집 (약 1시간 30분)"),
     ]
 
     # 모든 작업을 스케줄에 추가
