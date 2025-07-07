@@ -227,8 +227,8 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 'code': analysis.code.code,
                 'name': analysis.code.name,
                 'market': analysis.code.market,
-                'sector': analysis.code.sector,
-                'industry': analysis.code.industry,
+                'sector': analysis.code.sector or "",  # None 값을 빈 문자열로 처리
+                'industry': analysis.code.industry or "",  # None 값을 빈 문자열로 처리
                 # StockAnalysis fields
                 'date': str(analysis.date),
                 'ma50': analysis.ma50,
@@ -250,6 +250,7 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 'min_52w_date': str(analysis.min_52w_date) if analysis.min_52w_date else None,
                 'atr': analysis.atr,
                 'is_minervini_trend': analysis.is_minervini_trend,
+                # Financial data
                 '매출증가율': 매출증가율,
                 '영업이익증가율': 영업이익증가율,
                 '전전기매출' : 매출[2] if len(매출) > 2 else 0,
@@ -437,8 +438,8 @@ def find_stock_analysis(request, code: str = "005930", limit: int = 21):
             'code': company.code,
             'name': company.name,
             'market': company.market,
-            'sector': company.sector,
-            'industry': company.industry,
+            'sector': company.sector or "",  # None 값을 빈 문자열로 처리
+            'industry': company.industry or "",  # None 값을 빈 문자열로 처리
         }
 
         results = []

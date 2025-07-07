@@ -50,8 +50,8 @@ class CompanySchema(Schema):
     code: str
     name: str
     market: str
-    sector: str
-    industry: str
+    sector: Optional[str] = None
+    industry: Optional[str] = None
 
 class StockAnalysisSchema(Schema):
     code: str
