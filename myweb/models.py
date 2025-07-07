@@ -37,8 +37,8 @@ class Company(models.Model):
     indices = models.ManyToManyField(StockIndex, related_name='companies')  # 다대다 관계
     name = models.CharField(max_length=100)
     market = models.CharField(max_length=50)
-    sector = models.CharField(max_length=100)
-    industry = models.CharField(max_length=200)
+    sector = models.CharField(max_length=100, null=True, blank=True)  # 섹터 (예: 'Technology')
+    industry = models.CharField(max_length=200, null=True, blank=True)  # 업종 (예: 'Software & Services')
     # listing_date = models.DateField()
     # settle_month = models.CharField(max_length=10)
     # representative = models.CharField(max_length=100)

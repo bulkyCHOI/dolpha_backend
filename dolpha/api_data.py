@@ -25,6 +25,145 @@ import traceback
 # 데이터 수집/저장/계산 관련 API 라우터
 data_router = Router()
 
+# 모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
+@data_router.post("/getAndSave_stock_description", response={200: StockDescriptionResponse, 400: ErrorResponse, 500: ErrorResponse})
+def getAndSave_stock_description(request):
+    """
+    모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
+    
+    Returns:
+        StockDescriptionResponse: 처리 결과, 저장된 레코드 수, 실패한 레코드 수 및 오류 메시지
+    """
+    try:
+        # 종목정보 조회
+        df_krx_desc = Common.GetStockList("KRX-DESC")
+        print(f"조회된 KRX 주식 설명 데이터: {len(df_krx_desc)}개")
+
+        # 컬럼명 매핑
+        column_mapping = {
+            'Code': 'code',
+            'Name': 'name',
+            'Market': 'market',
+            'Sector': 'sector',
+            'Industry': 'industry',
+            # 'ListingDate': 'listing_date',
+            # 'SettleMonth': 'settle_month',
+            # 'Representative': 'representative',
+            # 'HomePage': 'homepage',
+            # 'Region': 'region'
+        }
+        df_krx_desc = df_krx_desc.rename(columns=column_mapping)
+        
+        # 예상 컬럼 확인
+        expected_columns = list(column_mapping.values())
+        if not all(col in df_krx_desc.columns for col in expected_columns):
+            return 400, {
+                "status": "ERROR",
+                "message": "Required columns are missing in the KRX-DESC data"
+            }
+
+        # 데이터 전처리
+        df_krx_desc['code'] = df_krx_desc['code'].astype(str)  # 코드 문자열로 변환
+        
+        # NaN 값을 None으로 변환 (중요: "기타"로 변환하지 않음)
+        df_krx_desc['sector'] = df_krx_desc['sector'].where(pd.notna(df_krx_desc['sector']), None)
+        df_krx_desc['industry'] = df_krx_desc['industry'].where(pd.notna(df_krx_desc['industry']), None)
+        
+        
+        # 기존 데이터를 한 번만 조회하여 메모리에 캐싱
+        existing_companies = {obj.code: obj for obj in Company.objects.all()}
+        existing_codes = set(existing_companies.keys())
+
+        # 벌크 데이터 준비
+        companies_to_create = []
+        companies_to_update = []
+        failed_records = []
+
+        # iterrows() 대신 itertuples() 사용 (더 빠름)
+        for row in tqdm(df_krx_desc.itertuples(index=False), total=len(df_krx_desc), desc="데이터 처리 중"):
+            try:
+                code = str(row.code)
+                name = str(row.name)
+                market = str(row.market)
+                sector = row.sector if row.sector is not None else None
+                industry = row.industry if row.industry is not None else None
+
+                # KONEX 시장 제외 (선택사항)
+                # if market == 'KONEX':
+                #     continue
+
+                # 생성 또는 업데이트 분류
+                if code not in existing_codes:
+                    companies_to_create.append(Company(
+                        code=code,
+                        name=name,
+                        market=market,
+                        sector = row.sector if row.sector is not None else None,
+                        industry = row.industry if row.industry is not None else None,
+                    ))
+                else:
+                    # 변경사항이 있는 경우만 업데이트 대상에 추가
+                    existing_obj = existing_companies[code]
+                    
+                    # None이 아닌 값만 업데이트
+                    should_update = False
+                    if existing_obj.name != name:
+                        existing_obj.name = name
+                        should_update = True
+                    if existing_obj.market != market:
+                        existing_obj.market = market
+                        should_update = True
+                    if sector is not None and existing_obj.sector != sector:
+                        existing_obj.sector = sector
+                        should_update = True
+                    if industry is not None and existing_obj.industry != industry:
+                        existing_obj.industry = industry
+                        should_update = True
+                    
+                    if should_update:
+                        companies_to_update.append(existing_obj)
+
+            except Exception as e:
+                traceback.print_exc()
+                failed_records.append({
+                    'code': getattr(row, 'code', 'N/A'),
+                    'error': str(e)
+                })
+
+        # 데이터베이스 트랜잭션 - 모든 작업을 한 번에 수행
+        with transaction.atomic():
+            # 벌크 생성
+            if companies_to_create:
+                Company.objects.bulk_create(companies_to_create, batch_size=1000)
+                print(f"신규 회사 {len(companies_to_create)}개 생성 완료")
+            
+            # 벌크 업데이트 - update_or_create 대신 bulk_update 사용
+            if companies_to_update:
+                Company.objects.bulk_update(
+                    companies_to_update, 
+                    ['name', 'market', 'sector', 'industry'], 
+                    batch_size=1000
+                )
+                print(f"기존 회사 {len(companies_to_update)}개 업데이트 완료")
+
+        # 응답 구성
+        response = {
+            "status": "OK",
+            "count_total": len(df_krx_desc),
+            "count_created": len(companies_to_create),
+            "count_updated": len(companies_to_update),
+            "count_failed": len(failed_records),
+            "failed_records": failed_records if failed_records else None
+        }
+        return response
+
+    except Exception as e:
+        traceback.print_exc()
+        return 500, {
+            "status": "ERROR",
+            "message": f"Failed to process stock data: {str(e)}"
+        }
+
 # KRX에서 모든 주식의 종목 코드를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
 @data_router.post("/getAndSave_index_list", response={200: IndexListResponse, 400: ErrorResponse, 500: ErrorResponse})
 def getAndSave_index_list(request):
@@ -207,138 +346,6 @@ def getAndSave_index_list(request):
             "message": f"인덱스 데이터 처리 실패: {str(e)}"
         }
 
-# 모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
-@data_router.post("/getAndSave_stock_description", response={200: StockDescriptionResponse, 400: ErrorResponse, 500: ErrorResponse})
-def getAndSave_stock_description(request):
-    """
-    모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
-    
-    Returns:
-        StockDescriptionResponse: 처리 결과, 저장된 레코드 수, 실패한 레코드 수 및 오류 메시지
-    """
-    try:
-        # 종목정보 조회
-        df_krx_desc = Common.GetStockList("KRX-DESC")
-        print(f"조회된 KRX 주식 설명 데이터: {len(df_krx_desc)}개")
-
-        # 컬럼명 매핑
-        column_mapping = {
-            'Code': 'code',
-            'Name': 'name',
-            'Market': 'market',
-            'Sector': 'sector',
-            'Industry': 'industry',
-            # 'ListingDate': 'listing_date',
-            # 'SettleMonth': 'settle_month',
-            # 'Representative': 'representative',
-            # 'HomePage': 'homepage',
-            # 'Region': 'region'
-        }
-        df_krx_desc = df_krx_desc.rename(columns=column_mapping)
-        
-        # 예상 컬럼 확인
-        expected_columns = list(column_mapping.values())
-        if not all(col in df_krx_desc.columns for col in expected_columns):
-            return 400, {
-                "status": "ERROR",
-                "message": "Required columns are missing in the KRX-DESC data"
-            }
-
-        # 데이터 전처리
-        df_krx_desc['code'] = df_krx_desc['code'].astype(str)  # 코드 문자열로 변환
-        
-        # NaN 값 처리
-        df_krx_desc = df_krx_desc.fillna({
-            'sector': '기타',
-            'industry': '기타'
-        })
-        
-        # 기존 데이터를 한 번만 조회하여 메모리에 캐싱
-        existing_companies = {obj.code: obj for obj in Company.objects.all()}
-        existing_codes = set(existing_companies.keys())
-
-        # 벌크 데이터 준비
-        companies_to_create = []
-        companies_to_update = []
-        failed_records = []
-
-        # iterrows() 대신 itertuples() 사용 (더 빠름)
-        for row in tqdm(df_krx_desc.itertuples(index=False), total=len(df_krx_desc), desc="데이터 처리 중"):
-            try:
-                code = str(row.code)
-                name = str(row.name)
-                market = str(row.market)
-                sector = str(row.sector)
-                industry = str(row.industry)
-
-                # KONEX 시장 제외 (선택사항)
-                # if market == 'KONEX':
-                #     continue
-
-                # 생성 또는 업데이트 분류
-                if code not in existing_codes:
-                    companies_to_create.append(Company(
-                        code=code,
-                        name=name,
-                        market=market,
-                        sector=sector,
-                        industry=industry
-                    ))
-                else:
-                    # 변경사항이 있는 경우만 업데이트 대상에 추가
-                    existing_obj = existing_companies[code]
-                    if (existing_obj.name != name or 
-                        existing_obj.market != market or 
-                        existing_obj.sector != sector or 
-                        existing_obj.industry != industry):
-                        
-                        existing_obj.name = name
-                        existing_obj.market = market
-                        existing_obj.sector = sector
-                        existing_obj.industry = industry
-                        companies_to_update.append(existing_obj)
-
-            except Exception as e:
-                traceback.print_exc()
-                failed_records.append({
-                    'code': getattr(row, 'code', 'N/A'),
-                    'error': str(e)
-                })
-
-        # 데이터베이스 트랜잭션 - 모든 작업을 한 번에 수행
-        with transaction.atomic():
-            # 벌크 생성
-            if companies_to_create:
-                Company.objects.bulk_create(companies_to_create, batch_size=1000)
-                print(f"신규 회사 {len(companies_to_create)}개 생성 완료")
-            
-            # 벌크 업데이트 - update_or_create 대신 bulk_update 사용
-            if companies_to_update:
-                Company.objects.bulk_update(
-                    companies_to_update, 
-                    ['name', 'market', 'sector', 'industry'], 
-                    batch_size=1000
-                )
-                print(f"기존 회사 {len(companies_to_update)}개 업데이트 완료")
-
-        # 응답 구성
-        response = {
-            "status": "OK",
-            "count_total": len(df_krx_desc),
-            "count_created": len(companies_to_create),
-            "count_updated": len(companies_to_update),
-            "count_failed": len(failed_records),
-            "failed_records": failed_records if failed_records else None
-        }
-        return response
-
-    except Exception as e:
-        traceback.print_exc()
-        return 500, {
-            "status": "ERROR",
-            "message": f"Failed to process stock data: {str(e)}"
-        }
-
 # Index 코드에 해당하는 OHLCV 데이터를 데이터베이스에 저장합니다.
 @data_router.post("/getAndSave_index_data", response={200: SuccessResponse, 400: ErrorResponse, 404: ErrorResponse, 500: ErrorResponse})
 def getAndSave_index_data(request, code: str=None, limit: int=1):
@@ -376,23 +383,27 @@ def getAndSave_index_data(request, code: str=None, limit: int=1):
         # print(index.code, index.name)
         
         df = Common.GetOhlcv("KR", f"KRX-INDEX:{stockIndex.code}", limit=limit, adj_ok="1")
-        print(df.head())
+        # print(df.head())
 
         if df is None or len(df) == 0:
-            return 400, {"error": "No OHLCV data found for the given index code."}
+            # return 400, {"error": "No OHLCV data found for the given index code."}
+            continue  # 인덱스가 없으면 다음 인덱스로 넘어감
         
         # 컬럼명 검증
         expected_columns = ['open', 'high', 'low', 'close', 'volume', 'change']
         if not all(col in df.columns for col in expected_columns):
-            return 400, {"error": "Required OHLCV columns are missing in the data."}
+            # return 400, {"error": "Required OHLCV columns are missing in the data."}
+            continue  # 컬럼이 누락된 경우 다음 인덱스로 넘어감
 
         # 데이터 전처리
         try:
             df.index = pd.to_datetime(df.index, errors='coerce')    # 인덱스를 Timestamp로 변환
             if df.index.isna().any():   # 변환 실패 시 NaT가 있는지 확인
-                return 400, {"error": "Invalid date format in OHLCV data index."}
+                # return 400, {"error": "Invalid date format in OHLCV data index."}
+                continue  # 날짜 형식이 잘못된 경우 다음 인덱스로 넘어감
         except Exception as e:
-            return 400, {"error": f"Failed to process date column: {str(e)}"}
+            # return 400, {"error": f"Failed to process date column: {str(e)}"}
+            continue  # 날짜 처리 실패 시 다음 인덱스로 넘어감
         # 데이터베이스 저장
         try:
             with transaction.atomic():
@@ -426,7 +437,8 @@ def getAndSave_index_data(request, code: str=None, limit: int=1):
                     IndexOHLCV.objects.bulk_create(index_ohlcv_list, ignore_conflicts=True)
         except Exception as e:
             traceback.print_exc()
-            return 500, {"error": f"Failed to save index data: {str(e)}"}
+            # return 500, {"error": f"Failed to save index data: {str(e)}"}
+            continue  # 저장 실패 시 다음 인덱스로 넘어감
         
     return {
                 "status": "OK",
@@ -471,23 +483,28 @@ def getAndSave_stock_data(request, code: str=None, limit: int=1):
         # print(company.code, company.name)
         
         df = Common.GetOhlcv("KR", company.code, limit=limit, adj_ok="1")
-        print(df.head())
+        # print(df.head())
 
         if df is None or len(df) == 0:
-            return 400, {"error": "No OHLCV data found for the given stock code."}
+            # return 400, {"error": "No OHLCV data found for the given stock code."}
+            continue  # 회사가 없으면 다음 회사로 넘어감
+            
         
         # 컬럼명 검증
         expected_columns = ['open', 'high', 'low', 'close', 'volume', 'change']
         if not all(col in df.columns for col in expected_columns):
-            return 400, {"error": "Required OHLCV columns are missing in the data."}
+            # return 400, {"error": "Required OHLCV columns are missing in the data."}
+            continue  # 컬럼이 누락된 경우 다음 회사로 넘어감
 
         # 데이터 전처리
         try:
             df.index = pd.to_datetime(df.index, errors='coerce')    # 인덱스를 Timestamp로 변환
             if df.index.isna().any():   # 변환 실패 시 NaT가 있는지 확인
-                return 400, {"error": "Invalid date format in OHLCV data index."}
+                # return 400, {"error": "Invalid date format in OHLCV data index."}
+                continue  # 날짜 형식이 잘못된 경우 다음 회사로 넘어감
         except Exception as e:
             return 400, {"error": f"Failed to process date column: {str(e)}"}
+            continue  # 날짜 처리 실패 시 다음 회사로 넘어감
 
         # 데이터베이스 저장
         try:

@@ -7,6 +7,7 @@ from pytz import timezone
 import time
 import pandas as pd
 
+from pykrx import stock
 
 
 ############################################################################################################################################################
@@ -53,17 +54,17 @@ def GetOhlcv(area, stock_code, limit = 500, adj_ok = "1"):
     try:
 
         try:
-            print("----First try----")
+            # print("----First try----")
             df = GetOhlcv1(area,stock_code,Adjlimit,adj_ok)
             
         except Exception as e:
-            print("")
+            # print("")
                 
             if df is None or len(df) == 0:
 
                 except_riase = False
                 try:
-                    print("----Second try----")
+                    # print("----Second try----")
                     df = GetOhlcv2(area,stock_code,Adjlimit,adj_ok)
 
                     if df is None or len(df) == 0:
@@ -80,7 +81,7 @@ def GetOhlcv(area, stock_code, limit = 500, adj_ok = "1"):
     if except_riase == True:
         return df
     else:
-        print("---", limit)
+        # print("---", limit)
         return df[-limit:]
 
 
@@ -92,7 +93,8 @@ def GetOhlcv(area, stock_code, limit = 500, adj_ok = "1"):
 def GetOhlcv1(area, stock_code, limit = 500, adj_ok = "1"):
     startDate = GetFromNowDateStr(area,"BAR",-limit)
     endDate = GetNowDateStr(area,"BAR")
-    df = fdr.DataReader(stock_code, startDate, endDate, exchange=area)
+    # df = fdr.DataReader(stock_code, startDate, endDate, exchange=area)
+    df = fdr.DataReader(stock_code, startDate, endDate)
     if adj_ok == "1":
         
         try :
@@ -177,10 +179,152 @@ def GetOhlcv2(area, stock_code, limit = 500, adj_ok = "1"):
     return df
 
 def GetStockList(area = "KRX"):
+    """
+    주식 목록을 가져오는 함수
+    1차: finance-datareader 시도 (sector, industry 정보 포함)
+    2차: pykrx fallback (기본 정보만)
     
-    df = fdr.StockListing(area)
-
-    return df
+    Args:
+        area: "KRX", "KRX-DESC", "KOSPI", "KOSDAQ" 등
+    
+    Returns:
+        DataFrame: Company 모델과 호환되는 형태의 주식 목록
+    """
+    
+    # 1차 시도: finance-datareader (sector, industry 정보 포함)
+    try:
+        print(f"finance-datareader로 {area} 데이터 조회 시도...")
+        df = fdr.StockListing(area)
+        
+        # Code 컬럼 처리
+        if 'Code' in df.columns and len(df) > 0:
+            df['Code'] = df['Code'].astype(str)
+            df['Code'] = df['Code'].str.replace(r'\D', '', regex=True)
+            df['Code'] = df['Code'].apply(lambda x: x.zfill(6) if x.isdigit() and x else x)
+        
+        print(f"finance-datareader 성공: {len(df)}개 데이터 조회")
+        return df
+        
+    except Exception as fdr_error:
+        print(f"finance-datareader 실패: {fdr_error}")
+        
+        # 2차 시도: pykrx fallback
+        try:
+            print("pykrx로 fallback 시도...")
+            
+            # 기본 오늘 날짜
+            today = datetime.now().strftime('%Y%m%d')
+            
+            # area에 따른 처리
+            if area in ["KRX", "KRX-DESC"]:
+                # 전체 시장 데이터
+                print("KOSPI 종목 목록 조회 중...")
+                kospi_tickers = stock.get_market_ticker_list(today, market="KOSPI")
+                print(f"KOSPI 종목 수: {len(kospi_tickers)}")
+                
+                print("KOSDAQ 종목 목록 조회 중...")
+                kosdaq_tickers = stock.get_market_ticker_list(today, market="KOSDAQ")
+                print(f"KOSDAQ 종목 수: {len(kosdaq_tickers)}")
+                
+                stock_data = []
+                
+                # KOSPI 종목들 (전체)
+                print("KOSPI 종목 이름 조회 중...")
+                for i, ticker in enumerate(kospi_tickers):
+                    try:
+                        name = stock.get_market_ticker_name(ticker)
+                        stock_data.append({
+                            'Code': ticker,
+                            'Name': name,
+                            'Market': 'KOSPI',
+                            'Sector': None,  # None으로 설정하여 기존 데이터 보존
+                            'Industry': None  # None으로 설정하여 기존 데이터 보존
+                        })
+                        if (i + 1) % 100 == 0:  # 100개마다 진행 상황 출력
+                            print(f"KOSPI 진행: {i + 1}/{len(kospi_tickers)}")
+                    except Exception as e:
+                        print(f"KOSPI 종목 {ticker} 처리 실패: {e}")
+                        continue
+                
+                # KOSDAQ 종목들 (전체)
+                print("KOSDAQ 종목 이름 조회 중...")
+                for i, ticker in enumerate(kosdaq_tickers):
+                    try:
+                        name = stock.get_market_ticker_name(ticker)
+                        stock_data.append({
+                            'Code': ticker,
+                            'Name': name,
+                            'Market': 'KOSDAQ',
+                            'Sector': None,  # None으로 설정하여 기존 데이터 보존
+                            'Industry': None  # None으로 설정하여 기존 데이터 보존
+                        })
+                        if (i + 1) % 100 == 0:  # 100개마다 진행 상황 출력
+                            print(f"KOSDAQ 진행: {i + 1}/{len(kosdaq_tickers)}")
+                    except Exception as e:
+                        print(f"KOSDAQ 종목 {ticker} 처리 실패: {e}")
+                        continue
+                
+                print(f"전체 데이터 수집 완료: KOSPI {len(kospi_tickers)}개 + KOSDAQ {len(kosdaq_tickers)}개 = 총 {len(stock_data)}개")
+                df = pd.DataFrame(stock_data)
+                
+            elif area == "KOSPI":
+                print("KOSPI 종목 목록 조회 중...")
+                tickers = stock.get_market_ticker_list(today, market="KOSPI")
+                print(f"KOSPI 종목 수: {len(tickers)}")
+                
+                stock_data = []
+                for i, ticker in enumerate(tickers):  # 전체 종목
+                    try:
+                        name = stock.get_market_ticker_name(ticker)
+                        stock_data.append({
+                            'Code': ticker,
+                            'Name': name,
+                            'Market': 'KOSPI',
+                            'Sector': None,  # None으로 설정하여 기존 데이터 보존
+                            'Industry': None  # None으로 설정하여 기존 데이터 보존
+                        })
+                        if (i + 1) % 100 == 0:
+                            print(f"KOSPI 진행: {i + 1}/{len(tickers)}")
+                    except Exception as e:
+                        print(f"KOSPI 종목 {ticker} 처리 실패: {e}")
+                        continue
+                df = pd.DataFrame(stock_data)
+                
+            elif area == "KOSDAQ":
+                print("KOSDAQ 종목 목록 조회 중...")
+                tickers = stock.get_market_ticker_list(today, market="KOSDAQ")
+                print(f"KOSDAQ 종목 수: {len(tickers)}")
+                
+                stock_data = []
+                for i, ticker in enumerate(tickers):  # 전체 종목
+                    try:
+                        name = stock.get_market_ticker_name(ticker)
+                        stock_data.append({
+                            'Code': ticker,
+                            'Name': name,
+                            'Market': 'KOSDAQ',
+                            'Sector': None,  # None으로 설정하여 기존 데이터 보존
+                            'Industry': None  # None으로 설정하여 기존 데이터 보존
+                        })
+                        if (i + 1) % 100 == 0:
+                            print(f"KOSDAQ 진행: {i + 1}/{len(tickers)}")
+                    except Exception as e:
+                        print(f"KOSDAQ 종목 {ticker} 처리 실패: {e}")
+                        continue
+                
+                df = pd.DataFrame(stock_data)
+                
+            else:
+                print(f"지원하지 않는 area: {area}")
+                return pd.DataFrame()
+            
+            print(f"pykrx 성공: 총 {len(df)}개 데이터 조회 완료 (sector/industry는 None으로 설정하여 기존 데이터 보존)")
+            return df
+            
+        except Exception as pykrx_error:
+            print(f"pykrx도 실패: {pykrx_error}")
+            print("모든 데이터 소스 실패. 빈 DataFrame 반환")
+            return pd.DataFrame()
 
 def GetSnapDataReader():
     df = fdr.SnapDataReader('KRX/INDEX/LIST')
