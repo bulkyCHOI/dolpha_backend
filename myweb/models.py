@@ -1,4 +1,5 @@
 from django.db import models
+from django.contrib.auth.models import AbstractUser
 
 # Create your models here.
 class StockIndex(models.Model):
@@ -135,3 +136,62 @@ class StockFinancialStatement(models.Model):
 
     def __str__(self):
         return f"{self.code} ({self.year}, {self.quarter})"
+
+
+# 사용자 인증 관련 모델들
+class User(AbstractUser):
+    google_id = models.CharField(max_length=100, unique=True, null=True, blank=True)
+    profile_picture = models.URLField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.username
+
+
+class UserProfile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
+    trading_server_ip = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user.username}의 프로필"
+
+
+class FavoriteStock(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='favorite_stocks')
+    stock_code = models.CharField(max_length=10)
+    stock_name = models.CharField(max_length=100)
+    memo = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = ['user', 'stock_code']
+
+    def __str__(self):
+        return f"{self.user.username} - {self.stock_name}"
+
+
+class TradingResult(models.Model):
+    TRADE_TYPES = [
+        ('BUY', '매수'),
+        ('SELL', '매도'),
+    ]
+    
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='trading_results')
+    stock_code = models.CharField(max_length=10)
+    stock_name = models.CharField(max_length=100)
+    trade_type = models.CharField(max_length=10, choices=TRADE_TYPES)
+    quantity = models.IntegerField()
+    price = models.DecimalField(max_digits=12, decimal_places=2)
+    total_amount = models.DecimalField(max_digits=15, decimal_places=2)
+    profit_loss = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    trade_date = models.DateTimeField()
+    review = models.TextField(blank=True)  # 매매복기
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-trade_date']
+
+    def __str__(self):
+        return f"{self.user.username} - {self.stock_name} {self.trade_type}"
