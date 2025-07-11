@@ -3,13 +3,75 @@ myStockInfo.yaml
 
 # 가상 환경
 venv/
+env/
+.env
+.venv
 
 # Python 캐시 파일
-dolpha/__pycache__/
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
 *.pyc
 *.pyo
 *.pyd
 
-#dart
+# Django specific
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# dart
 docs_cache/
+
+# Secret files
+*.key
+*.pem
+secrets.json
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
