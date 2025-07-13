@@ -21,3 +21,7 @@ api.add_router("/auth", simple_auth_router)
 # Google OAuth 인증 관련 API 라우터 추가
 from .api_auth import auth_router
 api.add_router("/auth", auth_router)
+
+# 마이페이지 관련 API 라우터 추가
+from .api_mypage_ninja import mypage_router
+api.add_router("/mypage", mypage_router)

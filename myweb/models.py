@@ -153,7 +153,15 @@ class User(AbstractUser):
 
 class UserProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
-    trading_server_ip = models.GenericIPAddressField(null=True, blank=True)
+    trading_server_ip = models.GenericIPAddressField(null=True, blank=True)  # 기존 필드 (호환성 유지)
+    autobot_server_ip = models.GenericIPAddressField(null=True, blank=True)  # autobot 서버 IP
+    autobot_server_port = models.IntegerField(default=8080)  # autobot 서버 포트
+    server_status = models.CharField(max_length=20, default='offline', choices=[
+        ('online', '온라인'),
+        ('offline', '오프라인'),
+        ('error', '오류'),
+    ])  # 서버 상태
+    last_connection = models.DateTimeField(null=True, blank=True)  # 마지막 연결 시간
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -175,6 +183,34 @@ class FavoriteStock(models.Model):
         return f"{self.user.username} - {self.stock_name}"
 
 
+class TradingConfig(models.Model):
+    TRADING_MODES = [
+        ('manual', 'Manual'),
+        ('turtle', 'Turtle(ATR)'),
+    ]
+    
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='trading_configs')
+    stock_code = models.CharField(max_length=10)  # 종목 코드
+    stock_name = models.CharField(max_length=100)  # 종목명
+    trading_mode = models.CharField(max_length=20, choices=TRADING_MODES)  # 매매 모드
+    max_loss = models.FloatField(null=True, blank=True)  # 최대손실(%)
+    stop_loss = models.FloatField(null=True, blank=True)  # 손절가(%)
+    take_profit = models.FloatField(null=True, blank=True)  # 익절가(%)
+    pyramiding_count = models.IntegerField(default=0)  # 피라미딩 횟수
+    position_size = models.FloatField(null=True, blank=True)  # 포지션 크기(진입시점)
+    is_active = models.BooleanField(default=True)  # 활성화 여부
+    autobot_config_id = models.IntegerField(null=True, blank=True)  # autobot 서버의 설정 ID
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['user', 'stock_code', 'is_active']  # 사용자별 종목당 하나의 활성 설정만 허용
+        ordering = ['-updated_at']
+
+    def __str__(self):
+        return f"{self.user.username} - {self.stock_name} ({self.trading_mode})"
+
+
 class TradingResult(models.Model):
     TRADE_TYPES = [
         ('BUY', '매수'),
@@ -182,6 +218,7 @@ class TradingResult(models.Model):
     ]
     
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='trading_results')
+    trading_config = models.ForeignKey(TradingConfig, on_delete=models.SET_NULL, null=True, blank=True, related_name='results')  # 관련 자동매매 설정
     stock_code = models.CharField(max_length=10)
     stock_name = models.CharField(max_length=100)
     trade_type = models.CharField(max_length=10, choices=TRADE_TYPES)

@@ -63,7 +63,32 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True
+# CORS 설정 - credentials를 지원하기 위해 구체적인 도메인 허용
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",  # React 개발 서버
+    "http://127.0.0.1:3000",
+]
+
+CORS_ALLOW_CREDENTIALS = True  # 쿠키, 인증 헤더 허용
+
+# 허용할 헤더 설정
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
+
+# CSRF 설정 - 프론트엔드 도메인을 신뢰할 수 있는 출처로 추가
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
 
 ROOT_URLCONF = 'dolpha.urls'
 
