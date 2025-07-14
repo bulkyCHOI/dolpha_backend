@@ -67,6 +67,8 @@ MIDDLEWARE = [
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",  # React 개발 서버
     "http://127.0.0.1:3000",
+    "http://218.152.32.218:3000",  # 실제 서버 도메인
+    "http://dolpha.iptime.org:3000",  # 실제 서버 도메인
 ]
 
 CORS_ALLOW_CREDENTIALS = True  # 쿠키, 인증 헤더 허용
@@ -88,6 +90,8 @@ CORS_ALLOW_HEADERS = [
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://218.152.32.218:3000",  # 실제 서버 도메인
+    "http://dolpha.iptime.org:3000",  # 실제 서버 도메인
 ]
 
 ROOT_URLCONF = 'dolpha.urls'
