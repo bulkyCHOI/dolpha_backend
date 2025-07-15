@@ -2,6 +2,8 @@ from ninja import NinjaAPI, Router
 from django.http import JsonResponse
 from django.contrib.auth import get_user_model
 from django.conf import settings
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 from rest_framework_simplejwt.tokens import RefreshToken
 import json
 import requests as http_requests
@@ -10,9 +12,11 @@ import requests as http_requests
 try:
     from google.auth.transport import requests as google_requests
     from google.oauth2 import id_token
-    from google.auth_oauthlib.flow import Flow
+    from google_auth_oauthlib.flow import Flow
     GOOGLE_AUTH_AVAILABLE = True
-except ImportError:
+except ImportError as e:
+    GOOGLE_AUTH_AVAILABLE = False
+except Exception as e:
     GOOGLE_AUTH_AVAILABLE = False
 
 # 사용자 인증 API 라우터
@@ -48,12 +52,15 @@ def google_oauth_callback(request):
                     "redirect_uris": [redirect_uri]
                 }
             },
-            scopes=['email', 'profile', 'openid']
+            scopes=['https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/userinfo.profile', 'openid']
         )
         flow.redirect_uri = redirect_uri
         
         # Authorization code를 토큰으로 교환
-        flow.fetch_token(code=code)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            flow.fetch_token(code=code)
         
         # ID 토큰에서 사용자 정보 추출
         credentials = flow.credentials

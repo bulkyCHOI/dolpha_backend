@@ -15,8 +15,8 @@ api.add_router("/", data_router)
 # 데이터 조회 관련 API 라우터 추가  
 api.add_router("/", query_router)
 
-# 사용자 인증 관련 API 라우터 추가 (간단한 버전)
-api.add_router("/auth", simple_auth_router)
+# 사용자 인증 관련 API 라우터 추가 (간단한 버전) - 임시 비활성화
+# api.add_router("/auth", simple_auth_router)
 
 # Google OAuth 인증 관련 API 라우터 추가
 from .api_auth import auth_router

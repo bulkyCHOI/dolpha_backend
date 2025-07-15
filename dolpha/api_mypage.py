@@ -1,8 +1,14 @@
 """
-마이페이지 관련 API 엔드포인트
+[DEPRECATED] 마이페이지 관련 API 엔드포인트 (Django 클래스 기반 뷰)
+
+⚠️ 주의: 이 파일은 더 이상 사용되지 않습니다.
+새로운 API는 api_mypage_ninja.py를 사용합니다 (Django Ninja 기반).
+
 - 사용자 프로필 관리
-- autobot 서버 설정 관리
+- autobot 서버 설정 관리  
 - 자동매매 설정 관리
+
+이 파일은 참고용으로만 보관되며, 실제 API 요청은 처리하지 않습니다.
 """
 
 import requests
