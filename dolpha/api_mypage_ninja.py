@@ -534,18 +534,18 @@ def get_trading_config_by_stock(request, stock_code: str):
 
 
 
-@mypage_router.delete("/trading-configs/{config_id}", response=ResponseSchema)
-def delete_trading_config(request, config_id: int):
-    """자동매매 설정 삭제 - Django DB와 autobot 서버에서 모두 삭제"""
+@mypage_router.delete("/trading-configs/stock/{stock_code}", response=ResponseSchema)
+def delete_trading_config_by_stock_code(request, stock_code: str):
+    """자동매매 설정 삭제 - stock_code를 사용하여 Django DB와 autobot 서버에서 모두 삭제"""
     try:
         user = get_authenticated_user(request)
         if not user:
             return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
             
-        config = TradingConfig.objects.get(id=config_id, user=user)
+        config = TradingConfig.objects.get(stock_code=stock_code, user=user)
         
         # autobot 서버에서도 삭제
-        delete_from_autobot_server(user, config.stock_code)
+        autobot_result = delete_from_autobot_server(user, config.stock_code)
         
         # Django DB에서 삭제
         config.delete()
