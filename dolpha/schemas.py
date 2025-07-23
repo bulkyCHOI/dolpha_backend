@@ -74,6 +74,7 @@ class StockAnalysisSchema(Schema):
     max_52w_date: str = None
     min_52w_date: str = None
     atr: float = 0.0  # 평균 진폭 (Average True Range)
+    atrRatio: float = 0.0  # 평균 진폭 비율 (ATR Ratio)
     is_minervini_trend: bool
 
 class FinancialDataSchema(Schema):

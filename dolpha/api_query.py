@@ -477,6 +477,7 @@ def find_stock_analysis(request, code: str = "005930", limit: int = 63):
                 "max_52w_date",
                 "min_52w_date",
                 "atr",
+                "atrRatio",
                 "is_minervini_trend",
             )[:limit]
         )
@@ -554,6 +555,7 @@ def find_stock_analysis(request, code: str = "005930", limit: int = 63):
                     str(record["min_52w_date"]) if record["min_52w_date"] else None
                 ),
                 "atr": record["atr"],
+                "atrRatio": record["atrRatio"],
                 "is_minervini_trend": record["is_minervini_trend"],
                 # 재무 데이터 (한 번만 계산된 값 재사용)
                 "매출증가율": 매출증가율,
