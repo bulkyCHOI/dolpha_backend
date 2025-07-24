@@ -330,6 +330,162 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
         return 500, ErrorResponse(status="error", message=str(e))
 
 
+# 52주 신고가 종목을 조회합니다.
+@query_router.get(
+    "/find_stock_52w_high",
+    response={
+        200: SuccessResponseStockAnalysis,
+        404: ErrorResponse,
+        500: ErrorResponse,
+    },
+)
+def find_stock_52w_high(request, date: str = None, format: str = "json"):
+    """
+    52주 신고가를 기록한 종목을 조회합니다.\n
+    ㅇ Args\n
+       - request: Ninja API 요청 객체.\n
+       - date (str, optional): 조회할 날짜 (YYYY-MM-DD 형식). 기본값: None (최신 날짜 조회).\n
+       - format (str, optional): 응답 형식 ("json" 또는 "excel"). 기본값: "json".\n
+    ㅇ Returns\n
+       - SuccessResponseStockAnalysis: 성공 시 52주 신고가 종목 데이터.\n
+       - ErrorResponse: 에러 발생 시 에러 메시지.\n
+    ㅇ Raises\n
+       - ValueError: 잘못된 날짜 형식이 입력된 경우.\n
+       - Exception: 기타 예상치 못한 오류 발생 시.\n
+    """
+    try:
+        # Validate format parameter
+        if format.lower() not in ["json", "excel"]:
+            return 400, ErrorResponse(
+                status="error", message="Invalid format. Use 'json' or 'excel'"
+            )
+
+        # Convert date string to date object if provided
+        query_date = None
+        if date:
+            try:
+                query_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                return 400, ErrorResponse(
+                    status="error", message="Invalid date format. Use YYYY-MM-DD"
+                )
+        else:
+            # If no date is provided, use the latest date from StockAnalysis
+            query_date = StockAnalysis.objects.latest("date").date
+
+        # 52주 신고가 조건: max_52w_date가 최신 데이터 날짜와 같은 종목들 조회
+        queryset = StockAnalysis.objects.filter(
+            max_52w_date=query_date
+        ).order_by("-rsRank")
+
+        queryset = queryset.filter(date=query_date)
+
+        # Check if any records exist
+        if not queryset.exists():
+            return 404, ErrorResponse(
+                status="error",
+                message="No stocks found with 52-week high on the specified date",
+            )
+
+        # Combine with Company data using select_related
+        results = []
+        for analysis in queryset.select_related("code"):
+            finance = StockFinancialStatement.objects.filter(
+                code=analysis.code
+            ).order_by("-year", "-quarter")
+            매출 = (
+                finance.filter(account_name="매출액")
+                .values_list("amount", flat=True)
+                .distinct()
+            )
+            영업이익 = (
+                finance.filter(account_name="영업이익")
+                .values_list("amount", flat=True)
+                .distinct()
+            )
+            매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else 0.0
+            영업이익증가율 = (
+                growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
+            )
+
+            combined_data = {
+                # Company fields
+                "code": analysis.code.code,
+                "name": analysis.code.name,
+                "market": analysis.code.market,
+                "sector": analysis.code.sector or "",  # None 값을 빈 문자열로 처리
+                "industry": analysis.code.industry or "",  # None 값을 빈 문자열로 처리
+                # StockAnalysis fields
+                "date": str(analysis.date),
+                "ma50": analysis.ma50,
+                "ma150": analysis.ma150,
+                "ma200": analysis.ma200,
+                "rsScore": analysis.rsScore,
+                "rsScore1m": analysis.rsScore1m,
+                "rsScore3m": analysis.rsScore3m,
+                "rsScore6m": analysis.rsScore6m,
+                "rsScore12m": analysis.rsScore12m,
+                "rsRank": analysis.rsRank,
+                "rsRank1m": analysis.rsRank1m,
+                "rsRank3m": analysis.rsRank3m,
+                "rsRank6m": analysis.rsRank6m,
+                "rsRank12m": analysis.rsRank12m,
+                "max_52w": analysis.max_52w,
+                "min_52w": analysis.min_52w,
+                "max_52w_date": (
+                    str(analysis.max_52w_date) if analysis.max_52w_date else None
+                ),
+                "min_52w_date": (
+                    str(analysis.min_52w_date) if analysis.min_52w_date else None
+                ),
+                "atr": analysis.atr,
+                "is_minervini_trend": analysis.is_minervini_trend,
+                # Financial data
+                "매출증가율": 매출증가율,
+                "영업이익증가율": 영업이익증가율,
+                "전전기매출": 매출[2] if len(매출) > 2 else 0,
+                "전기매출": 매출[1] if len(매출) > 1 else 0,
+                "당기매출": 매출[0] if 매출 else 0,
+                "전전기영업이익": 영업이익[2] if len(영업이익) > 2 else 0,
+                "전기영업이익": 영업이익[1] if len(영업이익) > 1 else 0,
+                "당기영업이익": 영업이익[0] if 영업이익 else 0,
+            }
+            results.append(combined_data)
+
+        if format.lower() == "excel":
+            # BytesIO 버퍼 생성
+            output = BytesIO()
+            df = pd.DataFrame(results)
+            filename = f"52w_high_stocks_{date or 'latest'}.xlsx"
+
+            # DataFrame을 BytesIO 버퍼에 쓰기
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False)
+
+            # 버퍼 포인터를 처음으로 되돌리기
+            output.seek(0)
+
+            # Excel 파일을 HttpResponse로 반환
+            response = HttpResponse(
+                content=output.getvalue(),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return response
+
+        elif format.lower() == "json":
+            # Return JSON response
+            return 200, SuccessResponseStockAnalysis(status="OK", data=results)
+        else:
+            return 400, ErrorResponse(
+                status="error", message="Invalid format. Use 'json' or 'excel'"
+            )
+
+    except Exception as e:
+        traceback.print_exc()
+        return 500, ErrorResponse(status="error", message=str(e))
+
+
 # 주식 OHLCV 데이터를 조회합니다.
 @query_router.get(
     "/find_stock_ohlcv",
@@ -371,15 +527,15 @@ def find_stock_ohlcv(request, code: str = "005930", limit: int = 63):
                 status="error", message=f"종목코드 '{code}'를 찾을 수 없습니다."
             )
 
-        # 최적화된 쿼리: select_related 제거하고 values()로 필요한 필드만 조회
+        # 최적화된 쿼리: 최신 데이터부터 limit개를 가져온 후 순서를 뒤집어서 과거->최신 순으로 정렬
         queryset = (
             StockOHLCV.objects.filter(code=company)
             .order_by("-date")
             .values("date", "open", "high", "low", "close", "volume", "change")[:limit]
         )
 
-        # QuerySet을 리스트로 변환하여 데이터 존재 여부 확인
-        results_list = list(queryset)
+        # QuerySet을 리스트로 변환하여 데이터 존재 여부 확인 후 순서 뒤집기
+        results_list = list(reversed(list(queryset)))
 
         if not results_list:
             return 404, ErrorResponse(
@@ -482,8 +638,8 @@ def find_stock_analysis(request, code: str = "005930", limit: int = 63):
             )[:limit]
         )
 
-        # QuerySet을 리스트로 변환하여 데이터 존재 여부 확인
-        results_list = list(queryset)
+        # QuerySet을 리스트로 변환하여 데이터 존재 여부 확인 후 순서 뒤집기 (과거->최신)
+        results_list = list(reversed(list(queryset)))
 
         if not results_list:
             return 404, ErrorResponse(
@@ -653,7 +809,7 @@ def find_stock_financial(
                     output_field=IntegerField(),
                 )
             )
-            .order_by("-year", "-quarter_order", "statement_type", "account_name")
+            .order_by("year", "quarter_order", "statement_type", "account_name")
             .values("year", "quarter", "statement_type", "account_name", "amount")[
                 :limit
             ]
@@ -826,8 +982,8 @@ def find_index_ohlcv(request, code: str = "1011", limit: int = 63):
             .values("date", "open", "high", "low", "close", "volume", "change")[:limit]
         )
 
-        # QuerySet을 리스트로 변환하여 데이터 존재 여부 확인
-        results_list = list(queryset)
+        # QuerySet을 리스트로 변환하여 데이터 존재 여부 확인 후 순서 뒤집기 (과거->최신)
+        results_list = list(reversed(list(queryset)))
 
         if not results_list:
             return 404, ErrorResponse(

@@ -83,11 +83,12 @@ class TradingConfigSchema(Schema):
     stock_code: str
     stock_name: str
     trading_mode: str  # 'manual' or 'turtle'
+    strategy_type: str = 'mtt'  # 'mtt' or 'weekly_high'
     max_loss: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     pyramiding_count: int = 0
-    position_size: Optional[float] = None
+    entry_point: Optional[float] = None
     pyramiding_entries: List[str] = []  # 피라미딩 진입시점 배열
     positions: List[float] = []         # 포지션 배열
     is_active: bool = True
@@ -97,11 +98,12 @@ class TradingConfigResponseSchema(Schema):
     stock_code: str
     stock_name: str
     trading_mode: str
+    strategy_type: str = 'mtt'  # 'mtt' or 'weekly_high'
     max_loss: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     pyramiding_count: int = 0
-    position_size: Optional[float] = None
+    entry_point: Optional[float] = None
     pyramiding_entries: List[str] = []  # 피라미딩 진입시점 배열
     positions: List[float] = []  # 포지션 배열
     is_active: bool = True
@@ -271,24 +273,29 @@ class TradingConfigSummarySchema(Schema):
     stock_code: str
     stock_name: str
     trading_mode: str
+    strategy_type: str = 'mtt'  # 'mtt' or 'weekly_high'
     stop_loss: Optional[float] = None  # 아코디언 헤더 표시용
     take_profit: Optional[float] = None  # 아코디언 헤더 표시용
     pyramiding_count: int = 0  # 아코디언 헤더 표시용
-    position_size: Optional[float] = None  # 아코디언 헤더 표시용
+    entry_point: Optional[float] = None  # 아코디언 헤더 표시용
     is_active: bool = True
     created_at: str
     updated_at: str
 
 
 @mypage_router.get("/trading-configs", response=List[TradingConfigResponseSchema])
-def get_trading_configs(request):
-    """사용자의 자동매매 설정 목록 조회"""
+def get_trading_configs(request, strategy_type: str = None):
+    """사용자의 자동매매 설정 목록 조회 (strategy_type 필터 지원)"""
     try:
         user = get_authenticated_user(request)
         if not user:
             return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
             
         configs = TradingConfig.objects.filter(user=user)
+        
+        # strategy_type 필터링
+        if strategy_type:
+            configs = configs.filter(strategy_type=strategy_type)
         
         result = []
         for config in configs:
@@ -297,11 +304,14 @@ def get_trading_configs(request):
                 'stock_code': config.stock_code,
                 'stock_name': config.stock_name,
                 'trading_mode': config.trading_mode,
+                'strategy_type': config.strategy_type,
                 'max_loss': config.max_loss,
                 'stop_loss': config.stop_loss,
                 'take_profit': config.take_profit,
                 'pyramiding_count': config.pyramiding_count,
-                'position_size': config.position_size,
+                'entry_point': config.entry_point,
+                'pyramiding_entries': config.pyramiding_entries,  # Django DB에서 직접 가져옴
+                'positions': config.positions,  # Django DB에서 직접 가져옴
                 'is_active': config.is_active,
                 'autobot_config_id': config.autobot_config_id,
                 'created_at': config.created_at.isoformat(),
@@ -317,8 +327,8 @@ def get_trading_configs(request):
 
 
 @mypage_router.get("/trading-configs/summary", response=List[TradingConfigSummarySchema])
-def get_trading_configs_summary(request):
-    """자동매매 설정 개요 목록 조회 (두 단계 로딩의 1차 데이터)"""
+def get_trading_configs_summary(request, strategy_type: str = None):
+    """자동매매 설정 개요 목록 조회 (두 단계 로딩의 1차 데이터, strategy_type 필터 지원)"""
     try:
         user = get_authenticated_user(request)
         
@@ -336,8 +346,10 @@ def get_trading_configs_summary(request):
         
         try:
             user_id = user.google_id or f"user_{user.id}"
+            # strategy_type 필터를 쿼리 파라미터로 전달
+            query_params = f"?strategy_type={strategy_type}" if strategy_type else ""
             response = requests.get(
-                f'http://{server_ip}:{server_port}/trading-configs/{user_id}',
+                f'http://{server_ip}:{server_port}/trading-configs/{user_id}{query_params}',
                 timeout=10
             )
             
@@ -352,10 +364,11 @@ def get_trading_configs_summary(request):
                         'stock_code': config.get('stock_code'),
                         'stock_name': config.get('stock_name'),
                         'trading_mode': config.get('trading_mode'),
+                        'strategy_type': config.get('strategy_type', 'mtt'),
                         'stop_loss': config.get('stop_loss'),  # 아코디언 헤더 표시용
                         'take_profit': config.get('take_profit'),  # 아코디언 헤더 표시용
                         'pyramiding_count': config.get('pyramiding_count', 0),  # 아코디언 헤더 표시용
-                        'position_size': config.get('position_size'),  # 아코디언 헤더 표시용
+                        'entry_point': config.get('entry_point'),  # 아코디언 헤더 표시용
                         'is_active': config.get('is_active', True),
                         'created_at': config.get('created_at'),
                         'updated_at': config.get('updated_at'),
@@ -394,21 +407,25 @@ def create_or_update_trading_config(request, data: TradingConfigSchema):
         
         
         with transaction.atomic():
-            # 기존 설정이 있는지 확인 (활성/비활성 무관)
+            # 기존 설정이 있는지 확인 (stock_code + strategy_type 조합으로 확인)
             existing_config = TradingConfig.objects.filter(
                 user=user,
-                stock_code=data.stock_code
+                stock_code=data.stock_code,
+                strategy_type=data.strategy_type
             ).first()
             
             if existing_config:
                 # 기존 설정 업데이트
                 existing_config.stock_name = data.stock_name
                 existing_config.trading_mode = data.trading_mode
+                existing_config.strategy_type = data.strategy_type
                 existing_config.max_loss = data.max_loss
                 existing_config.stop_loss = data.stop_loss
                 existing_config.take_profit = data.take_profit
                 existing_config.pyramiding_count = data.pyramiding_count
-                existing_config.position_size = data.position_size
+                existing_config.entry_point = data.entry_point
+                existing_config.pyramiding_entries = data.pyramiding_entries
+                existing_config.positions = data.positions
                 existing_config.is_active = data.is_active
                 existing_config.save()
                 
@@ -421,28 +438,32 @@ def create_or_update_trading_config(request, data: TradingConfigSchema):
                     stock_code=data.stock_code,
                     stock_name=data.stock_name,
                     trading_mode=data.trading_mode,
+                    strategy_type=data.strategy_type,
                     max_loss=data.max_loss,
                     stop_loss=data.stop_loss,
                     take_profit=data.take_profit,
                     pyramiding_count=data.pyramiding_count,
-                    position_size=data.position_size,
+                    entry_point=data.entry_point,
+                    pyramiding_entries=data.pyramiding_entries,
+                    positions=data.positions,
                     is_active=data.is_active,
                 )
                 action = "생성"
             
-            # autobot 서버로 설정 전달
+            # autobot 서버로 설정 전달 (Django DB가 단일 소스)
             config_dict = {
-                'stock_code': data.stock_code,
-                'stock_name': data.stock_name,
-                'trading_mode': data.trading_mode,
-                'max_loss': data.max_loss,
-                'stop_loss': data.stop_loss,
-                'take_profit': data.take_profit,
-                'pyramiding_count': data.pyramiding_count,
-                'position_size': data.position_size,
-                'pyramiding_entries': data.pyramiding_entries,
-                'positions': data.positions,
-                'is_active': data.is_active,
+                'stock_code': trading_config.stock_code,
+                'stock_name': trading_config.stock_name,
+                'trading_mode': trading_config.trading_mode,
+                'strategy_type': trading_config.strategy_type,
+                'max_loss': trading_config.max_loss,
+                'stop_loss': trading_config.stop_loss,
+                'take_profit': trading_config.take_profit,
+                'pyramiding_count': trading_config.pyramiding_count,
+                'entry_point': trading_config.entry_point,
+                'pyramiding_entries': trading_config.pyramiding_entries,
+                'positions': trading_config.positions,
+                'is_active': trading_config.is_active,
             }
             autobot_config_id = send_to_user_autobot_server(user, config_dict)
             if autobot_config_id:
@@ -462,58 +483,35 @@ def create_or_update_trading_config(request, data: TradingConfigSchema):
 
 
 @mypage_router.get("/trading-configs/stock/{stock_code}", response=TradingConfigResponseSchema)
-def get_trading_config_by_stock(request, stock_code: str):
+def get_trading_config_by_stock(request, stock_code: str, strategy_type: str = 'mtt'):
     """특정 종목의 자동매매 설정을 Django DB와 autobot 서버에서 조회합니다."""
     try:
         user = get_authenticated_user(request)
         if not user:
             return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
         
-        # Django DB에서 기본 설정 조회
-        config = TradingConfig.objects.filter(user=user, stock_code=stock_code).first()
+        # Django DB에서 기본 설정 조회 (stock_code + strategy_type 조합)
+        config = TradingConfig.objects.filter(
+            user=user, 
+            stock_code=stock_code, 
+            strategy_type=strategy_type
+        ).first()
         
         if config:
-            # 기본값 설정
-            pyramiding_entries = []
-            positions = []
-            
-            # autobot 서버에서 완전한 데이터 시도
-            try:
-                profile = UserProfile.objects.get(user=user)
-                if profile.autobot_server_ip:
-                    server_ip = profile.autobot_server_ip
-                    server_port = profile.autobot_server_port
-                    user_id = user.google_id or f"user_{user.id}"
-                    
-                    response = requests.get(
-                        f'http://{server_ip}:{server_port}/trading-configs/{user_id}',
-                        timeout=10
-                    )
-                    
-                    if response.status_code == 200:
-                        autobot_configs = response.json()
-                        # 해당 종목의 config 찾기
-                        for autobot_config in autobot_configs:
-                            if autobot_config.get('stock_code') == stock_code:
-                                pyramiding_entries = autobot_config.get('pyramiding_entries', [])
-                                positions = autobot_config.get('positions', [])
-                                break
-            except Exception:
-                # autobot 서버 오류 시 빈 배열 유지
-                pass
             
             return {
                 'id': config.id,  # Django DB의 ID 사용
                 'stock_code': config.stock_code,
                 'stock_name': config.stock_name,
                 'trading_mode': config.trading_mode,
+                'strategy_type': config.strategy_type,
                 'max_loss': config.max_loss,
                 'stop_loss': config.stop_loss,
                 'take_profit': config.take_profit,
                 'pyramiding_count': config.pyramiding_count,
-                'position_size': config.position_size,
-                'pyramiding_entries': pyramiding_entries,  # autobot 서버에서 가져온 실제 데이터
-                'positions': positions,  # autobot 서버에서 가져온 실제 데이터
+                'entry_point': config.entry_point,
+                'pyramiding_entries': config.pyramiding_entries,  # Django DB에서 직접 가져옴
+                'positions': config.positions,  # Django DB에서 직접 가져옴
                 'is_active': config.is_active,
                 'autobot_config_id': config.autobot_config_id,
                 'created_at': config.created_at.isoformat(),
@@ -535,17 +533,21 @@ def get_trading_config_by_stock(request, stock_code: str):
 
 
 @mypage_router.delete("/trading-configs/stock/{stock_code}", response=ResponseSchema)
-def delete_trading_config_by_stock_code(request, stock_code: str):
-    """자동매매 설정 삭제 - stock_code를 사용하여 Django DB와 autobot 서버에서 모두 삭제"""
+def delete_trading_config_by_stock_code(request, stock_code: str, strategy_type: str = 'mtt'):
+    """자동매매 설정 삭제 - stock_code와 strategy_type을 사용하여 Django DB와 autobot 서버에서 모두 삭제"""
     try:
         user = get_authenticated_user(request)
         if not user:
             return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
             
-        config = TradingConfig.objects.get(stock_code=stock_code, user=user)
+        config = TradingConfig.objects.get(
+            stock_code=stock_code, 
+            strategy_type=strategy_type,
+            user=user
+        )
         
         # autobot 서버에서도 삭제
-        autobot_result = delete_from_autobot_server(user, config.stock_code)
+        autobot_result = delete_from_autobot_server(user, config.stock_code, config.strategy_type)
         
         # Django DB에서 삭제
         config.delete()
@@ -566,7 +568,7 @@ def delete_trading_config_by_stock_code(request, stock_code: str):
         }
 
 
-def delete_from_autobot_server(user, stock_code):
+def delete_from_autobot_server(user, stock_code, strategy_type='mtt'):
     """autobot 서버에서 자동매매 설정 삭제"""
     try:
         # 사용자의 프로필에서 autobot 서버 정보 가져오기
@@ -579,9 +581,9 @@ def delete_from_autobot_server(user, stock_code):
         server_ip = profile.autobot_server_ip
         server_port = profile.autobot_server_port
         
-        # autobot 서버에서 설정 삭제
+        # autobot 서버에서 설정 삭제 (strategy_type 포함)
         user_id = user.google_id or f"user_{user.id}"
-        delete_url = f'http://{server_ip}:{server_port}/trading-configs/user/{user_id}/stock/{stock_code}'
+        delete_url = f'http://{server_ip}:{server_port}/trading-configs/user/{user_id}/stock/{stock_code}?strategy_type={strategy_type}'
         
         response = requests.delete(delete_url, timeout=10)
         
@@ -621,11 +623,12 @@ def send_to_user_autobot_server(user, config_data):
             'stock_code': config_data['stock_code'],
             'stock_name': config_data['stock_name'],
             'trading_mode': config_data['trading_mode'],
+            'strategy_type': config_data.get('strategy_type', 'mtt'),
             'max_loss': config_data.get('max_loss'),
             'stop_loss': config_data.get('stop_loss'),
             'take_profit': config_data.get('take_profit'),
             'pyramiding_count': config_data.get('pyramiding_count', 0),
-            'position_size': config_data.get('position_size'),
+            'entry_point': config_data.get('entry_point'),
             'pyramiding_entries': config_data.get('pyramiding_entries', []),
             'positions': config_data.get('positions', []),
             'user_id': user.google_id or f"user_{user.id}",  # Google ID 우선, 없으면 User ID

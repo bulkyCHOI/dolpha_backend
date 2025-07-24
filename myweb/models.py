@@ -228,6 +228,11 @@ class TradingConfig(models.Model):
         ("manual", "Manual"),
         ("turtle", "Turtle(ATR)"),
     ]
+    
+    STRATEGY_TYPES = [
+        ("mtt", "MTT (Minervini Trend Template)"),
+        ("weekly_high", "52주 신고가"),
+    ]
 
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name="trading_configs"
@@ -235,11 +240,14 @@ class TradingConfig(models.Model):
     stock_code = models.CharField(max_length=10)  # 종목 코드
     stock_name = models.CharField(max_length=100)  # 종목명
     trading_mode = models.CharField(max_length=20, choices=TRADING_MODES)  # 매매 모드
+    strategy_type = models.CharField(max_length=20, choices=STRATEGY_TYPES, default="mtt")  # 전략 타입
     max_loss = models.FloatField(null=True, blank=True)  # 최대손실(%)
     stop_loss = models.FloatField(null=True, blank=True)  # 손절가(%)
     take_profit = models.FloatField(null=True, blank=True)  # 익절가(%)
     pyramiding_count = models.IntegerField(default=0)  # 피라미딩 횟수
-    position_size = models.FloatField(null=True, blank=True)  # 포지션 크기(진입시점)
+    entry_point = models.FloatField(null=True, blank=True)  # 1차 진입시점 가격
+    pyramiding_entries = models.JSONField(default=list, blank=True)  # 2차, 3차... 진입시점 배열
+    positions = models.JSONField(default=list, blank=True)  # 1차, 2차, 3차... 포지션 비율 배열
     is_active = models.BooleanField(default=True)  # 활성화 여부
     autobot_config_id = models.IntegerField(
         null=True, blank=True
@@ -251,12 +259,13 @@ class TradingConfig(models.Model):
         unique_together = [
             "user",
             "stock_code",
+            "strategy_type",
             "is_active",
-        ]  # 사용자별 종목당 하나의 활성 설정만 허용
+        ]  # 사용자별 종목별 전략타입별 하나의 활성 설정만 허용
         ordering = ["-updated_at"]
 
     def __str__(self):
-        return f"{self.user.username} - {self.stock_name} ({self.trading_mode})"
+        return f"{self.user.username} - {self.stock_name} ({self.strategy_type}/{self.trading_mode})"
 
 
 class TradingResult(models.Model):
