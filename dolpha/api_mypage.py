@@ -252,7 +252,7 @@ class TradingConfigView(View):
                     'stop_loss': config.stop_loss,
                     'take_profit': config.take_profit,
                     'pyramiding_count': config.pyramiding_count,
-                    'position_size': config.position_size,
+                    'entry_point': config.entry_point,
                     'is_active': config.is_active,
                     'autobot_config_id': config.autobot_config_id,
                     'created_at': config.created_at.isoformat(),
@@ -302,7 +302,7 @@ class TradingConfigView(View):
                     stop_loss=data.get('stop_loss'),
                     take_profit=data.get('take_profit'),
                     pyramiding_count=data.get('pyramiding_count', 0),
-                    position_size=data.get('position_size'),
+                    entry_point=data.get('entry_point'),
                     is_active=data.get('is_active', True),
                 )
                 
@@ -345,7 +345,7 @@ class TradingConfigView(View):
                 'stop_loss': config_data.get('stop_loss'),
                 'take_profit': config_data.get('take_profit'),
                 'pyramiding_count': config_data.get('pyramiding_count', 0),
-                'position_size': config_data.get('position_size'),
+                'entry_point': config_data.get('entry_point'),
                 'user_id': user.google_id or str(user.id),  # Google ID 우선, 없으면 User ID
                 'is_active': config_data.get('is_active', True),
             }
@@ -389,7 +389,7 @@ class TradingConfigDetailView(View):
             # 업데이트 가능한 필드들
             updatable_fields = [
                 'trading_mode', 'max_loss', 'stop_loss', 'take_profit',
-                'pyramiding_count', 'position_size', 'is_active'
+                'pyramiding_count', 'entry_point', 'is_active'
             ]
             
             for field in updatable_fields:

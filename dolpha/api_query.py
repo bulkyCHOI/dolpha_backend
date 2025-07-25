@@ -578,6 +578,29 @@ def find_stock_52w_high(request, date: str = None, format: str = "json"):
             영업이익증가율 = (
                 growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
             )
+            
+            # 현재가 조회 (최근 OHLCV 데이터에서 - 분석일 이후의 최신 데이터)
+            latest_ohlcv = StockOHLCV.objects.filter(
+                code=analysis.code, 
+                date__gte=analysis.date
+            ).order_by("-date").first()
+            
+            if latest_ohlcv:
+                current_price = latest_ohlcv.close
+            else:
+                # 분석일 이후 데이터가 없으면 분석일의 데이터 사용
+                analysis_day_ohlcv = StockOHLCV.objects.filter(
+                    code=analysis.code, 
+                    date=analysis.date
+                ).first()
+                current_price = analysis_day_ohlcv.close if analysis_day_ohlcv else analysis.max_52w
+            
+            # 52주 최저가 대비 상승률 계산
+            if analysis.min_52w and analysis.min_52w > 0:
+                # 52주 신고가 종목이므로 max_52w를 현재가로 사용
+                min_52w_gain_percent = round(((analysis.max_52w - analysis.min_52w) / analysis.min_52w) * 100, 2)
+            else:
+                min_52w_gain_percent = 0.0
 
             combined_data = {
                 # Company fields
@@ -603,6 +626,7 @@ def find_stock_52w_high(request, date: str = None, format: str = "json"):
                 "rsRank12m": analysis.rsRank12m,
                 "max_52w": analysis.max_52w,
                 "min_52w": analysis.min_52w,
+                "min_52w_gain_percent": min_52w_gain_percent,
                 "max_52w_date": (
                     str(analysis.max_52w_date) if analysis.max_52w_date else None
                 ),
@@ -622,6 +646,9 @@ def find_stock_52w_high(request, date: str = None, format: str = "json"):
                 "당기영업이익": 영업이익[0] if 영업이익 else 0,
             }
             results.append(combined_data)
+
+        # Sort by min_52w_gain_percent in descending order (highest gain first)
+        results.sort(key=lambda x: x.get("min_52w_gain_percent", 0), reverse=True)
 
         if format.lower() == "excel":
             # BytesIO 버퍼 생성

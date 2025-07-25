@@ -91,6 +91,8 @@ class CombinedStockAnalysisSchema(FinancialDataSchema, StockAnalysisSchema, Comp
     # OHLCV 추가 필드 (상승률 정보용)
     close: Optional[int] = None
     change: Optional[float] = None
+    # 52주 최저가 대비 상승률
+    min_52w_gain_percent: Optional[float] = None
 
 class SuccessResponseStockAnalysis(Schema):
     status: str
