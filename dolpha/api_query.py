@@ -31,6 +31,177 @@ def growth_rate(current, previous):
     return ((current - previous) / abs(previous)) * 100
 
 
+# 상승률 TOP 50 종목을 조회합니다. (MTT 페이지용)
+@query_router.get(
+    "/find_stock_top_rising",
+    response={
+        200: SuccessResponseStockAnalysis,
+        404: ErrorResponse,
+        500: ErrorResponse,
+    },
+)
+def find_stock_top_rising(request, date: str = None, format: str = "json"):
+    """
+    최근 거래일 기준 상승률 TOP 50 종목을 조회합니다.\n
+    ㅇ Args\n
+       - request: Ninja API 요청 객체.\n
+       - date (str, optional): 조회할 날짜 (YYYY-MM-DD 형식). 기본값: None (최신 날짜 조회).\n
+       - format (str, optional): 응답 형식 ("json" 또는 "excel"). 기본값: "json".\n
+    ㅇ Returns\n
+       - SuccessResponseStockAnalysis: 성공 시 상승률 TOP 50 종목 데이터.\n
+       - ErrorResponse: 에러 발생 시 에러 메시지.\n
+    ㅇ Raises\n
+       - ValueError: 잘못된 날짜 형식이 입력된 경우.\n
+       - Exception: 기타 예상치 못한 오류 발생 시.\n
+    """
+    try:
+        # Validate format parameter
+        if format.lower() not in ["json", "excel"]:
+            return 400, ErrorResponse(
+                status="error", message="Invalid format. Use 'json' or 'excel'"
+            )
+
+        # Convert date string to date object if provided
+        query_date = None
+        if date:
+            try:
+                query_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                return 400, ErrorResponse(
+                    status="error", message="Invalid date format. Use YYYY-MM-DD"
+                )
+        else:
+            # If no date is provided, use the latest date from StockOHLCV
+            latest_ohlcv = StockOHLCV.objects.latest("date")
+            query_date = latest_ohlcv.date
+
+        # 해당 날짜의 상승률 TOP 50 종목 조회 (change 필드 기준 내림차순 정렬)
+        ohlcv_queryset = StockOHLCV.objects.filter(
+            date=query_date,
+            change__gt=0  # 상승한 종목만
+        ).order_by("-change")[:50]
+
+        # Check if any records exist
+        if not ohlcv_queryset.exists():
+            return 404, ErrorResponse(
+                status="error",
+                message="No rising stocks found on the specified date",
+            )
+
+        # 해당 종목들의 분석 데이터 조회
+        stock_codes = [ohlcv.code for ohlcv in ohlcv_queryset]
+        analysis_data = StockAnalysis.objects.filter(
+            code__in=stock_codes,
+            date=query_date
+        ).select_related("code")
+
+        # 분석 데이터를 딕셔너리로 변환 (빠른 조회를 위해)
+        analysis_dict = {analysis.code.code: analysis for analysis in analysis_data}
+
+        results = []
+        for ohlcv in ohlcv_queryset:
+            # 분석 데이터가 있는 종목만 포함
+            if ohlcv.code.code in analysis_dict:
+                analysis = analysis_dict[ohlcv.code.code]
+                
+                # 재무 데이터 조회
+                finance = StockFinancialStatement.objects.filter(
+                    code=analysis.code
+                ).order_by("-year", "-quarter")
+                
+                매출 = (
+                    finance.filter(account_name="매출액")
+                    .values_list("amount", flat=True)
+                    .distinct()
+                )
+                영업이익 = (
+                    finance.filter(account_name="영업이익")
+                    .values_list("amount", flat=True)
+                    .distinct()
+                )
+                
+                매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else 0.0
+                영업이익증가율 = (
+                    growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
+                )
+
+                combined_data = {
+                    # Company fields
+                    "code": ohlcv.code.code,
+                    "name": ohlcv.code.name,
+                    "market": ohlcv.code.market,
+                    "sector": ohlcv.code.sector or "",
+                    "industry": ohlcv.code.industry or "",
+                    # StockAnalysis fields
+                    "date": str(analysis.date),
+                    "ma50": analysis.ma50,
+                    "ma150": analysis.ma150,
+                    "ma200": analysis.ma200,
+                    "rsScore": analysis.rsScore,
+                    "rsScore1m": analysis.rsScore1m,
+                    "rsScore3m": analysis.rsScore3m,
+                    "rsScore6m": analysis.rsScore6m,
+                    "rsScore12m": analysis.rsScore12m,
+                    "rsRank": analysis.rsRank,
+                    "rsRank1m": analysis.rsRank1m,
+                    "rsRank3m": analysis.rsRank3m,
+                    "rsRank6m": analysis.rsRank6m,
+                    "rsRank12m": analysis.rsRank12m,
+                    "max_52w": analysis.max_52w,
+                    "min_52w": analysis.min_52w,
+                    "max_52w_date": (
+                        str(analysis.max_52w_date) if analysis.max_52w_date else ""
+                    ),
+                    "min_52w_date": (
+                        str(analysis.min_52w_date) if analysis.min_52w_date else ""
+                    ),
+                    "atr": analysis.atr,
+                    "atrRatio": analysis.atrRatio,
+                    "is_minervini_trend": analysis.is_minervini_trend,
+                    # OHLCV 추가 필드 (상승률 정보)
+                    "close": ohlcv.close,
+                    "change": ohlcv.change,  # 상승률
+                    # 재무 데이터
+                    "당기매출": 매출[0] if len(매출) > 0 else 0,
+                    "전기매출": 매출[1] if len(매출) > 1 else 0,
+                    "전전기매출": 매출[2] if len(매출) > 2 else 0,
+                    "당기영업이익": 영업이익[0] if len(영업이익) > 0 else 0,
+                    "전기영업이익": 영업이익[1] if len(영업이익) > 1 else 0,
+                    "전전기영업이익": 영업이익[2] if len(영업이익) > 2 else 0,
+                    "매출증가율": 매출증가율,
+                    "영업이익증가율": 영업이익증가율,
+                }
+                results.append(combined_data)
+
+        if format.lower() == "excel":
+            # BytesIO 버퍼 생성
+            output = BytesIO()
+            df = pd.DataFrame(results)
+            filename = f"top_rising_stocks_{date or 'latest'}.xlsx"
+            
+            # DataFrame을 BytesIO 버퍼에 쓰기
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False)
+            
+            # 버퍼 포인터를 처음으로 되돌리기
+            output.seek(0)
+            
+            # Excel 파일을 HttpResponse로 반환
+            response = HttpResponse(
+                content=output.getvalue(),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return response
+        else:
+            # Return JSON response
+            return 200, SuccessResponseStockAnalysis(status="OK", data=results)
+
+    except Exception as e:
+        traceback.print_exc()
+        return 500, ErrorResponse(status="error", message=str(e))
+
+
 # 미너비니 트렌드 템플릿에 해당하는 종목을 조회합니다.
 @query_router.get(
     "/find_stock_inMTT",

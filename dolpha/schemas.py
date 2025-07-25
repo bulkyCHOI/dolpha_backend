@@ -71,8 +71,8 @@ class StockAnalysisSchema(Schema):
     rsRank12m: float
     max_52w: float
     min_52w: float
-    max_52w_date: str = None
-    min_52w_date: str = None
+    max_52w_date: Optional[str] = ""
+    min_52w_date: Optional[str] = ""
     atr: float = 0.0  # 평균 진폭 (Average True Range)
     atrRatio: float = 0.0  # 평균 진폭 비율 (ATR Ratio)
     is_minervini_trend: bool
@@ -88,7 +88,9 @@ class FinancialDataSchema(Schema):
     당기영업이익: int
 
 class CombinedStockAnalysisSchema(FinancialDataSchema, StockAnalysisSchema, CompanySchema):
-    pass
+    # OHLCV 추가 필드 (상승률 정보용)
+    close: Optional[int] = None
+    change: Optional[float] = None
 
 class SuccessResponseStockAnalysis(Schema):
     status: str
