@@ -113,6 +113,10 @@ class StockAnalysis(models.Model):
     min_52w = models.FloatField(default=0.0)  # 52주 최저가
     max_52w_date = models.DateField(null=True, blank=True)  # 52주 최고가 날짜
     min_52w_date = models.DateField(null=True, blank=True)  # 52주 최저가 날짜
+    max_50d = models.FloatField(default=0.0)  # 50일 최고가
+    min_50d = models.FloatField(default=0.0)  # 50일 최저가
+    max_50d_date = models.DateField(null=True, blank=True)  # 50일 최고가 날짜
+    min_50d_date = models.DateField(null=True, blank=True)  # 50일 최저가 날짜
     atr = models.FloatField(default=0.0)  # 평균 진폭 (Average True Range)
     atrRatio = models.FloatField(default=0.0)  # 평균 진폭 비율 (ATR Rate)
     is_minervini_trend = models.BooleanField(

@@ -1,5 +1,5 @@
 from ninja import NinjaAPI, Router
-from django.db import transaction
+from django.db import transaction, models
 from django.http import HttpResponse
 
 from . import stockCommon as Common
@@ -71,9 +71,9 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
                     status="error", message="Invalid date format. Use YYYY-MM-DD"
                 )
         else:
-            # If no date is provided, use the latest date from StockOHLCV
-            latest_ohlcv = StockOHLCV.objects.latest("date")
-            query_date = latest_ohlcv.date
+            # If no date is provided, use the latest date from StockAnalysis
+            latest_analysis = StockAnalysis.objects.latest("date")
+            query_date = latest_analysis.date
 
         # 해당 날짜의 상승률 TOP 50 종목 조회 (change 필드 기준 내림차순 정렬)
         ohlcv_queryset = StockOHLCV.objects.filter(
@@ -1119,6 +1119,204 @@ def find_stock_index(request, code: str = "005930", limit: int = 10):
         return 500, ErrorResponse(
             status="error", message=f"서버 오류가 발생했습니다: {str(e)}"
         )
+
+
+# 50일 신고가 종목을 조회합니다.
+@query_router.get(
+    "/find_stock_50d_high",
+    response={
+        200: SuccessResponseStockAnalysis,
+        404: ErrorResponse,
+        500: ErrorResponse,
+    },
+)
+def find_stock_50d_high(request, date: str = None, format: str = "json"):
+    """
+    50일 신고가를 기록한 종목을 조회합니다.\n
+    ㅇ Args\n
+       - request: Ninja API 요청 객체.\n
+       - date (str, optional): 조회할 날짜 (YYYY-MM-DD 형식). 기본값: None (최신 날짜 조회).\n
+       - format (str, optional): 응답 형식 ("json" 또는 "excel"). 기본값: "json".\n
+    ㅇ Returns\n
+       - SuccessResponseStockAnalysis: 성공 시 50일 신고가 종목 데이터.\n
+       - ErrorResponse: 에러 발생 시 에러 메시지.\n
+    ㅇ Raises\n
+       - ValueError: 잘못된 날짜 형식이 입력된 경우.\n
+       - Exception: 기타 예상치 못한 오류 발생 시.\n
+    """
+    try:
+        # Validate format parameter
+        if format.lower() not in ["json", "excel"]:
+            return 400, ErrorResponse(
+                status="error", message="Invalid format. Use 'json' or 'excel'"
+            )
+
+        # Convert date string to date object if provided
+        query_date = None
+        if date:
+            try:
+                query_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                return 400, ErrorResponse(
+                    status="error", message="Invalid date format. Use YYYY-MM-DD"
+                )
+        else:
+            # If no date is provided, use the latest date from StockAnalysis
+            latest_analysis = StockAnalysis.objects.latest("date")
+            query_date = latest_analysis.date
+
+        # 50일 신고가 조건: max_50d_date가 조회 날짜와 같은 종목들 조회 (52주 신고가 API와 동일한 로직)
+        queryset = StockAnalysis.objects.filter(
+            max_50d_date=query_date
+        ).order_by("-rsRank")
+
+        queryset = queryset.filter(date=query_date)
+
+        # Check if any records exist
+        if not queryset.exists():
+            return 404, ErrorResponse(
+                status="error",
+                message="No stocks found with 50-day high on the specified date",
+            )
+
+        # Combine with Company data using select_related
+        results = []
+        for analysis in queryset.select_related("code"):
+            finance = StockFinancialStatement.objects.filter(
+                code=analysis.code
+            ).order_by("-year", "-quarter")
+            매출 = (
+                finance.filter(account_name="매출액")
+                .values_list("amount", flat=True)
+                .distinct()
+            )
+            영업이익 = (
+                finance.filter(account_name="영업이익")
+                .values_list("amount", flat=True)
+                .distinct()
+            )
+            매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else 0.0
+            영업이익증가율 = (
+                growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
+            )
+            
+            # 현재가 조회 (최근 OHLCV 데이터에서 - 분석일 이후의 최신 데이터)
+            latest_ohlcv = StockOHLCV.objects.filter(
+                code=analysis.code, 
+                date__gte=analysis.date
+            ).order_by("-date").first()
+            
+            if latest_ohlcv:
+                current_price = latest_ohlcv.close
+                current_open = latest_ohlcv.open
+            else:
+                # 분석일 이후 데이터가 없으면 분석일의 데이터 사용
+                analysis_day_ohlcv = StockOHLCV.objects.filter(
+                    code=analysis.code, 
+                    date=analysis.date
+                ).first()
+                current_price = analysis_day_ohlcv.close if analysis_day_ohlcv else analysis.max_50d
+                current_open = analysis_day_ohlcv.open if analysis_day_ohlcv else current_price
+            
+            # 50일 최저가 대비 상승률 계산
+            if analysis.min_50d and analysis.min_50d > 0:
+                # 50일 신고가 종목이므로 max_50d를 현재가로 사용
+                min_50d_gain_percent = round(((analysis.max_50d - analysis.min_50d) / analysis.min_50d) * 100, 2)
+            else:
+                min_50d_gain_percent = 0.0
+
+            combined_data = {
+                # Company fields
+                "code": analysis.code.code,
+                "name": analysis.code.name,
+                "market": analysis.code.market,
+                "sector": analysis.code.sector or "",  # None 값을 빈 문자열로 처리
+                "industry": analysis.code.industry or "",  # None 값을 빈 문자열로 처리
+                # StockAnalysis fields
+                "date": str(analysis.date),
+                "ma50": analysis.ma50,
+                "ma150": analysis.ma150,
+                "ma200": analysis.ma200,
+                "rsScore": analysis.rsScore,
+                "rsScore1m": analysis.rsScore1m,
+                "rsScore3m": analysis.rsScore3m,
+                "rsScore6m": analysis.rsScore6m,
+                "rsScore12m": analysis.rsScore12m,
+                "rsRank": analysis.rsRank,
+                "rsRank1m": analysis.rsRank1m,
+                "rsRank3m": analysis.rsRank3m,
+                "rsRank6m": analysis.rsRank6m,
+                "rsRank12m": analysis.rsRank12m,
+                "max_52w": analysis.max_52w,
+                "min_52w": analysis.min_52w,
+                "max_52w_date": (
+                    str(analysis.max_52w_date) if analysis.max_52w_date else None
+                ),
+                "min_52w_date": (
+                    str(analysis.min_52w_date) if analysis.min_52w_date else None
+                ),
+                "atr": analysis.atr,
+                "is_minervini_trend": analysis.is_minervini_trend,
+                # Current price and change data
+                "close": current_price,
+                "change": round(((current_price - current_open) / current_open) * 100, 2) if current_open > 0 else 0.0,
+                # 50일 신고가 관련 데이터
+                "max_50d": analysis.max_50d,
+                "min_50d": analysis.min_50d,
+                "max_50d_date": (
+                    str(analysis.max_50d_date) if analysis.max_50d_date else None
+                ),
+                "min_50d_date": (
+                    str(analysis.min_50d_date) if analysis.min_50d_date else None
+                ),
+                "min_50d_gain_percent": min_50d_gain_percent,
+                # Financial data
+                "매출증가율": 매출증가율,
+                "영업이익증가율": 영업이익증가율,
+                "전전기매출": 매출[2] if len(매출) > 2 else 0,
+                "전기매출": 매출[1] if len(매출) > 1 else 0,
+                "당기매출": 매출[0] if 매출 else 0,
+                "전전기영업이익": 영업이익[2] if len(영업이익) > 2 else 0,
+                "전기영업이익": 영업이익[1] if len(영업이익) > 1 else 0,
+                "당기영업이익": 영업이익[0] if 영업이익 else 0,
+            }
+            results.append(combined_data)
+
+        # Sort by min_50d_gain_percent in descending order (highest gain first)
+        results.sort(key=lambda x: x.get("min_50d_gain_percent", 0), reverse=True)
+
+        if format.lower() == "excel":
+            # BytesIO 버퍼 생성
+            output = BytesIO()
+            df = pd.DataFrame(results)
+            filename = f"50d_high_stocks_{date or 'latest'}.xlsx"
+
+            # DataFrame을 BytesIO 버퍼에 쓰기
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False)
+
+            # 버퍼 포인터를 처음으로 되돌리기
+            output.seek(0)
+
+            # Excel 파일을 HttpResponse로 반환
+            response = HttpResponse(
+                content=output.getvalue(),
+                content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return response
+
+        elif format.lower() == "json":
+            # Return JSON response
+            return 200, SuccessResponseStockAnalysis(status="OK", data=results)
+        else:
+            return 400, ErrorResponse(
+                status="error", message="Invalid format. Use 'json' or 'excel'"
+            )
+
+    except Exception as e:
+        traceback.print_exc()
+        return 500, ErrorResponse(status="error", message=str(e))
 
 
 # index OHLCV 데이터를 조회합니다.

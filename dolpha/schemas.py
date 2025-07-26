@@ -4,10 +4,12 @@ from typing import List, Dict, Optional, Any
 # =====================================================================
 # response를 담는 스키마
 
+
 class FailedRecord(Schema):
     index: int
     code: str
     error: str
+
 
 class IndexListResponse(Schema):
     status: str
@@ -16,6 +18,7 @@ class IndexListResponse(Schema):
     count_updated: int
     count_failed: int
 
+
 class StockDescriptionResponse(Schema):
     status: str
     count_total: int
@@ -23,16 +26,19 @@ class StockDescriptionResponse(Schema):
     count_updated: int
     count_failed: int
     failed_records: Optional[List[FailedRecord]] = None
-    
+
+
 class SuccessResponse(Schema):
     status: str
     message: str
     count_saved: int
 
+
 class ErrorResponse(Schema):
     status: str
     message: str
-    
+
+
 class SuccessResponseStockDart(Schema):
     status: str
     data: List[Dict[str, Any]]  # JSON 형태를 표현
@@ -41,10 +47,12 @@ class SuccessResponseStockDart(Schema):
 # =====================================================================
 # 데이터를 담는 스키마
 
+
 class StockIndexSchema(Schema):
     code: str
     name: str
     market: str
+
 
 class CompanySchema(Schema):
     code: str
@@ -52,6 +60,7 @@ class CompanySchema(Schema):
     market: str
     sector: Optional[str] = None
     industry: Optional[str] = None
+
 
 class StockAnalysisSchema(Schema):
     code: str
@@ -77,6 +86,7 @@ class StockAnalysisSchema(Schema):
     atrRatio: float = 0.0  # 평균 진폭 비율 (ATR Ratio)
     is_minervini_trend: bool
 
+
 class FinancialDataSchema(Schema):
     매출증가율: float = 0.0
     영업이익증가율: float = 0.0
@@ -87,12 +97,18 @@ class FinancialDataSchema(Schema):
     전기영업이익: int
     당기영업이익: int
 
-class CombinedStockAnalysisSchema(FinancialDataSchema, StockAnalysisSchema, CompanySchema):
+
+class CombinedStockAnalysisSchema(
+    FinancialDataSchema, StockAnalysisSchema, CompanySchema
+):
     # OHLCV 추가 필드 (상승률 정보용)
     close: Optional[int] = None
     change: Optional[float] = None
     # 52주 최저가 대비 상승률
     min_52w_gain_percent: Optional[float] = None
+    # 50일 신고가 대비 상승률
+    min_50d_gain_percent: Optional[float] = None
+
 
 class SuccessResponseStockAnalysis(Schema):
     status: str
@@ -109,6 +125,7 @@ class StockOhlcvSchema(Schema):
     volume: int
     change: float
 
+
 class SuccessResponseStockOhlcvSchema(Schema):
     status: str
     data: List[StockOhlcvSchema]  # JSON 형태를 표현
@@ -122,17 +139,21 @@ class StockFinancialStatementSchema(Schema):
     account_name: str
     amount: int
 
+
 class SuccessResponseStockFinancialSchema(Schema):
     status: str
     data: List[StockFinancialStatementSchema]  # JSON 형태를 표현
+
 
 class SuccessResponseStockAnalysisSchema(Schema):
     status: str
     data: List[StockAnalysisSchema]  # JSON 형태를 표현
 
+
 class SuccessResponseStockIndexSchema(Schema):
     status: str
     data: List[StockIndexSchema]  # JSON 형태를 표현
+
 
 class SuccessResponseIndexOhlcvSchema(Schema):
     status: str

@@ -640,6 +640,68 @@ def calculate_moving_averages(
         return {f"ma{period}": 0.0 for period in periods} | {"ma200_past": 0.0}
 
 
+# 50일 신고가와 신저가 및 발생 날짜를 계산합니다.
+def calculate_50d_high_low(data, target_date, period_days=50):
+    """
+    50일 신고가와 신저가 및 발생 날짜를 계산합니다.
+    data: StockOHLCV 객체의 Queryset, 날짜 기준 오름차순 정렬.
+    target_date: 계산할 목표 날짜.
+    period_days: 계산 기간 (기본값: 50 거래일).
+    """
+    try:
+        data = list(data.order_by("date").filter(date__lte=target_date))
+        target_idx = None
+        for i, record in enumerate(data):
+            if record.date >= target_date:
+                target_idx = i
+                break
+
+        if target_idx is None or target_idx + 1 < period_days:
+            return {
+                "max_50d": 0.0,
+                "min_50d": 0.0,
+                "max_50d_date": None,
+                "min_50d_date": None,
+            }
+
+        # 지난 50일 데이터 추출
+        period_data = data[target_idx - period_days + 1 : target_idx + 1]
+
+        # high와 low가 0이 아닌 데이터만 필터링
+        highs = [
+            (record.high, record.date) for record in period_data if record.high > 0
+        ]
+        lows = [(record.low, record.date) for record in period_data if record.low > 0]
+
+        # 유효한 데이터가 없으면 기본값 반환
+        if not highs or not lows:
+            return {
+                "max_50d": 0.0,
+                "min_50d": 0.0,
+                "max_50d_date": None,
+                "min_50d_date": None,
+            }
+
+        max_high, max_date = max(highs, key=lambda x: x[0])
+        min_low, min_date = min(lows, key=lambda x: x[0])
+
+        return {
+            "max_50d": float(max_high),
+            "min_50d": float(min_low),
+            "max_50d_date": max_date,
+            "min_50d_date": min_date,
+        }
+
+    except Exception as e:
+        print(f"50일 신고가/신저가 계산 오류: {e}")
+        return {
+            "max_50d": 0.0,
+            "min_50d": 0.0,
+            "max_50d_date": None,
+            "min_50d_date": None,
+        }
+
+
 # 52주 신고가와 신저가 및 발생 날짜를 계산합니다.
 def calculate_52w_high_low(data, target_date, period_days=252):
     """
@@ -889,6 +951,9 @@ def calculate_stock_analysis(request, offset: int = 0, limit: int = 0):
 
             # 52주 신고가/신저가 및 날짜 계산
             high_low = calculate_52w_high_low(ohlcv_data, target_date)
+            
+            # 50일 신고가/신저가 및 날짜 계산
+            high_low_50d = calculate_50d_high_low(ohlcv_data, target_date)
 
             # # 각 기간별 RS 점수 계산
             # rs_scores = {}
@@ -958,6 +1023,10 @@ def calculate_stock_analysis(request, offset: int = 0, limit: int = 0):
                     min_52w=high_low["min_52w"],
                     max_52w_date=high_low["max_52w_date"],
                     min_52w_date=high_low["min_52w_date"],
+                    max_50d=high_low_50d["max_50d"],
+                    min_50d=high_low_50d["min_50d"],
+                    max_50d_date=high_low_50d["max_50d_date"],
+                    min_50d_date=high_low_50d["min_50d_date"],
                     atr=atr,
                     atrRatio=atrRatio,
                     is_minervini_trend=is_minervini_trend,
