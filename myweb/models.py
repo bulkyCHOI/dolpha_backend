@@ -230,12 +230,14 @@ class FavoriteStock(models.Model):
 class TradingConfig(models.Model):
     TRADING_MODES = [
         ("manual", "Manual"),
-        ("turtle", "Turtle(ATR)"),
+        ("atr", "Turtle(ATR)"),
     ]
     
     STRATEGY_TYPES = [
         ("mtt", "MTT (Minervini Trend Template)"),
         ("weekly_high", "52주 신고가"),
+        ("fifty_day_high", "50일 신고가"),
+        ("daily_top50", "일일 Top50"),
     ]
 
     user = models.ForeignKey(
@@ -270,6 +272,59 @@ class TradingConfig(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.stock_name} ({self.strategy_type}/{self.trading_mode})"
+
+
+class TradingDefaults(models.Model):
+    """자동매매 기본값 설정 모델"""
+    TRADING_MODES = [
+        ("manual", "Manual"),
+        ("turtle", "Turtle(ATR)"),
+    ]
+
+    user = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name="trading_defaults"
+    )
+    # 매매모드 설정
+    trading_mode = models.CharField(
+        max_length=20, choices=TRADING_MODES, default="turtle"
+    )  # 현재 선택된 매매 모드
+    
+    # Manual 모드 설정값들
+    manual_max_loss = models.FloatField(default=8.0)  # Manual 최대손실(%)
+    manual_stop_loss = models.FloatField(default=8.0)  # Manual 손절가(%)
+    manual_take_profit = models.FloatField(null=True, blank=True)  # Manual 익절가(%)
+    manual_pyramiding_count = models.IntegerField(default=0)  # Manual 피라미딩 횟수
+    manual_position_size = models.FloatField(default=100.0)  # Manual 포지션 크기(%)
+    manual_positions = models.JSONField(default=lambda: [100], blank=True)  # Manual 포지션 비율 배열
+    manual_pyramiding_entries = models.JSONField(default=list, blank=True)  # Manual 진입시점 배열
+    manual_use_trailing_stop = models.BooleanField(default=True)  # Manual 트레일링 스탑 사용
+    manual_trailing_stop_percent = models.FloatField(default=8.0)  # Manual 트레일링 스탑 비율(%)
+    
+    # Turtle(ATR) 모드 설정값들
+    turtle_max_loss = models.FloatField(default=8.0)  # Turtle 최대손실(ATR)
+    turtle_stop_loss = models.FloatField(default=2.0)  # Turtle 손절가(ATR)
+    turtle_take_profit = models.FloatField(null=True, blank=True)  # Turtle 익절가(ATR)
+    turtle_pyramiding_count = models.IntegerField(default=3)  # Turtle 피라미딩 횟수
+    turtle_position_size = models.FloatField(default=25.0)  # Turtle 포지션 크기(%)
+    turtle_positions = models.JSONField(default=lambda: [25, 25, 25, 25], blank=True)  # Turtle 포지션 비율 배열
+    turtle_pyramiding_entries = models.JSONField(default=lambda: ["", "", ""], blank=True)  # Turtle 진입시점 배열
+    turtle_use_trailing_stop = models.BooleanField(default=True)  # Turtle 트레일링 스탑 사용
+    turtle_trailing_stop_percent = models.FloatField(default=3.0)  # Turtle 트레일링 스탑 비율(ATR)
+    
+    # 진입/청산 기본값 (공통)
+    default_entry_trigger = models.FloatField(default=1.0)  # 기본 진입 트리거 (ATR 배수)
+    default_exit_trigger = models.FloatField(default=2.0)  # 기본 청산 트리거 (ATR 배수)
+    
+    # 메타데이터
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.user.username}의 자동매매 기본값 설정"
+
+    class Meta:
+        verbose_name = "자동매매 기본값 설정"
+        verbose_name_plural = "자동매매 기본값 설정들"
 
 
 class TradingResult(models.Model):

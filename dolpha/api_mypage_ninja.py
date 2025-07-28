@@ -17,7 +17,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from django.contrib.auth.models import AnonymousUser
 
-from myweb.models import User, UserProfile, TradingConfig
+from myweb.models import User, UserProfile, TradingConfig, TradingDefaults
 
 
 mypage_router = Router()
@@ -115,6 +115,62 @@ class ResponseSchema(Schema):
     success: bool
     message: Optional[str] = None
     error: Optional[str] = None
+
+# 자동매매 기본값 설정 스키마
+class TradingDefaultsSchema(Schema):
+    trading_mode: str = "turtle"
+    # Manual 모드 설정
+    manual_max_loss: float = 8.0
+    manual_stop_loss: float = 8.0
+    manual_take_profit: Optional[float] = None
+    manual_pyramiding_count: int = 0
+    manual_position_size: float = 100.0
+    manual_positions: List[float] = []
+    manual_pyramiding_entries: List[str] = []
+    manual_use_trailing_stop: bool = True
+    manual_trailing_stop_percent: float = 8.0
+    # Turtle 모드 설정
+    turtle_max_loss: float = 8.0
+    turtle_stop_loss: float = 2.0
+    turtle_take_profit: Optional[float] = None
+    turtle_pyramiding_count: int = 3
+    turtle_position_size: float = 25.0
+    turtle_positions: List[float] = []
+    turtle_pyramiding_entries: List[str] = []
+    turtle_use_trailing_stop: bool = True
+    turtle_trailing_stop_percent: float = 3.0
+    # 공통 설정
+    default_entry_trigger: float = 1.0
+    default_exit_trigger: float = 2.0
+
+class TradingDefaultsResponseSchema(Schema):
+    id: int
+    trading_mode: str
+    # Manual 모드 설정
+    manual_max_loss: float
+    manual_stop_loss: float
+    manual_take_profit: Optional[float] = None
+    manual_pyramiding_count: int
+    manual_position_size: float
+    manual_positions: List[float] = []
+    manual_pyramiding_entries: List[str] = []
+    manual_use_trailing_stop: bool
+    manual_trailing_stop_percent: float
+    # Turtle 모드 설정
+    turtle_max_loss: float
+    turtle_stop_loss: float
+    turtle_take_profit: Optional[float] = None
+    turtle_pyramiding_count: int
+    turtle_position_size: float
+    turtle_positions: List[float] = []
+    turtle_pyramiding_entries: List[str] = []
+    turtle_use_trailing_stop: bool
+    turtle_trailing_stop_percent: float
+    # 공통 설정
+    default_entry_trigger: float
+    default_exit_trigger: float
+    created_at: str
+    updated_at: str
 
 
 
@@ -390,7 +446,7 @@ def get_trading_configs_summary(request, strategy_type: str = None):
 
 @mypage_router.post("/trading-configs", response=ResponseSchema)
 def create_or_update_trading_config(request, data: TradingConfigSchema):
-    """자동매매 설정 생성 또는 업데이트 - 완전한 DB 연동 (Presentation 페이지에서 호출)"""
+    """자동매매 설정 생성 또는 업데이트 - 기존 설정은 그대로 유지"""
     try:
         user = get_authenticated_user(request)
         if not user:
@@ -405,7 +461,6 @@ def create_or_update_trading_config(request, data: TradingConfigSchema):
                 'message': 'autobot 서버 설정을 먼저 완료해주세요. 마이페이지 > 서버 설정에서 autobot 서버 IP와 포트를 설정한 후 자동매매 설정을 저장할 수 있습니다.'
             }, status=400)
         
-        
         with transaction.atomic():
             # 기존 설정이 있는지 확인 (stock_code + strategy_type 조합으로 확인)
             existing_config = TradingConfig.objects.filter(
@@ -415,7 +470,7 @@ def create_or_update_trading_config(request, data: TradingConfigSchema):
             ).first()
             
             if existing_config:
-                # 기존 설정 업데이트
+                # 기존 설정 업데이트 (그대로 받은 데이터 사용)
                 existing_config.stock_name = data.stock_name
                 existing_config.trading_mode = data.trading_mode
                 existing_config.strategy_type = data.strategy_type
@@ -432,7 +487,7 @@ def create_or_update_trading_config(request, data: TradingConfigSchema):
                 trading_config = existing_config
                 action = "업데이트"
             else:
-                # 새로운 설정 생성
+                # 새로운 설정 생성 (그대로 받은 데이터 사용)
                 trading_config = TradingConfig.objects.create(
                     user=user,
                     stock_code=data.stock_code,
@@ -451,7 +506,7 @@ def create_or_update_trading_config(request, data: TradingConfigSchema):
                 action = "생성"
             
             # autobot 서버로 설정 전달 (Django DB가 단일 소스)
-            config_dict = {
+            autobot_config_dict = {
                 'stock_code': trading_config.stock_code,
                 'stock_name': trading_config.stock_name,
                 'trading_mode': trading_config.trading_mode,
@@ -465,7 +520,7 @@ def create_or_update_trading_config(request, data: TradingConfigSchema):
                 'positions': trading_config.positions,
                 'is_active': trading_config.is_active,
             }
-            autobot_config_id = send_to_user_autobot_server(user, config_dict)
+            autobot_config_id = send_to_user_autobot_server(user, autobot_config_dict)
             if autobot_config_id:
                 trading_config.autobot_config_id = autobot_config_id
                 trading_config.save()
@@ -656,3 +711,180 @@ def send_to_user_autobot_server(user, config_data):
         return None
 
 
+# 자동매매 기본값 설정 API
+@mypage_router.get("/trading-defaults", response=TradingDefaultsResponseSchema)
+def get_trading_defaults(request):
+    """사용자의 자동매매 기본값 설정 조회"""
+    try:
+        user = get_authenticated_user(request)
+        if not user:
+            return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
+        
+        # 기본값 설정이 없으면 자동 생성
+        defaults, created = TradingDefaults.objects.get_or_create(user=user)
+        
+        return {
+            'id': defaults.id,
+            'trading_mode': defaults.trading_mode,
+            # Manual 모드 설정
+            'manual_max_loss': defaults.manual_max_loss,
+            'manual_stop_loss': defaults.manual_stop_loss,
+            'manual_take_profit': defaults.manual_take_profit,
+            'manual_pyramiding_count': defaults.manual_pyramiding_count,
+            'manual_position_size': defaults.manual_position_size,
+            'manual_positions': defaults.manual_positions,
+            'manual_pyramiding_entries': defaults.manual_pyramiding_entries,
+            'manual_use_trailing_stop': defaults.manual_use_trailing_stop,
+            'manual_trailing_stop_percent': defaults.manual_trailing_stop_percent,
+            # Turtle 모드 설정
+            'turtle_max_loss': defaults.turtle_max_loss,
+            'turtle_stop_loss': defaults.turtle_stop_loss,
+            'turtle_take_profit': defaults.turtle_take_profit,
+            'turtle_pyramiding_count': defaults.turtle_pyramiding_count,
+            'turtle_position_size': defaults.turtle_position_size,
+            'turtle_positions': defaults.turtle_positions,
+            'turtle_pyramiding_entries': defaults.turtle_pyramiding_entries,
+            'turtle_use_trailing_stop': defaults.turtle_use_trailing_stop,
+            'turtle_trailing_stop_percent': defaults.turtle_trailing_stop_percent,
+            # 공통 설정
+            'default_entry_trigger': defaults.default_entry_trigger,
+            'default_exit_trigger': defaults.default_exit_trigger,
+            'created_at': defaults.created_at.isoformat(),
+            'updated_at': defaults.updated_at.isoformat(),
+        }
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+
+@mypage_router.post("/trading-defaults", response=ResponseSchema)
+def save_trading_defaults(request, data: TradingDefaultsSchema):
+    """사용자의 자동매매 기본값 설정 저장/업데이트"""
+    try:
+        user = get_authenticated_user(request)
+        if not user:
+            return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
+        
+        # 기본값 설정 가져오기 또는 생성
+        defaults, created = TradingDefaults.objects.get_or_create(user=user)
+        
+        # 데이터 업데이트
+        defaults.trading_mode = data.trading_mode
+        # Manual 모드 설정
+        defaults.manual_max_loss = data.manual_max_loss
+        defaults.manual_stop_loss = data.manual_stop_loss
+        defaults.manual_take_profit = data.manual_take_profit
+        defaults.manual_pyramiding_count = data.manual_pyramiding_count
+        defaults.manual_position_size = data.manual_position_size
+        defaults.manual_positions = data.manual_positions
+        defaults.manual_pyramiding_entries = data.manual_pyramiding_entries
+        defaults.manual_use_trailing_stop = data.manual_use_trailing_stop
+        defaults.manual_trailing_stop_percent = data.manual_trailing_stop_percent
+        # Turtle 모드 설정
+        defaults.turtle_max_loss = data.turtle_max_loss
+        defaults.turtle_stop_loss = data.turtle_stop_loss
+        defaults.turtle_take_profit = data.turtle_take_profit
+        defaults.turtle_pyramiding_count = data.turtle_pyramiding_count
+        defaults.turtle_position_size = data.turtle_position_size
+        defaults.turtle_positions = data.turtle_positions
+        defaults.turtle_pyramiding_entries = data.turtle_pyramiding_entries
+        defaults.turtle_use_trailing_stop = data.turtle_use_trailing_stop
+        defaults.turtle_trailing_stop_percent = data.turtle_trailing_stop_percent
+        # 공통 설정
+        defaults.default_entry_trigger = data.default_entry_trigger
+        defaults.default_exit_trigger = data.default_exit_trigger
+        
+        defaults.save()
+        
+        action = "생성" if created else "업데이트"
+        return {
+            'success': True,
+            'message': f'자동매매 기본값 설정이 {action}되었습니다.'
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+# 기본값 조회 API (프론트엔드에서 새 설정 시 사용)
+@mypage_router.get("/trading-defaults/for-new-config", response=TradingConfigSchema)
+def get_defaults_for_new_config(request):
+    """새로운 자동매매 설정을 위한 기본값 반환 (프론트엔드용)"""
+    try:
+        user = get_authenticated_user(request)
+        if not user:
+            return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
+        
+        try:
+            defaults = TradingDefaults.objects.get(user=user)
+            
+            # 현재 선택된 매매모드에 따라 설정값 결정
+            trading_mode = defaults.trading_mode
+            
+            if trading_mode == 'manual':
+                # Manual 모드 설정값 사용
+                max_loss = defaults.manual_max_loss
+                stop_loss = defaults.manual_stop_loss
+                take_profit = defaults.manual_take_profit
+                pyramiding_count = defaults.manual_pyramiding_count
+                pyramiding_entries = defaults.manual_pyramiding_entries if defaults.manual_pyramiding_entries else [""] * defaults.manual_pyramiding_count
+                positions = defaults.manual_positions if defaults.manual_positions else [100]
+            else:
+                # Turtle 모드 설정값 사용
+                max_loss = defaults.turtle_max_loss
+                stop_loss = defaults.turtle_stop_loss
+                take_profit = defaults.turtle_take_profit
+                pyramiding_count = defaults.turtle_pyramiding_count
+                pyramiding_entries = defaults.turtle_pyramiding_entries if defaults.turtle_pyramiding_entries else [""] * defaults.turtle_pyramiding_count
+                positions = defaults.turtle_positions if defaults.turtle_positions else [25, 25, 25, 25]
+            
+            # 기본값을 TradingConfigSchema 형태로 변환
+            config_template = {
+                'stock_code': '',
+                'stock_name': '',
+                'trading_mode': trading_mode,
+                'strategy_type': 'mtt',  # 기본값
+                'max_loss': max_loss,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'pyramiding_count': pyramiding_count,
+                'entry_point': None,
+                'pyramiding_entries': pyramiding_entries,
+                'positions': positions,
+                'is_active': True
+            }
+            
+            return config_template
+            
+        except TradingDefaults.DoesNotExist:
+            # 기본값이 없으면 기본 템플릿 반환 (시스템 기본값)
+            default_pyramiding_count = 3
+            pyramiding_entries = ["", "", ""]  # 3개의 빈 진입시점
+            positions = [25, 25, 25, 25]  # 4개의 25% 포지션
+            
+            return {
+                'stock_code': '',
+                'stock_name': '',
+                'trading_mode': 'turtle',  # 시스템 기본값
+                'strategy_type': 'mtt',
+                'max_loss': 8.0,
+                'stop_loss': 2.0,
+                'take_profit': None,
+                'pyramiding_count': default_pyramiding_count,
+                'entry_point': None,
+                'pyramiding_entries': pyramiding_entries,
+                'positions': positions,
+                'is_active': True
+            }
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)

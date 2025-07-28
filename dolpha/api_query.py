@@ -71,9 +71,18 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
                     status="error", message="Invalid date format. Use YYYY-MM-DD"
                 )
         else:
-            # If no date is provided, use the latest date from StockAnalysis
-            latest_analysis = StockAnalysis.objects.latest("date")
-            query_date = latest_analysis.date
+            # If no date is provided, find the latest date with rising stocks
+            latest_date_with_data = StockOHLCV.objects.filter(
+                change__gt=0
+            ).order_by("-date").values_list("date", flat=True).first()
+            
+            if not latest_date_with_data:
+                return 404, ErrorResponse(
+                    status="error",
+                    message="No rising stocks data found in database",
+                )
+            
+            query_date = latest_date_with_data
 
         # 해당 날짜의 상승률 TOP 50 종목 조회 (change 필드 기준 내림차순 정렬)
         ohlcv_queryset = StockOHLCV.objects.filter(
@@ -85,7 +94,7 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
         if not ohlcv_queryset.exists():
             return 404, ErrorResponse(
                 status="error",
-                message="No rising stocks found on the specified date",
+                message=f"No rising stocks found on date {query_date}",
             )
 
         # 해당 종목들의 분석 데이터 조회

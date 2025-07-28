@@ -85,6 +85,7 @@ def getAndSave_stock_description(request):
         companies_to_create = []
         companies_to_update = []
         failed_records = []
+        processed_codes = set()  # 처리된 코드를 추적하여 중복 방지
 
         # iterrows() 대신 itertuples() 사용 (더 빠름)
         for row in tqdm(
@@ -102,6 +103,11 @@ def getAndSave_stock_description(request):
                 # KONEX 시장 제외 (선택사항)
                 # if market == 'KONEX':
                 #     continue
+
+                # 이미 처리된 코드인 경우 건너뛰기 (중복 방지)
+                if code in processed_codes:
+                    continue
+                processed_codes.add(code)
 
                 # 생성 또는 업데이트 분류
                 if code not in existing_codes:
@@ -146,17 +152,17 @@ def getAndSave_stock_description(request):
         with transaction.atomic():
             # 벌크 생성
             if companies_to_create:
-                Company.objects.bulk_create(companies_to_create, batch_size=1000)
                 print(f"신규 회사 {len(companies_to_create)}개 생성 완료")
+                Company.objects.bulk_create(companies_to_create, batch_size=1000)
 
             # 벌크 업데이트 - update_or_create 대신 bulk_update 사용
             if companies_to_update:
+                print(f"기존 회사 {len(companies_to_update)}개 업데이트 완료")
                 Company.objects.bulk_update(
                     companies_to_update,
                     ["name", "market", "sector", "industry"],
                     batch_size=1000,
                 )
-                print(f"기존 회사 {len(companies_to_update)}개 업데이트 완료")
 
         # 응답 구성
         response = {
@@ -446,7 +452,36 @@ def getAndSave_index_data(request, code: str = None, limit: int = 1):
                         "change": 0.0,
                     }
                 )
-                for index, row in df.iterrows():
+                
+                # DataFrame을 날짜 기준으로 정렬 (오래된 날짜부터)
+                df_sorted = df.sort_index()
+                
+                for i, (index, row) in enumerate(df_sorted.iterrows()):
+                    # 전일종가 대비 당일 종가 변동률 계산
+                    if i > 0:  # 첫 번째 데이터가 아닌 경우 (DataFrame 내에서 전일 데이터 사용)
+                        prev_close = df_sorted.iloc[i-1]["close"]
+                        current_close = row["close"]
+                        if prev_close > 0:
+                            change_rate = (current_close - prev_close) / prev_close
+                        else:
+                            change_rate = 0.0
+                    else:
+                        # 첫 번째 데이터는 데이터베이스에서 전일 데이터를 찾아서 계산
+                        current_date = index.date()
+                        current_close = row["close"]
+                        
+                        # 현재 날짜보다 이전 날짜의 데이터 중 가장 최근 데이터 찾기
+                        prev_data = IndexOHLCV.objects.filter(
+                            code=stockIndex, 
+                            date__lt=current_date
+                        ).order_by('-date').first()
+                        
+                        if prev_data and prev_data.close > 0:
+                            change_rate = (current_close - prev_data.close) / prev_data.close
+                        else:
+                            # 전일 데이터가 없으면 API에서 제공한 change 값 사용
+                            change_rate = float(row["change"] if "change" in row else 0.0)
+                    
                     index_ohlcv = IndexOHLCV(
                         code=stockIndex,
                         date=index.date(),  # 인덱스(Timestamp)에서 date 추출
@@ -455,17 +490,17 @@ def getAndSave_index_data(request, code: str = None, limit: int = 1):
                         low=float(row["low"]),
                         close=float(row["close"]),
                         volume=int(row["volume"]),
-                        change=float(
-                            row["change"] if "change" in row else 0.0
-                        ),  # 변화율이 없을 경우 기본값 0.0 사용
+                        change=change_rate,  # 전일종가 대비 변동률 사용
                     )
                     index_ohlcv_list.append(index_ohlcv)
 
-                # 벌크 삽입
+                # 기존 데이터 삭제 후 새로 삽입 (change 값 업데이트를 위해)
                 if index_ohlcv_list:
-                    IndexOHLCV.objects.bulk_create(
-                        index_ohlcv_list, ignore_conflicts=True
-                    )
+                    # 해당 날짜들의 기존 데이터 삭제
+                    dates_to_update = [obj.date for obj in index_ohlcv_list]
+                    IndexOHLCV.objects.filter(code=stockIndex, date__in=dates_to_update).delete()
+                    # 새 데이터 삽입
+                    IndexOHLCV.objects.bulk_create(index_ohlcv_list)
         except Exception as e:
             traceback.print_exc()
             # return 500, {"error": f"Failed to save index data: {str(e)}"}
@@ -564,7 +599,36 @@ def getAndSave_stock_data(request, code: str = None, limit: int = 1):
                         "change": 0.0,
                     }
                 )
-                for index, row in df.iterrows():
+                
+                # DataFrame을 날짜 기준으로 정렬 (오래된 날짜부터)
+                df_sorted = df.sort_index()
+                
+                for i, (index, row) in enumerate(df_sorted.iterrows()):
+                    # 전일종가 대비 당일 종가 변동률 계산
+                    if i > 0:  # 첫 번째 데이터가 아닌 경우 (DataFrame 내에서 전일 데이터 사용)
+                        prev_close = df_sorted.iloc[i-1]["close"]
+                        current_close = row["close"]
+                        if prev_close > 0:
+                            change_rate = (current_close - prev_close) / prev_close
+                        else:
+                            change_rate = 0.0
+                    else:
+                        # 첫 번째 데이터는 데이터베이스에서 전일 데이터를 찾아서 계산
+                        current_date = index.date()
+                        current_close = row["close"]
+                        
+                        # 현재 날짜보다 이전 날짜의 데이터 중 가장 최근 데이터 찾기
+                        prev_data = StockOHLCV.objects.filter(
+                            code=company, 
+                            date__lt=current_date
+                        ).order_by('-date').first()
+                        
+                        if prev_data and prev_data.close > 0:
+                            change_rate = (current_close - prev_data.close) / prev_data.close
+                        else:
+                            # 전일 데이터가 없으면 API에서 제공한 change 값 사용
+                            change_rate = float(row["change"] if "change" in row else 0.0)
+                    
                     stock_ohlcv = StockOHLCV(
                         code=company,
                         date=index.date(),  # 인덱스(Timestamp)에서 date 추출
@@ -573,17 +637,17 @@ def getAndSave_stock_data(request, code: str = None, limit: int = 1):
                         low=float(row["low"]),
                         close=float(row["close"]),
                         volume=int(row["volume"]),
-                        change=float(
-                            row["change"] if "change" in row else 0.0
-                        ),  # 변화율이 없을 경우 기본값 0.0 사용
+                        change=change_rate,  # 전일종가 대비 변동률 사용
                     )
                     stock_ohlcv_list.append(stock_ohlcv)
 
-                # 벌크 삽입
+                # 기존 데이터 삭제 후 새로 삽입 (change 값 업데이트를 위해)
                 if stock_ohlcv_list:
-                    StockOHLCV.objects.bulk_create(
-                        stock_ohlcv_list, ignore_conflicts=True
-                    )
+                    # 해당 날짜들의 기존 데이터 삭제
+                    dates_to_update = [obj.date for obj in stock_ohlcv_list]
+                    StockOHLCV.objects.filter(code=company, date__in=dates_to_update).delete()
+                    # 새 데이터 삽입
+                    StockOHLCV.objects.bulk_create(stock_ohlcv_list)
         except Exception as e:
             traceback.print_exc()
             # return 500, {"error": f"Failed to save stock data: {str(e)}"}
@@ -951,7 +1015,7 @@ def calculate_stock_analysis(request, offset: int = 0, limit: int = 0):
 
             # 52주 신고가/신저가 및 날짜 계산
             high_low = calculate_52w_high_low(ohlcv_data, target_date)
-            
+
             # 50일 신고가/신저가 및 날짜 계산
             high_low_50d = calculate_50d_high_low(ohlcv_data, target_date)
 
