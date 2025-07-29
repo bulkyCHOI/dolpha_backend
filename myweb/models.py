@@ -2,6 +2,17 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 
 
+# Default functions for JSONField
+def default_manual_positions():
+    return [100]
+
+def default_turtle_positions():
+    return [25, 25, 25, 25]
+
+def default_turtle_pyramiding_entries():
+    return ["", "", ""]
+
+
 # Create your models here.
 class StockIndex(models.Model):
     code = models.CharField(max_length=10, primary_key=True)  # 지수 코드
@@ -295,7 +306,7 @@ class TradingDefaults(models.Model):
     manual_take_profit = models.FloatField(null=True, blank=True)  # Manual 익절가(%)
     manual_pyramiding_count = models.IntegerField(default=0)  # Manual 피라미딩 횟수
     manual_position_size = models.FloatField(default=100.0)  # Manual 포지션 크기(%)
-    manual_positions = models.JSONField(default=lambda: [100], blank=True)  # Manual 포지션 비율 배열
+    manual_positions = models.JSONField(default=default_manual_positions, blank=True)  # Manual 포지션 비율 배열
     manual_pyramiding_entries = models.JSONField(default=list, blank=True)  # Manual 진입시점 배열
     manual_use_trailing_stop = models.BooleanField(default=True)  # Manual 트레일링 스탑 사용
     manual_trailing_stop_percent = models.FloatField(default=8.0)  # Manual 트레일링 스탑 비율(%)
@@ -306,8 +317,8 @@ class TradingDefaults(models.Model):
     turtle_take_profit = models.FloatField(null=True, blank=True)  # Turtle 익절가(ATR)
     turtle_pyramiding_count = models.IntegerField(default=3)  # Turtle 피라미딩 횟수
     turtle_position_size = models.FloatField(default=25.0)  # Turtle 포지션 크기(%)
-    turtle_positions = models.JSONField(default=lambda: [25, 25, 25, 25], blank=True)  # Turtle 포지션 비율 배열
-    turtle_pyramiding_entries = models.JSONField(default=lambda: ["", "", ""], blank=True)  # Turtle 진입시점 배열
+    turtle_positions = models.JSONField(default=default_turtle_positions, blank=True)  # Turtle 포지션 비율 배열
+    turtle_pyramiding_entries = models.JSONField(default=default_turtle_pyramiding_entries, blank=True)  # Turtle 진입시점 배열
     turtle_use_trailing_stop = models.BooleanField(default=True)  # Turtle 트레일링 스탑 사용
     turtle_trailing_stop_percent = models.FloatField(default=3.0)  # Turtle 트레일링 스탑 비율(ATR)
     
