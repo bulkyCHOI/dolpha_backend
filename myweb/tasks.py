@@ -119,6 +119,14 @@ def start():
         (my_cron_task_getAndSave_stock_data, 17, 20, "my_cron_task_getAndSave_stock_data", "주식 OHLCV 데이터 수집 (약 20분)"),
         (my_cron_task_calculate_stock_analysis, 17, 50, "my_cron_task_calculate_stock_analysis", "주식 기술적 분석 계산 (약 2분)"),
         (my_cron_task_getAndSave_stock_dartData, 18, 00, "my_cron_task_getAndSave_stock_dartData", "DART 데이터 수집 (약 1시간)"),
+        # NXT마켓 때문에 한번 더 수행
+        (my_cron_task_getAndSave_index_list, 20, 5, "my_cron_task_getAndSave_index_list", "인덱스 리스트 수집 (약 1분)"),
+        (my_cron_task_getAndSave_stock_description, 20, 10, "my_cron_task_getAndSave_stock_description", "주식 설명 수집 (약 5초)"),
+        (my_cron_task_getAndSave_index_data, 20, 15, "my_cron_task_getAndSave_index_data", "인덱스 데이터 수집 (약 1분)"),
+        (my_cron_task_getAndSave_stock_data, 20, 20, "my_cron_task_getAndSave_stock_data", "주식 OHLCV 데이터 수집 (약 20분)"),
+        (my_cron_task_calculate_stock_analysis, 20, 50, "my_cron_task_calculate_stock_analysis", "주식 기술적 분석 계산 (약 2분)"),
+        (my_cron_task_getAndSave_stock_dartData, 21, 00, "my_cron_task_getAndSave_stock_dartData", "DART 데이터 수집 (약 1시간)"),
+        
     ]
 
     # 모든 작업을 스케줄에 추가
