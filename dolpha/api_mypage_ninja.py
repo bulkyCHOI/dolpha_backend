@@ -812,20 +812,28 @@ def save_trading_defaults(request, data: TradingDefaultsSchema):
         }
 
 
-# 기본값 조회 API (프론트엔드에서 새 설정 시 사용)
+# 매매 방식별 기본값 조회 API
 @mypage_router.get("/trading-defaults/for-new-config", response=TradingConfigSchema)
 def get_defaults_for_new_config(request):
-    """새로운 자동매매 설정을 위한 기본값 반환 (프론트엔드용)"""
+    """
+    매매 방식(manual/turtle) 변경시 사용할 기본값을 반환하는 API
+    - 쿼리 파라미터 'mode'로 특정 매매방식의 기본값 요청 가능
+    - 사용자가 MyPage에서 저장한 기본값이 있으면 해당 값 반환
+    - 기본값이 없으면 모든 필드를 공란(null)으로 반환
+    """
     try:
         user = get_authenticated_user(request)
         if not user:
             return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
         
+        # 쿼리 파라미터에서 요청된 모드 확인 (기본값: 사용자 설정)
+        requested_mode = request.GET.get('mode', None)
+        
         try:
             defaults = TradingDefaults.objects.get(user=user)
             
-            # 현재 선택된 매매모드에 따라 설정값 결정
-            trading_mode = defaults.trading_mode
+            # 요청된 모드가 있으면 그 모드 사용, 없으면 사용자 기본 모드 사용
+            trading_mode = requested_mode if requested_mode in ['manual', 'turtle'] else defaults.trading_mode
             
             if trading_mode == 'manual':
                 # Manual 모드 설정값 사용
@@ -844,12 +852,12 @@ def get_defaults_for_new_config(request):
                 pyramiding_entries = defaults.turtle_pyramiding_entries if defaults.turtle_pyramiding_entries else [""] * defaults.turtle_pyramiding_count
                 positions = defaults.turtle_positions if defaults.turtle_positions else [25, 25, 25, 25]
             
-            # 기본값을 TradingConfigSchema 형태로 변환
-            config_template = {
+            # 기본값을 TradingConfigSchema 형태로 변환하여 반환
+            return {
                 'stock_code': '',
                 'stock_name': '',
                 'trading_mode': trading_mode,
-                'strategy_type': 'mtt',  # 기본값
+                'strategy_type': 'mtt',
                 'max_loss': max_loss,
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
@@ -860,26 +868,22 @@ def get_defaults_for_new_config(request):
                 'is_active': True
             }
             
-            return config_template
-            
         except TradingDefaults.DoesNotExist:
-            # 기본값이 없으면 기본 템플릿 반환 (시스템 기본값)
-            default_pyramiding_count = 3
-            pyramiding_entries = ["", "", ""]  # 3개의 빈 진입시점
-            positions = [25, 25, 25, 25]  # 4개의 25% 포지션
+            # 사용자가 기본값을 설정하지 않은 경우 모든 필드를 공란으로 반환
+            trading_mode = requested_mode if requested_mode in ['manual', 'turtle'] else 'turtle'
             
             return {
                 'stock_code': '',
                 'stock_name': '',
-                'trading_mode': 'turtle',  # 시스템 기본값
+                'trading_mode': trading_mode,
                 'strategy_type': 'mtt',
-                'max_loss': 8.0,
-                'stop_loss': 2.0,
+                'max_loss': None,
+                'stop_loss': None,
                 'take_profit': None,
-                'pyramiding_count': default_pyramiding_count,
+                'pyramiding_count': 0,
                 'entry_point': None,
-                'pyramiding_entries': pyramiding_entries,
-                'positions': positions,
+                'pyramiding_entries': [],
+                'positions': [],
                 'is_active': True
             }
         
