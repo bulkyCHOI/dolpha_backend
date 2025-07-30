@@ -31,50 +31,87 @@ data_router = Router()
     "/getAndSave_stock_description",
     response={200: StockDescriptionResponse, 400: ErrorResponse, 500: ErrorResponse},
 )
-def getAndSave_stock_description(request):
+def getAndSave_stock_description(request, stock: str = "KRX-DESC"):
     """
     모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
-
+    Args:
+        stock (str): 조회할 주식의 종류 (기본값: "KRX-DESC")
+                    S&P500, NASDAQ, NYSE 등 다양한 주식 시장 코드 지원
     Returns:
         StockDescriptionResponse: 처리 결과, 저장된 레코드 수, 실패한 레코드 수 및 오류 메시지
     """
     try:
         # 종목정보 조회
-        df_krx_desc = Common.GetStockList("KRX-DESC")
-        print(f"조회된 KRX 주식 설명 데이터: {len(df_krx_desc)}개")
+        df_stocks = Common.GetStockList(stock)
+        print(f"조회된 {stock} 주식 설명 데이터: {len(df_stocks)}개")
 
         # 컬럼명 매핑
-        column_mapping = {
-            "Code": "code",
-            "Name": "name",
-            "Market": "market",
-            "Sector": "sector",
-            "Industry": "industry",
-            # 'ListingDate': 'listing_date',
-            # 'SettleMonth': 'settle_month',
-            # 'Representative': 'representative',
-            # 'HomePage': 'homepage',
-            # 'Region': 'region'
-        }
-        df_krx_desc = df_krx_desc.rename(columns=column_mapping)
+        if stock == "KRX-DESC":
+            column_mapping = {
+                "Code": "code",
+                "Name": "name",
+                "Market": "market",
+                "Sector": "sector",
+                "Industry": "industry",
+                # 'ListingDate': 'listing_date',
+                # 'SettleMonth': 'settle_month',
+                # 'Representative': 'representative',
+                # 'HomePage': 'homepage',
+                # 'Region': 'region'
+            }
+        # 미장 컬럼
+        elif stock == "S&P500":
+            column_mapping = {
+                "Symbol": "code",
+                "Name": "name",
+                "Sector": "sector",
+                "Industry": "industry",
+            }
+        elif stock in ["NASDAQ", "NYSE"]:
+            column_mapping = {
+                "Symbol": "code",
+                "Name": "name",
+                "IndustryCode": "industrycode",
+                "Industry": "industry",
+            }
+        elif stock == "KOSDAQ":
+            column_mapping = {
+                "Symbol": "code",
+                "Name": "name",
+                "Sector": "sector",
+                "Industry": "industry",
+            }
+        else:
+            return 400, {
+                "status": "ERROR",
+                "message": f"Unsupported stock type: {stock}",
+            }
+
+        df_stocks = df_stocks.rename(columns=column_mapping)
+        print(df_stocks.head())
 
         # 예상 컬럼 확인
         expected_columns = list(column_mapping.values())
-        if not all(col in df_krx_desc.columns for col in expected_columns):
+        if not all(col in df_stocks.columns for col in expected_columns):
             return 400, {
                 "status": "ERROR",
-                "message": "Required columns are missing in the KRX-DESC data",
+                "message": f"Required columns are missing in the {stock} data",
             }
 
         # 데이터 전처리
-        df_krx_desc["code"] = df_krx_desc["code"].astype(str)  # 코드 문자열로 변환
+        df_stocks["code"] = df_stocks["code"].astype(str)  # 코드 문자열로 변환
+
+        if "sector" not in df_stocks.columns:
+            df_stocks["sector"] = None
+        if "market" not in df_stocks.columns:
+            df_stocks["market"] = stock
 
         # NaN 값을 None으로 변환 (중요: "기타"로 변환하지 않음)
-        df_krx_desc["sector"] = df_krx_desc["sector"].where(
-            pd.notna(df_krx_desc["sector"]), None
+        df_stocks["sector"] = df_stocks["sector"].where(
+            pd.notna(df_stocks["sector"]), None
         )
-        df_krx_desc["industry"] = df_krx_desc["industry"].where(
-            pd.notna(df_krx_desc["industry"]), None
+        df_stocks["industry"] = df_stocks["industry"].where(
+            pd.notna(df_stocks["industry"]), None
         )
 
         # 기존 데이터를 한 번만 조회하여 메모리에 캐싱
@@ -89,8 +126,8 @@ def getAndSave_stock_description(request):
 
         # iterrows() 대신 itertuples() 사용 (더 빠름)
         for row in tqdm(
-            df_krx_desc.itertuples(index=False),
-            total=len(df_krx_desc),
+            df_stocks.itertuples(index=False),
+            total=len(df_stocks),
             desc="데이터 처리 중",
         ):
             try:
@@ -167,7 +204,7 @@ def getAndSave_stock_description(request):
         # 응답 구성
         response = {
             "status": "OK",
-            "count_total": len(df_krx_desc),
+            "count_total": len(df_stocks),
             "count_created": len(companies_to_create),
             "count_updated": len(companies_to_update),
             "count_failed": len(failed_records),
@@ -452,14 +489,16 @@ def getAndSave_index_data(request, code: str = None, limit: int = 1):
                         "change": 0.0,
                     }
                 )
-                
+
                 # DataFrame을 날짜 기준으로 정렬 (오래된 날짜부터)
                 df_sorted = df.sort_index()
-                
+
                 for i, (index, row) in enumerate(df_sorted.iterrows()):
                     # 전일종가 대비 당일 종가 변동률 계산
-                    if i > 0:  # 첫 번째 데이터가 아닌 경우 (DataFrame 내에서 전일 데이터 사용)
-                        prev_close = df_sorted.iloc[i-1]["close"]
+                    if (
+                        i > 0
+                    ):  # 첫 번째 데이터가 아닌 경우 (DataFrame 내에서 전일 데이터 사용)
+                        prev_close = df_sorted.iloc[i - 1]["close"]
                         current_close = row["close"]
                         if prev_close > 0:
                             change_rate = (current_close - prev_close) / prev_close
@@ -469,19 +508,26 @@ def getAndSave_index_data(request, code: str = None, limit: int = 1):
                         # 첫 번째 데이터는 데이터베이스에서 전일 데이터를 찾아서 계산
                         current_date = index.date()
                         current_close = row["close"]
-                        
+
                         # 현재 날짜보다 이전 날짜의 데이터 중 가장 최근 데이터 찾기
-                        prev_data = IndexOHLCV.objects.filter(
-                            code=stockIndex, 
-                            date__lt=current_date
-                        ).order_by('-date').first()
-                        
+                        prev_data = (
+                            IndexOHLCV.objects.filter(
+                                code=stockIndex, date__lt=current_date
+                            )
+                            .order_by("-date")
+                            .first()
+                        )
+
                         if prev_data and prev_data.close > 0:
-                            change_rate = (current_close - prev_data.close) / prev_data.close
+                            change_rate = (
+                                current_close - prev_data.close
+                            ) / prev_data.close
                         else:
                             # 전일 데이터가 없으면 API에서 제공한 change 값 사용
-                            change_rate = float(row["change"] if "change" in row else 0.0)
-                    
+                            change_rate = float(
+                                row["change"] if "change" in row else 0.0
+                            )
+
                     index_ohlcv = IndexOHLCV(
                         code=stockIndex,
                         date=index.date(),  # 인덱스(Timestamp)에서 date 추출
@@ -498,7 +544,9 @@ def getAndSave_index_data(request, code: str = None, limit: int = 1):
                 if index_ohlcv_list:
                     # 해당 날짜들의 기존 데이터 삭제
                     dates_to_update = [obj.date for obj in index_ohlcv_list]
-                    IndexOHLCV.objects.filter(code=stockIndex, date__in=dates_to_update).delete()
+                    IndexOHLCV.objects.filter(
+                        code=stockIndex, date__in=dates_to_update
+                    ).delete()
                     # 새 데이터 삽입
                     IndexOHLCV.objects.bulk_create(index_ohlcv_list)
         except Exception as e:
@@ -523,13 +571,14 @@ def getAndSave_index_data(request, code: str = None, limit: int = 1):
         500: ErrorResponse,
     },
 )
-def getAndSave_stock_data(request, code: str = None, limit: int = 1):
+def getAndSave_stock_data(request, code: str = None, area: str = "KR", limit: int = 1):
     """
     주식 코드에 해당하는 OHLCV 데이터를 데이터베이스에 저장합니다.
     코드를 입력하지 않으면, 모든 회사의 OHLCV 데이터를 가져옵니다.
 
     Args:
         code (str): 주식 코드
+        area (str): 주식 시장 지역 (기본값: "KR" - 한국, "US" - 미국)
         limit (int): 가져올 데이터의 개수 (기본값: 1)
 
     Returns:
@@ -541,13 +590,23 @@ def getAndSave_stock_data(request, code: str = None, limit: int = 1):
     if code is not None:
         # code에 맞는 회사의 OHLCV 데이터를 가져옴
         try:
-            company = Company.objects.get(code=code)
+            if area == "KR":
+                company = Company.objects.get(
+                    code=code, market__in=["KOSDAQ", "KONEX", "KOSPI"]
+                )
+            elif area == "US":
+                company = Company.objects.get(
+                    code=code, market__in=["NASDAQ", "NYSE", "S&P500"]
+                )
             companies = [company]  # 단일 회사 객체를 리스트로 감싸서 처리
         except Company.DoesNotExist:
             return 404, {"error": f"No company found with code: {code}"}
     else:
         # code가 주어지지 않은 경우 모든 회사의 OHLCV 데이터를 가져옴
-        companies = Company.objects.all()
+        if area == "KR":
+            companies = Company.objects.filter(market__in=["KOSDAQ", "KONEX", "KOSPI"])
+        elif area == "US":
+            companies = Company.objects.filter(market__in=["NASDAQ", "NYSE", "S&P500"])
 
     print(f"Total companies: {len(companies)}")
 
@@ -557,7 +616,13 @@ def getAndSave_stock_data(request, code: str = None, limit: int = 1):
     for company in tqdm(companies, desc="Processing companies..."):
         # print(company.code, company.name)
 
-        df = Common.GetOhlcv("KR", company.code, limit=limit, adj_ok="1")
+        if company.market in ["KOSDAQ", "KONEX", "KOSPI"]:
+            df = Common.GetOhlcv("KR", company.code, limit=limit, adj_ok="1")
+        elif company.market in ["NASDAQ", "NYSE", "S&P500"]:
+            df = Common.GetOhlcv("US", company.code, limit=limit, adj_ok="1")
+        else:
+            return 400, {"error": f"Unsupported market type: {company.market}"}
+            continue
         # print(df.head())
 
         if df is None or len(df) == 0:
@@ -599,14 +664,16 @@ def getAndSave_stock_data(request, code: str = None, limit: int = 1):
                         "change": 0.0,
                     }
                 )
-                
+
                 # DataFrame을 날짜 기준으로 정렬 (오래된 날짜부터)
                 df_sorted = df.sort_index()
-                
+
                 for i, (index, row) in enumerate(df_sorted.iterrows()):
                     # 전일종가 대비 당일 종가 변동률 계산
-                    if i > 0:  # 첫 번째 데이터가 아닌 경우 (DataFrame 내에서 전일 데이터 사용)
-                        prev_close = df_sorted.iloc[i-1]["close"]
+                    if (
+                        i > 0
+                    ):  # 첫 번째 데이터가 아닌 경우 (DataFrame 내에서 전일 데이터 사용)
+                        prev_close = df_sorted.iloc[i - 1]["close"]
                         current_close = row["close"]
                         if prev_close > 0:
                             change_rate = (current_close - prev_close) / prev_close
@@ -616,19 +683,26 @@ def getAndSave_stock_data(request, code: str = None, limit: int = 1):
                         # 첫 번째 데이터는 데이터베이스에서 전일 데이터를 찾아서 계산
                         current_date = index.date()
                         current_close = row["close"]
-                        
+
                         # 현재 날짜보다 이전 날짜의 데이터 중 가장 최근 데이터 찾기
-                        prev_data = StockOHLCV.objects.filter(
-                            code=company, 
-                            date__lt=current_date
-                        ).order_by('-date').first()
-                        
+                        prev_data = (
+                            StockOHLCV.objects.filter(
+                                code=company, date__lt=current_date
+                            )
+                            .order_by("-date")
+                            .first()
+                        )
+
                         if prev_data and prev_data.close > 0:
-                            change_rate = (current_close - prev_data.close) / prev_data.close
+                            change_rate = (
+                                current_close - prev_data.close
+                            ) / prev_data.close
                         else:
                             # 전일 데이터가 없으면 API에서 제공한 change 값 사용
-                            change_rate = float(row["change"] if "change" in row else 0.0)
-                    
+                            change_rate = float(
+                                row["change"] if "change" in row else 0.0
+                            )
+
                     stock_ohlcv = StockOHLCV(
                         code=company,
                         date=index.date(),  # 인덱스(Timestamp)에서 date 추출
@@ -645,7 +719,9 @@ def getAndSave_stock_data(request, code: str = None, limit: int = 1):
                 if stock_ohlcv_list:
                     # 해당 날짜들의 기존 데이터 삭제
                     dates_to_update = [obj.date for obj in stock_ohlcv_list]
-                    StockOHLCV.objects.filter(code=company, date__in=dates_to_update).delete()
+                    StockOHLCV.objects.filter(
+                        code=company, date__in=dates_to_update
+                    ).delete()
                     # 새 데이터 삽입
                     StockOHLCV.objects.bulk_create(stock_ohlcv_list)
         except Exception as e:
@@ -930,7 +1006,9 @@ def calculate_atr(data, target_date, period=20):
         500: ErrorResponse,
     },
 )
-def calculate_stock_analysis(request, offset: int = 0, limit: int = 0):
+def calculate_stock_analysis(
+    request, area: str = "KR", offset: int = 0, limit: int = 0
+):
     """
     주식 분석 데이터를 계산하여 StockAnalysis 테이블에 저장합니다.
     최근 거래일부터 지정된 `limit`만큼의 거래일에 대해 모든 회사의 이동평균, 52주 신고가/신저가, RS 점수,
@@ -938,6 +1016,7 @@ def calculate_stock_analysis(request, offset: int = 0, limit: int = 0):
 
     Args:
         request: Ninja API 요청 객체.
+        area (str): 주식 시장 지역 ("KR" - 한국, "US" - 미국). 기본값: "KR".
         offset (int, optional): 처리할 데이터의 시작 위치. 기본값: 0.
         limit (int, optional): 처리할 거래일 수. 0이면 offset 거래일만 처리. 기본값: 0.
         즉 offset ~ limit 범위의 거래일을 처리합니다.\n
@@ -958,7 +1037,12 @@ def calculate_stock_analysis(request, offset: int = 0, limit: int = 0):
     """
 
     # 모든 회사의 데이터를 가져옴
-    companies = Company.objects.all()
+    if area == "KR":
+        companies = Company.objects.filter(market__in=["KOSDAQ", "KONEX", "KOSPI"])
+    elif area == "US":
+        companies = Company.objects.filter(market__in=["NASDAQ", "NYSE", "S&P500"])
+    else:
+        return 400, {"error": f"Unsupported area: {area}"}
 
     print(f"Total companies: {len(companies)}")
 
@@ -1368,3 +1452,49 @@ def growth_rate(current, previous):
     if abs(previous) == 0:
         return 0.0
     return ((current - previous) / abs(previous)) * 100
+
+
+@data_router.post(
+    "/getAndSave_stock_description_US",
+    response={200: StockDescriptionResponse, 400: ErrorResponse, 500: ErrorResponse},
+)
+def getAndSave_stock_description_US(request):
+    try:
+        # 종목정보 조회
+        df_sp500 = Common.GetStockList("S&P500")
+        print(f"조회된 S&P500 주식 설명 데이터: {len(df_sp500)}개")
+        if df_sp500.empty:
+            return 404, ErrorResponse(
+                status="error", message="S&P500 주식 설명 데이터가 없습니다."
+            )
+        stock_description_list = []
+        for index, row in df_sp500.iterrows():
+            company = row["symbol"]
+            if not company:
+                continue
+
+            # 종목 코드가 없는 경우는 건너뜀
+            if pd.isna(company):
+                continue
+
+            # 종목 설명 데이터 생성
+            stock_description = StockDescription(
+                code=company,
+                name=row["name"],
+                sector=row["sector"],
+                industry=row["industry"],
+                market_cap=float(row["marketCap"]) if "marketCap" in row else 0.0,
+                pe_ratio=float(row["peRatio"]) if "peRatio" in row else 0.0,
+                dividend_yield=(
+                    float(row["dividendYield"]) if "dividendYield" in row else 0.0
+                ),
+                description=row.get("description", ""),
+                website=row.get("website", ""),
+            )
+
+            stock_description_list.append(stock_description)
+    except Exception as e:
+        traceback.print_exc()
+        return 500, ErrorResponse(
+            status="error", message=f"S&P500 주식 설명 데이터 조회 실패: {str(e)}"
+        )
