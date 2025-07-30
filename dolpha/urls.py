@@ -23,4 +23,5 @@ from myweb import views
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', api.urls),  # API 엔드포인트 추가
+    path('api/market-indices/', views.market_indices, name='market_indices'),  # 새로운 지수 API
 ]
