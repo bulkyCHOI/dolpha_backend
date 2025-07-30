@@ -33,12 +33,12 @@ data_router = Router()
 )
 def getAndSave_stock_description(request, stock: str = "KRX-DESC"):
     """
-    모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
-    Args:
-        stock (str): 조회할 주식의 종류 (기본값: "KRX-DESC")
-                    S&P500, NASDAQ, NYSE 등 다양한 주식 시장 코드 지원
-    Returns:
-        StockDescriptionResponse: 처리 결과, 저장된 레코드 수, 실패한 레코드 수 및 오류 메시지
+    모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.\n
+        Args:\n
+            stock (str): 조회할 주식의 종류 (기본값: "KRX-DESC")\n
+                        NASDAQ, NYSE 등 다양한 주식 시장 코드 지원\n
+        Returns:\n
+            StockDescriptionResponse: 처리 결과, 저장된 레코드 수, 실패한 레코드 수 및 오류 메시지\n
     """
     try:
         # 종목정보 조회
