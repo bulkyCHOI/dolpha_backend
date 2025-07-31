@@ -60,25 +60,11 @@ def getAndSave_stock_description(request, stock: str = "KRX-DESC"):
                 # 'Region': 'region'
             }
         # 미장 컬럼
-        elif stock == "S&P500":
-            column_mapping = {
-                "Symbol": "code",
-                "Name": "name",
-                "Sector": "sector",
-                "Industry": "industry",
-            }
         elif stock in ["NASDAQ", "NYSE"]:
             column_mapping = {
                 "Symbol": "code",
                 "Name": "name",
                 "IndustryCode": "industrycode",
-                "Industry": "industry",
-            }
-        elif stock == "KOSDAQ":
-            column_mapping = {
-                "Symbol": "code",
-                "Name": "name",
-                "Sector": "sector",
                 "Industry": "industry",
             }
         else:
