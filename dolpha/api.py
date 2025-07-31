@@ -132,7 +132,7 @@ def get_stock_price(request, stock_code: str):
         return None
     
     def try_naver_finance(stock_code):
-        """네이버 금융 크롤링 시도"""
+        """네이버 금융 크롤링 시도 (개선된 패턴 매칭)"""
         try:
             url = f"https://finance.naver.com/item/main.nhn?code={stock_code}"
             headers = {
@@ -144,26 +144,49 @@ def get_stock_price(request, stock_code: str):
             response = requests.get(url, headers=headers, timeout=8)
             
             if response.status_code == 200:
-                # 간단한 정규식으로 현재가 추출
                 import re
                 content = response.text
                 
-                # 현재가 패턴 찾기
-                price_pattern = r'<span class="blind">현재가</span>\s*([0-9,]+)'
-                price_match = re.search(price_pattern, content)
+                # 다양한 현재가 패턴 시도 (우선순위 순)
+                price_patterns = [
+                    r'<span class="blind">현재가</span>\s*([0-9,]+)',  # 기존 패턴
+                    r'<strong id="_nowVal"[^>]*>([0-9,]+)</strong>',   # nowVal ID
+                    r'class="no_today">([0-9,]+)</span>',             # no_today 클래스
+                    r'<em class="blind">현재가</em>[^>]*>([0-9,]+)',   # em 태그
+                    r'현재가.*?([0-9,]+)',                            # 일반적인 패턴
+                    r'<dd[^>]*>([0-9,]+)</dd>',                       # dd 태그
+                    r'price_now">([0-9,]+)</span>',                   # price_now 클래스
+                ]
                 
-                if price_match:
-                    price_str = price_match.group(1).replace(',', '')
-                    current_price = float(price_str)
-                    
+                current_price = None
+                for pattern in price_patterns:
+                    price_match = re.search(pattern, content)
+                    if price_match:
+                        price_str = price_match.group(1).replace(',', '')
+                        try:
+                            current_price = float(price_str)
+                            break
+                        except ValueError:
+                            continue
+                
+                if current_price:
                     # 전일대비 패턴 찾기
-                    change_pattern = r'<span class="blind">전일대비</span>.*?([+-]?[0-9,]+)'
-                    change_match = re.search(change_pattern, content)
-                    change = 0
+                    change_patterns = [
+                        r'<span class="blind">전일대비</span>.*?([+-]?[0-9,]+)',
+                        r'전일대비.*?([+-]?[0-9,]+)',
+                        r'change_rate[^>]*>([+-]?[0-9,]+)',
+                    ]
                     
-                    if change_match:
-                        change_str = change_match.group(1).replace(',', '')
-                        change = float(change_str)
+                    change = 0
+                    for pattern in change_patterns:
+                        change_match = re.search(pattern, content)
+                        if change_match:
+                            try:
+                                change_str = change_match.group(1).replace(',', '')
+                                change = float(change_str)
+                                break
+                            except ValueError:
+                                continue
                     
                     return {
                         'price': current_price,
