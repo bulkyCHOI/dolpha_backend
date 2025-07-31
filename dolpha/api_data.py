@@ -1026,7 +1026,7 @@ def calculate_stock_analysis(
     if area == "KR":
         companies = Company.objects.filter(market__in=["KOSDAQ", "KONEX", "KOSPI"])
     elif area == "US":
-        companies = Company.objects.filter(market__in=["NASDAQ", "NYSE", "S&P500"])
+        companies = Company.objects.filter(market__in=["NASDAQ", "NYSE"])
     else:
         return 400, {"error": f"Unsupported area: {area}"}
 
@@ -1259,7 +1259,9 @@ def getAndSave_stock_dartData(request, code: str = None):
         if code is not None:
             # code에 맞는 회사의 OHLCV 데이터를 가져옴
             try:
-                company = Company.objects.get(code=code)
+                company = Company.objects.get(
+                    code=code, market__in=["KOSDAQ", "KONEX", "KOSPI"]
+                )
                 companies = [company]  # 단일 회사 객체를 리스트로 감싸서 처리
             except Company.DoesNotExist:
                 return 404, {"error": f"No company found with code: {code}"}
