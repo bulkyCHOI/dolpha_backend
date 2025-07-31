@@ -601,15 +601,30 @@ def delete_trading_config_by_stock_code(request, stock_code: str, strategy_type:
             user=user
         )
         
-        # autobot 서버에서도 삭제
-        autobot_result = delete_from_autobot_server(user, config.stock_code, config.strategy_type)
+        # autobot 서버에서 먼저 삭제 시도
+        autobot_success, autobot_error = delete_from_autobot_server(user, config.stock_code, config.strategy_type)
+        
+        if not autobot_success:
+            # autobot 서버 삭제 실패시 경고 메시지와 함께 진행
+            print(f"⚠️ Autobot 서버 삭제 실패: {autobot_error}")
+            
+            # 심각한 오류(서버 설정 없음, 네트워크 오류 등)인 경우 Django 삭제도 중단
+            if "SERVER_NOT_CONFIGURED" in str(autobot_error):
+                return {
+                    'success': False,
+                    'error': f'Autobot 서버 설정이 필요합니다. 마이페이지에서 서버 설정을 확인해주세요. ({autobot_error})'
+                }
         
         # Django DB에서 삭제
         config.delete()
         
+        success_message = '설정이 삭제되었습니다.'
+        if not autobot_success:
+            success_message += f' (주의: Autobot 서버 동기화 실패 - {autobot_error})'
+        
         return {
             'success': True,
-            'message': '설정이 삭제되었습니다.'
+            'message': success_message
         }
     except TradingConfig.DoesNotExist:
         return {
@@ -624,14 +639,21 @@ def delete_trading_config_by_stock_code(request, stock_code: str, strategy_type:
 
 
 def delete_from_autobot_server(user, stock_code, strategy_type='mtt'):
-    """autobot 서버에서 자동매매 설정 삭제"""
+    """
+    autobot 서버에서 자동매매 설정 삭제
+    Returns: (success: bool, error_message: str)
+    """
     try:
         # 사용자의 프로필에서 autobot 서버 정보 가져오기
-        profile = UserProfile.objects.get(user=user)
+        try:
+            profile = UserProfile.objects.get(user=user)
+        except UserProfile.DoesNotExist:
+            # 프로필이 없으면 서버 설정이 없다는 의미
+            return False, "SERVER_NOT_CONFIGURED: 사용자 프로필이 없습니다"
         
         if not profile.autobot_server_ip:
-            # 서버 설정이 없으면 삭제할 필요 없음
-            return True
+            # 서버 설정이 없으면 설정 필요
+            return False, "SERVER_NOT_CONFIGURED: Autobot 서버 IP가 설정되지 않았습니다"
         
         server_ip = profile.autobot_server_ip
         server_port = profile.autobot_server_port
@@ -640,22 +662,48 @@ def delete_from_autobot_server(user, stock_code, strategy_type='mtt'):
         user_id = user.google_id or f"user_{user.id}"
         delete_url = f'http://{server_ip}:{server_port}/trading-configs/user/{user_id}/stock/{stock_code}?strategy_type={strategy_type}'
         
-        response = requests.delete(delete_url, timeout=10)
+        print(f"🔄 Autobot 서버 삭제 요청: {delete_url}")
         
-        if response.status_code == 200:
-            return True
-        else:
-            # 삭제 실패해도 Django DB는 삭제하도록 함
-            return False
+        try:
+            response = requests.delete(delete_url, timeout=10)
             
-    except UserProfile.DoesNotExist:
-        # 프로필이 없으면 삭제할 필요 없음
-        return True
-    except requests.exceptions.RequestException as e:
-        # 네트워크 오류가 있어도 Django DB는 삭제하도록 함
-        return False
+            if response.status_code == 200:
+                result = response.json()
+                print(f"✅ Autobot 서버 삭제 성공: {result.get('message', 'OK')}")
+                return True, "성공"
+            elif response.status_code == 404:
+                # 서버에 해당 설정이 없음 (이미 삭제되었거나 존재하지 않음)
+                print(f"⚠️ Autobot 서버에 설정 없음 (404): {stock_code}")
+                return True, "서버에 설정이 없음 (정상)"
+            else:
+                error_msg = f"서버 응답 오류 {response.status_code}"
+                try:
+                    error_detail = response.json().get('detail', 'Unknown error')
+                    error_msg += f": {error_detail}"
+                except:
+                    pass
+                print(f"❌ Autobot 서버 삭제 실패: {error_msg}")
+                return False, error_msg
+                
+        except requests.exceptions.Timeout:
+            error_msg = "서버 응답 시간 초과 (10초)"
+            print(f"⏰ Autobot 서버 삭제 타임아웃: {error_msg}")
+            return False, error_msg
+            
+        except requests.exceptions.ConnectionError:
+            error_msg = f"서버 연결 실패 ({server_ip}:{server_port})"
+            print(f"🔌 Autobot 서버 연결 실패: {error_msg}")
+            return False, error_msg
+            
+        except requests.exceptions.RequestException as e:
+            error_msg = f"네트워크 오류: {str(e)}"
+            print(f"🌐 Autobot 서버 네트워크 오류: {error_msg}")
+            return False, error_msg
+            
     except Exception as e:
-        return False
+        error_msg = f"예상치 못한 오류: {str(e)}"
+        print(f"💥 Autobot 서버 삭제 중 예외: {error_msg}")
+        return False, error_msg
 
 
 
