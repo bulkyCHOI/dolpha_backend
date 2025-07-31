@@ -431,6 +431,22 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
             )
 
+            # Calculate MTT duration days
+            mtt_duration_days = 0
+            # Get historical analysis data for this stock in descending date order
+            historical_analysis = StockAnalysis.objects.filter(
+                code=analysis.code,
+                date__lte=analysis.date
+            ).order_by("-date").values("date", "is_minervini_trend")
+            
+            # Count consecutive days with is_minervini_trend=True from most recent
+            for hist in historical_analysis:
+                if hist["is_minervini_trend"]:
+                    mtt_duration_days += 1
+                else:
+                    break
+            
+
             combined_data = {
                 # Company fields
                 "code": analysis.code.code,
@@ -463,6 +479,8 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 ),
                 "atr": analysis.atr,
                 "is_minervini_trend": analysis.is_minervini_trend,
+                # MTT duration data
+                "mtt_duration_days": mtt_duration_days,
                 # Financial data
                 "매출증가율": 매출증가율,
                 "영업이익증가율": 영업이익증가율,

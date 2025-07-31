@@ -108,6 +108,8 @@ class CombinedStockAnalysisSchema(
     min_52w_gain_percent: Optional[float] = None
     # 50일 신고가 대비 상승률
     min_50d_gain_percent: Optional[float] = None
+    # MTT 지속일수
+    mtt_duration_days: Optional[int] = 0
 
 
 class SuccessResponseStockAnalysis(Schema):
