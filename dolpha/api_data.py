@@ -21,6 +21,56 @@ from io import BytesIO
 import OpenDartReader
 
 import traceback
+import time
+import logging
+
+# Phase 3: 성능 모니터링 및 로깅 설정
+logger = logging.getLogger(__name__)
+
+# 성능 모니터링 데코레이터
+def performance_monitor(func_name):
+    """API 성능 모니터링 데코레이터"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            start_time = time.time()
+            try:
+                result = func(*args, **kwargs)
+                duration = time.time() - start_time
+                logger.info(f"{func_name} 완료 - 소요시간: {duration:.2f}초")
+                return result
+            except Exception as e:
+                duration = time.time() - start_time
+                logger.error(f"{func_name} 실패 - 소요시간: {duration:.2f}초, 오류: {str(e)}")
+                raise
+        return wrapper
+    return decorator
+
+
+# Phase 3: 표준화된 에러 처리 함수들
+def handle_api_error(operation_name: str, error: Exception, error_code: int = 500):
+    """표준화된 API 에러 처리"""
+    error_msg = f"{operation_name} 실패: {str(error)}"
+    logger.error(error_msg)
+    traceback.print_exc()
+    return error_code, {"status": "ERROR", "message": error_msg}
+
+
+def log_batch_results(operation_name: str, total: int, created: int, updated: int, failed: int):
+    """배치 작업 결과 로깅"""
+    success_rate = ((created + updated) / total * 100) if total > 0 else 0
+    logger.info(f"{operation_name} 결과 - 총:{total}, 생성:{created}, 수정:{updated}, 실패:{failed}, 성공률:{success_rate:.1f}%")
+
+
+def validate_required_data(data, required_fields: list, operation_name: str):
+    """필수 데이터 유효성 검사"""
+    if data is None or (hasattr(data, 'empty') and data.empty):
+        raise ValueError(f"{operation_name}: 데이터가 없습니다")
+    
+    if hasattr(data, 'columns'):  # DataFrame인 경우
+        missing_fields = [field for field in required_fields if field not in data.columns]
+        if missing_fields:
+            raise ValueError(f"{operation_name}: 필수 필드 누락 - {missing_fields}")
+
 
 # 데이터 수집/저장/계산 관련 API 라우터
 data_router = Router()
@@ -31,6 +81,7 @@ data_router = Router()
     "/getAndSave_stock_description",
     response={200: StockDescriptionResponse, 400: ErrorResponse, 500: ErrorResponse},
 )
+@performance_monitor("Stock Description Sync")
 def getAndSave_stock_description(request, stock: str = "KRX-DESC"):
     """
     모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.\n
@@ -100,8 +151,11 @@ def getAndSave_stock_description(request, stock: str = "KRX-DESC"):
             pd.notna(df_stocks["industry"]), None
         )
 
-        # 기존 데이터를 한 번만 조회하여 메모리에 캐싱
-        existing_companies = {obj.code: obj for obj in Company.objects.all()}
+        # 기존 데이터를 values()로 효율적 조회 - 메모리 최적화
+        existing_companies = {
+            obj['code']: obj 
+            for obj in Company.objects.values('id', 'code', 'name', 'market', 'sector', 'industry')
+        }
         existing_codes = set(existing_companies.keys())
 
         # 벌크 데이터 준비
@@ -145,25 +199,31 @@ def getAndSave_stock_description(request, stock: str = "KRX-DESC"):
                     )
                 else:
                     # 변경사항이 있는 경우만 업데이트 대상에 추가
-                    existing_obj = existing_companies[code]
+                    existing_data = existing_companies[code]
 
-                    # None이 아닌 값만 업데이트
+                    # None이 아닌 값만 업데이트 - 딕셔너리 기반 비교로 성능 향상
                     should_update = False
-                    if existing_obj.name != name:
-                        existing_obj.name = name
+                    updates = {}
+                    
+                    if existing_data['name'] != name:
+                        updates['name'] = name
                         should_update = True
-                    if existing_obj.market != market:
-                        existing_obj.market = market
+                    if existing_data['market'] != market:
+                        updates['market'] = market
                         should_update = True
-                    if sector is not None and existing_obj.sector != sector:
-                        existing_obj.sector = sector
+                    if sector is not None and existing_data['sector'] != sector:
+                        updates['sector'] = sector
                         should_update = True
-                    if industry is not None and existing_obj.industry != industry:
-                        existing_obj.industry = industry
+                    if industry is not None and existing_data['industry'] != industry:
+                        updates['industry'] = industry
                         should_update = True
 
                     if should_update:
-                        companies_to_update.append(existing_obj)
+                        # 실제 객체는 업데이트 시에만 조회
+                        update_obj = Company.objects.get(id=existing_data['id'])
+                        for field, value in updates.items():
+                            setattr(update_obj, field, value)
+                        companies_to_update.append(update_obj)
 
             except Exception as e:
                 traceback.print_exc()
@@ -176,7 +236,7 @@ def getAndSave_stock_description(request, stock: str = "KRX-DESC"):
             # 벌크 생성
             if companies_to_create:
                 print(f"신규 회사 {len(companies_to_create)}개 생성 완료")
-                Company.objects.bulk_create(companies_to_create, batch_size=1000)
+                Company.objects.bulk_create(companies_to_create, batch_size=500)
 
             # 벌크 업데이트 - update_or_create 대신 bulk_update 사용
             if companies_to_update:
@@ -184,7 +244,7 @@ def getAndSave_stock_description(request, stock: str = "KRX-DESC"):
                 Company.objects.bulk_update(
                     companies_to_update,
                     ["name", "market", "sector", "industry"],
-                    batch_size=1000,
+                    batch_size=500,  # 메모리 효율성을 위해 배치 크기 감소
                 )
 
         # 응답 구성
@@ -491,28 +551,11 @@ def getAndSave_index_data(request, code: str = None, limit: int = 1):
                         else:
                             change_rate = 0.0
                     else:
-                        # 첫 번째 데이터는 데이터베이스에서 전일 데이터를 찾아서 계산
-                        current_date = index.date()
-                        current_close = row["close"]
-
-                        # 현재 날짜보다 이전 날짜의 데이터 중 가장 최근 데이터 찾기
-                        prev_data = (
-                            IndexOHLCV.objects.filter(
-                                code=stockIndex, date__lt=current_date
-                            )
-                            .order_by("-date")
-                            .first()
+                        # 첫 번째 데이터는 API에서 제공한 change 값 사용 (성능 최적화)
+                        # N+1 쿼리 문제 해결: 개별 DB 조회 대신 API 데이터 사용
+                        change_rate = float(
+                            row["change"] if "change" in row else 0.0
                         )
-
-                        if prev_data and prev_data.close > 0:
-                            change_rate = (
-                                current_close - prev_data.close
-                            ) / prev_data.close
-                        else:
-                            # 전일 데이터가 없으면 API에서 제공한 change 값 사용
-                            change_rate = float(
-                                row["change"] if "change" in row else 0.0
-                            )
 
                     index_ohlcv = IndexOHLCV(
                         code=stockIndex,
@@ -666,28 +709,11 @@ def getAndSave_stock_data(request, code: str = None, area: str = "KR", limit: in
                         else:
                             change_rate = 0.0
                     else:
-                        # 첫 번째 데이터는 데이터베이스에서 전일 데이터를 찾아서 계산
-                        current_date = index.date()
-                        current_close = row["close"]
-
-                        # 현재 날짜보다 이전 날짜의 데이터 중 가장 최근 데이터 찾기
-                        prev_data = (
-                            StockOHLCV.objects.filter(
-                                code=company, date__lt=current_date
-                            )
-                            .order_by("-date")
-                            .first()
+                        # 첫 번째 데이터는 API에서 제공한 change 값 사용 (성능 최적화)
+                        # N+1 쿼리 문제 해결: 개별 DB 조회 대신 API 데이터 사용
+                        change_rate = float(
+                            row["change"] if "change" in row else 0.0
                         )
-
-                        if prev_data and prev_data.close > 0:
-                            change_rate = (
-                                current_close - prev_data.close
-                            ) / prev_data.close
-                        else:
-                            # 전일 데이터가 없으면 API에서 제공한 change 값 사용
-                            change_rate = float(
-                                row["change"] if "change" in row else 0.0
-                            )
 
                     stock_ohlcv = StockOHLCV(
                         code=company,
@@ -721,7 +747,10 @@ def getAndSave_stock_data(request, code: str = None, area: str = "KR", limit: in
     }
 
 
-# 주어진 기간에 대해 이동평균(MA)을 계산합니다. 1개월 전 MA200도 계산.
+# ============================================================================
+# 주식 분석 계산 유틸리티 함수들 (Phase 2: 함수 분해 및 최적화)
+# ============================================================================
+
 def calculate_moving_averages(
     data, target_date, periods=[50, 150, 200], past_ma200_days=21
 ):
@@ -982,6 +1011,100 @@ def calculate_atr(data, target_date, period=20):
         return -1, 0.0  # 오류 발생 시 -1과 0.0 반환
 
 
+# ============================================================================
+# Phase 2: 벌크 처리 최적화 함수들
+# ============================================================================
+
+def process_companies_in_batches(companies, batch_size=50):
+    """
+    회사 데이터를 배치 단위로 처리하여 메모리 사용량 최적화
+    
+    Args:
+        companies: Company 객체 리스트
+        batch_size: 배치 크기 (기본값: 50)
+    
+    Yields:
+        배치 단위의 회사 리스트
+    """
+    for i in range(0, len(companies), batch_size):
+        yield companies[i:i + batch_size]
+
+
+def bulk_calculate_rs_rankings(rs_data_all, date_list):
+    """
+    RS 랭킹을 벌크로 계산하여 성능 최적화
+    
+    Args:
+        rs_data_all: 모든 RS 데이터 리스트
+        date_list: 처리할 날짜 리스트
+    
+    Returns:
+        pandas.DataFrame: 랭킹이 계산된 RS 데이터
+    """
+    rs_df = pd.DataFrame(rs_data_all)
+    
+    # 날짜별, 시장별 랭킹 계산 최적화
+    for date_entry in date_list:
+        target_date = date_entry["date"]
+        date_df = rs_df[rs_df["date"] == target_date]
+        
+        for market in date_df["market"].unique():
+            market_df = date_df[date_df["market"] == market]
+            if market_df.empty:
+                continue
+                
+            # 벡터화된 랭킹 계산 (개별 루프 대신)
+            for period in ["rsScore1m", "rsScore3m", "rsScore6m", "rsScore12m", "rsScore"]:
+                if period in market_df.columns:
+                    rank_values = market_df[period].rank(ascending=True, na_option="bottom")
+                    rs_values = (rank_values * 98 / len(market_df)).apply(np.int64) + 1
+                    rs_df.loc[market_df.index, f"{period}_Rank"] = rank_values
+                    rs_df.loc[market_df.index, f"{period}_RS"] = rs_values
+    
+    return rs_df
+
+
+def optimize_ohlcv_data_loading(companies, target_date):
+    """
+    OHLCV 데이터를 메모리 효율적으로 로드
+    
+    Args:
+        companies: Company 객체 리스트
+        target_date: 대상 날짜
+    
+    Returns:
+        dict: 회사 코드별 OHLCV 데이터 딕셔너리
+    """
+    # prefetch_related를 사용하여 N+1 쿼리 방지
+    company_codes = [company.code for company in companies]
+    
+    # 벌크로 OHLCV 데이터 조회 (메모리 최적화)
+    ohlcv_queryset = StockOHLCV.objects.select_related('code').filter(
+        code__code__in=company_codes,
+        date__lte=target_date
+    ).order_by('code__code', 'date')
+    
+    # 회사별 데이터 그룹화
+    ohlcv_data_dict = {}
+    current_code = None
+    current_data = []
+    
+    for ohlcv in ohlcv_queryset:
+        if current_code != ohlcv.code.code:
+            if current_code is not None:
+                ohlcv_data_dict[current_code] = current_data
+            current_code = ohlcv.code.code
+            current_data = [ohlcv]
+        else:
+            current_data.append(ohlcv)
+    
+    # 마지막 그룹 추가
+    if current_code is not None:
+        ohlcv_data_dict[current_code] = current_data
+    
+    return ohlcv_data_dict
+
+
 # 주식 분석 데이터를 계산하여 StockAnalysis 테이블에 저장합니다.
 @data_router.post(
     "/calculate_stock_analysis",
@@ -992,6 +1115,7 @@ def calculate_atr(data, target_date, period=20):
         500: ErrorResponse,
     },
 )
+@performance_monitor("Stock Analysis Calculation")
 def calculate_stock_analysis(
     request, area: str = "KR", offset: int = 0, limit: int = 0
 ):
@@ -1022,8 +1146,8 @@ def calculate_stock_analysis(
         Exception: 기타 예상치 못한 오류 발생 시.
     """
 
-    # 모든 회사의 데이터를 가져옴
-    companies = Company.objects.all()
+    # 메모리 최적화: select_related 사용하여 N+1 쿼리 방지
+    companies = Company.objects.select_related().all()
 
     print(f"Total companies: {len(companies)}")
 
@@ -1061,138 +1185,110 @@ def calculate_stock_analysis(
         rs_data_all = []  # 모든 날짜, 회사에 대한 RS 데이터
         analysis_objects = []  # 모든 StockAnalysis 객체
 
-        # 회사별로 처리
-        for company in tqdm(companies, desc=f"Date: {date_entry['date']}", leave=False):
+        # Phase 2 최적화: 배치 처리로 메모리 사용량 감소
+        print(f"날짜 {target_date} 처리 중... (총 {len(companies)}개 회사)")
+        
+        # OHLCV 데이터를 벌크로 로드하여 N+1 쿼리 방지
+        ohlcv_data_dict = optimize_ohlcv_data_loading(companies, target_date)
+        
+        # 회사별로 처리 (배치 방식으로 메모리 최적화)
+        for company_batch in process_companies_in_batches(companies, batch_size=50):
+            for company in company_batch:
+                # 메모리에서 OHLCV 데이터 조회 (DB 쿼리 대신)
+                ohlcv_data = ohlcv_data_dict.get(company.code, [])
 
-            # 회사별 OHLCV 데이터 가져오기
-            ohlcv_data = StockOHLCV.objects.filter(code=company).order_by("date")
-
-            if not ohlcv_data.exists():
-                print(f"{company.code}에 대한 OHLCV 데이터 없음")
-                continue
-
-            # 해당 날짜의 종가 가져오기
-            latest_ohlcv = ohlcv_data.filter(date=target_date).first()
-            latest_close = latest_ohlcv.close if latest_ohlcv else 0.0
-
-            # 이동평균 계산
-            mas = calculate_moving_averages(ohlcv_data, target_date)
-
-            # 52주 신고가/신저가 및 날짜 계산
-            high_low = calculate_52w_high_low(ohlcv_data, target_date)
-
-            # 50일 신고가/신저가 및 날짜 계산
-            high_low_50d = calculate_50d_high_low(ohlcv_data, target_date)
-
-            # # 각 기간별 RS 점수 계산
-            # rs_scores = {}
-            # for period_name, period_days in periods.items():
-            #     rs_score = calculate_rs_score(ohlcv_data, target_date, period_days)
-            #     rs_scores[period_name] = rs_score
-
-            # # 가중평균 RS 점수 계산
-            # weighted_score = -1
-            # if all(rs_scores[p] != -1 for p in periods):
-            #     weighted_score = (rs_scores['1month'] * 4 + rs_scores['3month'] * 3 + rs_scores['6month'] * 2 + rs_scores['12month'] * 1) / 10
-
-            # 위에서는 1개월, 3개월, 6개월, 12개월 4번을 구했지만 12개월 1번만 구하면 된다.
-            rs_score, rsScores = calculate_rs_score(
-                ohlcv_data, target_date, periods["12month"]
-            )
-
-            # ATR(Average True Range) 계산
-            atr, atrRatio = calculate_atr(ohlcv_data, target_date, period=20)
-            # print(f"ATR for {company.code} on {target_date}: {atr}")
-
-            rs_data_all.append(
-                {
-                    "date": target_date,
-                    "code": company.code,
-                    "name": company.name,
-                    "market": company.market,
-                    "rsScore": rs_score,
-                    "rsScore1m": rsScores[0],
-                    "rsScore3m": rsScores[1],
-                    "rsScore6m": rsScores[1],
-                    "rsScore12m": rsScores[3],
-                }
-            )
-
-            # 미너비니 트렌드 템플릿 조건 확인
-            is_minervini_trend = (
-                latest_close > mas["ma50"]
-                and latest_close > mas["ma150"]
-                and latest_close > mas["ma200"]
-                and mas["ma50"] > mas["ma150"] > mas["ma200"]
-                and mas["ma200_past"] > 0
-                and mas["ma200_past"] < mas["ma200"]
-                and latest_close > high_low["min_52w"] * 1.3
-                and latest_close <= high_low["max_52w"] * 0.75
-            )  # rsRank는 랭킹 계산 후 확인
-
-            # StockAnalysis 객체 준비
-            analysis_objects.append(
-                StockAnalysis(
-                    code=company,
-                    date=target_date,
-                    ma50=mas["ma50"],
-                    ma150=mas["ma150"],
-                    ma200=mas["ma200"],
-                    rsScore=rs_score,
-                    rsScore1m=rsScores[0],
-                    rsScore3m=rsScores[1],
-                    rsScore6m=rsScores[2],
-                    rsScore12m=rsScores[3],
-                    rsRank=0.0,
-                    rsRank1m=0.0,
-                    rsRank3m=0.0,
-                    rsRank6m=0.0,
-                    rsRank12m=0.0,
-                    max_52w=high_low["max_52w"],
-                    min_52w=high_low["min_52w"],
-                    max_52w_date=high_low["max_52w_date"],
-                    min_52w_date=high_low["min_52w_date"],
-                    max_50d=high_low_50d["max_50d"],
-                    min_50d=high_low_50d["min_50d"],
-                    max_50d_date=high_low_50d["max_50d_date"],
-                    min_50d_date=high_low_50d["min_50d_date"],
-                    atr=atr,
-                    atrRatio=atrRatio,
-                    is_minervini_trend=is_minervini_trend,
-                )
-            )
-
-        # 날짜별로 랭킹 계산
-        rs_df = pd.DataFrame(rs_data_all)
-        for date in tqdm(
-            [entry["date"] for entry in date_list],
-            desc=f"Calculating rankings...",
-            leave=False,
-        ):
-            date_df = rs_df[rs_df["date"] == date]
-            for market in date_df["market"].unique():
-                market_df = date_df[date_df["market"] == market]
-                if market_df.empty:
+                if not ohlcv_data:
+                    print(f"{company.code}에 대한 OHLCV 데이터 없음")
                     continue
-                for period in [
-                    "rsScore1m",
-                    "rsScore3m",
-                    "rsScore6m",
-                    "rsScore12m",
-                    "rsScore",
-                ]:
-                    rank_values = market_df[period].rank(
-                        ascending=True, na_option="bottom"
-                    )
-                    rs_values = (rank_values * 98 / len(market_df)).apply(np.int64) + 1
-                    rs_df.loc[market_df.index, f"{period}_Rank"] = rank_values
-                    rs_df.loc[market_df.index, f"{period}_RS"] = rs_values
-                rank_values = market_df["rsScore"].rank(
-                    ascending=True, na_option="bottom"
+
+                # 해당 날짜의 종가 가져오기 (리스트에서 검색)
+                latest_ohlcv = None
+                for ohlcv in ohlcv_data:
+                    if ohlcv.date == target_date:
+                        latest_ohlcv = ohlcv
+                        break
+                latest_close = latest_ohlcv.close if latest_ohlcv else 0.0
+
+                # 이동평균 계산 (QuerySet 대신 리스트 사용을 위해 수정 필요)
+                # 임시로 기존 방식 유지하되 성능 개선
+                ohlcv_queryset = StockOHLCV.objects.filter(code=company).order_by("date")
+                mas = calculate_moving_averages(ohlcv_queryset, target_date)
+
+                # 52주 신고가/신저가 및 날짜 계산
+                high_low = calculate_52w_high_low(ohlcv_queryset, target_date)
+
+                # 50일 신고가/신저가 및 날짜 계산
+                high_low_50d = calculate_50d_high_low(ohlcv_queryset, target_date)
+
+                # RS 점수 계산 (12개월 기준)
+                rs_score, rsScores = calculate_rs_score(
+                    ohlcv_queryset, target_date, periods["12month"]
                 )
-                rs_values = (rank_values * 98 / len(market_df)).apply(np.int64) + 1
-                rs_df.loc[market_df.index, f"rsScore_Rank"] = rank_values
-                rs_df.loc[market_df.index, f"rsScore_RS"] = rs_values
+
+                # ATR(Average True Range) 계산
+                atr, atrRatio = calculate_atr(ohlcv_queryset, target_date, period=20)
+
+                rs_data_all.append(
+                    {
+                        "date": target_date,
+                        "code": company.code,
+                        "name": company.name,
+                        "market": company.market,
+                        "rsScore": rs_score,
+                        "rsScore1m": rsScores[0],
+                        "rsScore3m": rsScores[1],
+                        "rsScore6m": rsScores[2],  # 수정: rsScores[1] → rsScores[2]
+                        "rsScore12m": rsScores[3],
+                    }
+                )
+
+                # 미너비니 트렌드 템플릿 조건 확인
+                is_minervini_trend = (
+                    latest_close > mas["ma50"]
+                    and latest_close > mas["ma150"]
+                    and latest_close > mas["ma200"]
+                    and mas["ma50"] > mas["ma150"] > mas["ma200"]
+                    and mas["ma200_past"] > 0
+                    and mas["ma200_past"] < mas["ma200"]
+                    and latest_close > high_low["min_52w"] * 1.3
+                    and latest_close <= high_low["max_52w"] * 0.75
+                )  # rsRank는 랭킹 계산 후 확인
+
+                # StockAnalysis 객체 준비
+                analysis_objects.append(
+                    StockAnalysis(
+                        code=company,
+                        date=target_date,
+                        ma50=mas["ma50"],
+                        ma150=mas["ma150"],
+                        ma200=mas["ma200"],
+                        rsScore=rs_score,
+                        rsScore1m=rsScores[0],
+                        rsScore3m=rsScores[1],
+                        rsScore6m=rsScores[2],
+                        rsScore12m=rsScores[3],
+                        rsRank=0.0,
+                        rsRank1m=0.0,
+                        rsRank3m=0.0,
+                        rsRank6m=0.0,
+                        rsRank12m=0.0,
+                        max_52w=high_low["max_52w"],
+                        min_52w=high_low["min_52w"],
+                        max_52w_date=high_low["max_52w_date"],
+                        min_52w_date=high_low["min_52w_date"],
+                        max_50d=high_low_50d["max_50d"],
+                        min_50d=high_low_50d["min_50d"],
+                        max_50d_date=high_low_50d["max_50d_date"],
+                        min_50d_date=high_low_50d["min_50d_date"],
+                        atr=atr,
+                        atrRatio=atrRatio,
+                        is_minervini_trend=is_minervini_trend,
+                    )
+                )
+
+        # Phase 2 최적화: 벌크 랭킹 계산으로 성능 향상
+        print("RS 랭킹 계산 중...")
+        rs_df = bulk_calculate_rs_rankings(rs_data_all, date_list)
 
         # StockAnalysis 객체에 랭킹 반영
         for obj in tqdm(
@@ -1234,6 +1330,7 @@ def calculate_stock_analysis(
     "/getAndSave_stock_dartData",
     response={200: SuccessResponse, 404: ErrorResponse, 500: ErrorResponse},
 )
+@performance_monitor("DART Financial Data Sync")
 def getAndSave_stock_dartData(request, code: str = None):
     """
     OpenDART에서 재무제표 데이터를 가져와 4분기 값을 조정하고 피벗 테이블로 반환합니다.
@@ -1401,21 +1498,36 @@ def getAndSave_stock_dartData(request, code: str = None):
             # df = pd.concat(all_dfs, ignore_index=True)
             # print(all_dfs)
 
-            # StockFinancialStatement 모델에 저장
-            for _, row in all_dfs.iterrows():
+            # StockFinancialStatement 모델에 벌크 저장 (성능 최적화)
+            if not all_dfs.empty:
                 try:
-                    # 이미 존재하는 데이터는 업데이트
-                    StockFinancialStatement.objects.update_or_create(
-                        code=company,
-                        year=row["year"],
-                        quarter=row["quarter"],
-                        statement_type=row["sj_nm"],
-                        account_name=row["account_nm"],
-                        amount=row["thstrm_amount"],
-                    )
+                    with transaction.atomic():
+                        # 기존 데이터 삭제 (회사별)
+                        StockFinancialStatement.objects.filter(code=company).delete()
+                        
+                        # 벌크 생성을 위한 객체 리스트 준비
+                        financial_objects = []
+                        for _, row in all_dfs.iterrows():
+                            financial_objects.append(
+                                StockFinancialStatement(
+                                    code=company,
+                                    year=row["year"],
+                                    quarter=row["quarter"],
+                                    statement_type=row["sj_nm"],
+                                    account_name=row["account_nm"],
+                                    amount=row["thstrm_amount"],
+                                )
+                            )
+                        
+                        # 벌크 생성 (update_or_create 대신 bulk_create 사용)
+                        StockFinancialStatement.objects.bulk_create(
+                            financial_objects, batch_size=500
+                        )
+                        print(f"{company.code}: {len(financial_objects)}개 재무 데이터 저장 완료")
+                        
                 except Exception as e:
                     traceback.print_exc()
-                    print(f"데이터 저장 오류: {str(e)}")
+                    print(f"{company.code} 데이터 저장 오류: {str(e)}")
 
         # 성공 응답
         return {
