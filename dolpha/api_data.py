@@ -1023,12 +1023,7 @@ def calculate_stock_analysis(
     """
 
     # 모든 회사의 데이터를 가져옴
-    if area == "KR":
-        companies = Company.objects.filter(market__in=["KOSDAQ", "KONEX", "KOSPI"])
-    elif area == "US":
-        companies = Company.objects.filter(market__in=["NASDAQ", "NYSE"])
-    else:
-        return 400, {"error": f"Unsupported area: {area}"}
+    companies = Company.objects.all()
 
     print(f"Total companies: {len(companies)}")
 
