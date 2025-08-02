@@ -1,19 +1,16 @@
 from ninja import NinjaAPI, Router
 from django.db import transaction, models
 from django.http import HttpResponse
-from django.core.cache import cache
-from django.db.models import Prefetch, Q
 
 from . import stockCommon as Common
 from myweb.models import *  # Import the StockOHLCV model
 from .schemas import *
 
-from typing import Dict, List, Optional
+from typing import Dict
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from tqdm import tqdm
-import hashlib
 
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
@@ -23,133 +20,15 @@ from io import BytesIO
 import OpenDartReader
 
 import traceback
-import logging
-import time
-from functools import wraps
-
-# 로거 설정
-logger = logging.getLogger(__name__)
-
-# 성능 모니터링 데코레이터
-def monitor_performance(func):
-    """
-    API 성능을 모니터링하는 데코레이터
-    """
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
-        
-        try:
-            result = func(*args, **kwargs)
-            
-            # 성공 시 성능 로깅
-            execution_time = time.time() - start_time
-            status_code = result[0] if isinstance(result, tuple) else 200
-            
-            logger.info(
-                f"API Performance - {func.__name__}: "
-                f"status={status_code}, time={execution_time:.3f}s"
-            )
-            
-            # 느린 쿼리 경고
-            if execution_time > 5.0:  # 5초 이상
-                logger.warning(
-                    f"Slow query detected - {func.__name__}: {execution_time:.3f}s"
-                )
-            
-            return result
-            
-        except Exception as e:
-            execution_time = time.time() - start_time
-            logger.error(
-                f"API Error - {func.__name__}: "
-                f"error={str(e)}, time={execution_time:.3f}s"
-            )
-            raise
-    
-    return wrapper
 
 # 데이터 조회 관련 API 라우터
 query_router = Router()
 
-# 캐시 키 생성 함수
-def generate_cache_key(prefix: str, **kwargs) -> str:
-    """
-    API 캐시 키를 생성합니다.
-    """
-    key_data = f"{prefix}:" + ":".join([f"{k}={v}" for k, v in sorted(kwargs.items())])
-    return hashlib.md5(key_data.encode()).hexdigest()[:16]
 
-# 캐시 데코레이터
-def cache_api_response(timeout: int = 300):
-    """
-    API 응답을 캐시하는 데코레이터
-    """
-    def decorator(func):
-        def wrapper(*args, **kwargs):
-            # 캐시 키 생성
-            cache_key = generate_cache_key(func.__name__, **kwargs)
-            
-            # 캐시에서 조회
-            cached_result = cache.get(cache_key)
-            if cached_result is not None:
-                logger.info(f"Cache hit for {func.__name__}: {cache_key}")
-                return cached_result
-            
-            # 캐시 미스, 실제 함수 실행
-            result = func(*args, **kwargs)
-            
-            # 성공적인 응답만 캐시
-            if result[0] == 200:  # HTTP 200 OK
-                cache.set(cache_key, result, timeout)
-                logger.info(f"Cached result for {func.__name__}: {cache_key}")
-            
-            return result
-        return wrapper
-    return decorator
-
-
-def growth_rate(current: float, previous: float) -> float:
-    """
-    성장률을 계산합니다.
-    """
-    if not current or not previous or abs(previous) == 0:
+def growth_rate(current, previous):
+    if abs(previous) == 0:
         return 0.0
     return ((current - previous) / abs(previous)) * 100
-
-def batch_finance_data(company_codes: List, account_names: List[str] = None) -> Dict:
-    """
-    여러 회사의 재무 데이터를 배치로 조회합니다.
-    N+1 쿼리 문제를 해결하기 위한 최적화 함수
-    """
-    if not company_codes:
-        return {}
-    
-    if account_names is None:
-        account_names = ["매출액", "영업이익"]
-    
-    # 벌크 쿼리로 모든 재무 데이터 조회
-    finance_data = StockFinancialStatement.objects.filter(
-        code__in=company_codes,
-        account_name__in=account_names
-    ).order_by('code', 'account_name', '-year', '-quarter').values(
-        'code', 'account_name', 'amount'
-    )
-    
-    # 딕셔너리로 그룹화
-    finance_dict = {}
-    for item in finance_data:
-        code = item['code']
-        account = item['account_name']
-        amount = item['amount']
-        
-        if code not in finance_dict:
-            finance_dict[code] = {name: [] for name in account_names}
-        
-        if account in finance_dict[code]:
-            finance_dict[code][account].append(amount)
-    
-    return finance_dict
 
 
 # 상승률 TOP 50 종목을 조회합니다. (MTT 페이지용)
@@ -161,8 +40,6 @@ def batch_finance_data(company_codes: List, account_names: List[str] = None) -> 
         500: ErrorResponse,
     },
 )
-@cache_api_response(timeout=900)  # 15분 캐시
-@monitor_performance
 def find_stock_top_rising(request, date: str = None, format: str = "json"):
     """
     최근 거래일 기준 상승률 TOP 50 종목을 조회합니다.\n
@@ -195,7 +72,6 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
                 )
         else:
             # If no date is provided, find the latest date with rising stocks
-            # 최적화: 인덱스 활용을 위해 date와 change 복합 조건 최적화
             latest_date_with_data = StockOHLCV.objects.filter(
                 change__gt=0
             ).order_by("-date").values_list("date", flat=True).first()
@@ -209,11 +85,10 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
             query_date = latest_date_with_data
 
         # 해당 날짜의 상승률 TOP 50 종목 조회 (change 필드 기준 내림차순 정렬)
-        # 최적화: select_related로 연관 테이블 조인, values로 필요한 필드만 선택
         ohlcv_queryset = StockOHLCV.objects.filter(
             date=query_date,
             change__gt=0  # 상승한 종목만
-        ).select_related('stock').order_by("-change")[:50]
+        ).order_by("-change")[:50]
 
         # Check if any records exist
         if not ohlcv_queryset.exists():
@@ -223,7 +98,6 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
             )
 
         # 해당 종목들의 분석 데이터 조회
-        # 최적화: 이미 select_related로 code를 가져왔으므로 DB 접근 최소화
         stock_codes = [ohlcv.code for ohlcv in ohlcv_queryset]
         analysis_data = StockAnalysis.objects.filter(
             code__in=stock_codes,
@@ -233,24 +107,32 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
         # 분석 데이터를 딕셔너리로 변환 (빠른 조회를 위해)
         analysis_dict = {analysis.code.code: analysis for analysis in analysis_data}
 
-        # 벌크 재무 데이터 조회 최적화
-        company_codes = [analysis.code for analysis in analysis_data]
-        finance_dict = batch_finance_data(company_codes)
-
         results = []
         for ohlcv in ohlcv_queryset:
             # 분석 데이터가 있는 종목만 포함
             if ohlcv.code.code in analysis_dict:
                 analysis = analysis_dict[ohlcv.code.code]
                 
-                # 재무 데이터 가져오기 (이미 메모리에 캐싱됨)
-                code = analysis.code
-                매출 = finance_dict.get(code, {}).get('매출액', [])
-                영업이익 = finance_dict.get(code, {}).get('영업이익', [])
+                # 재무 데이터 조회
+                finance = StockFinancialStatement.objects.filter(
+                    code=analysis.code
+                ).order_by("-year", "-quarter")
                 
-                # 성장률 계산
+                매출 = (
+                    finance.filter(account_name="매출액")
+                    .values_list("amount", flat=True)
+                    .distinct()
+                )
+                영업이익 = (
+                    finance.filter(account_name="영업이익")
+                    .values_list("amount", flat=True)
+                    .distinct()
+                )
+                
                 매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else 0.0
-                영업이익증가율 = growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
+                영업이익증가율 = (
+                    growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
+                )
 
                 combined_data = {
                     # Company fields
@@ -301,21 +183,16 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
                 results.append(combined_data)
 
         if format.lower() == "excel":
-            # 메모리 최적화된 Excel 생성
+            # BytesIO 버퍼 생성
             output = BytesIO()
-            
-            # 큰 데이터셋에 대한 메모리 최적화
             df = pd.DataFrame(results)
             filename = f"top_rising_stocks_{date or 'latest'}.xlsx"
             
-            # 메모리 효율적인 Excel Writer 사용
-            with pd.ExcelWriter(
-                output, 
-                engine="openpyxl",
-                options={'remove_timezone': True}
-            ) as writer:
-                df.to_excel(writer, index=False, sheet_name='Top_Rising')
+            # DataFrame을 BytesIO 버퍼에 쓰기
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False)
             
+            # 버퍼 포인터를 처음으로 되돌리기
             output.seek(0)
             
             # Excel 파일을 HttpResponse로 반환
@@ -326,9 +203,6 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
             response["Content-Disposition"] = f'attachment; filename="{filename}"'
             return response
         else:
-            # 성능 로깅
-            logger.info(f"Top rising stocks query completed: {len(results)} records, date: {query_date}")
-            
             # Return JSON response
             return 200, SuccessResponseStockAnalysis(status="OK", data=results)
 
@@ -663,7 +537,6 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
         500: ErrorResponse,
     },
 )
-@cache_api_response(timeout=900)  # 15분 캐시
 def find_stock_52w_high(request, date: str = None, format: str = "json"):
     """
     52주 신고가를 기록한 종목을 조회합니다.\n
@@ -699,11 +572,11 @@ def find_stock_52w_high(request, date: str = None, format: str = "json"):
             query_date = StockAnalysis.objects.latest("date").date
 
         # 52주 신고가 조건: max_52w_date가 최신 데이터 날짜와 같은 종목들 조회
-        # 최적화: 필터 조건 결합과 select_related 추가
         queryset = StockAnalysis.objects.filter(
-            max_52w_date=query_date,
-            date=query_date
-        ).select_related("code").order_by("-rsRank")
+            max_52w_date=query_date
+        ).order_by("-rsRank")
+
+        queryset = queryset.filter(date=query_date)
 
         # Check if any records exist
         if not queryset.exists():
@@ -712,41 +585,26 @@ def find_stock_52w_high(request, date: str = None, format: str = "json"):
                 message="No stocks found with 52-week high on the specified date",
             )
 
-        # 대량 데이터 최적화: 모든 종목의 재무 데이터를 한 번에 조회
-        company_codes = [analysis.code for analysis in queryset]
-        
-        # 매출액과 영업이익 데이터를 벌크로 조회
-        finance_data = StockFinancialStatement.objects.filter(
-            code__in=company_codes,
-            account_name__in=["매출액", "영업이익"]
-        ).order_by('code', 'account_name', '-year', '-quarter').values(
-            'code', 'account_name', 'amount'
-        )
-        
-        # 재무 데이터를 딕셔너리로 그룹화하여 빠른 조회 가능하게 함
-        finance_dict = {}
-        for item in finance_data:
-            code = item['code']
-            account = item['account_name']
-            amount = item['amount']
-            
-            if code not in finance_dict:
-                finance_dict[code] = {'매출액': [], '영업이익': []}
-            
-            if account in finance_dict[code]:
-                finance_dict[code][account].append(amount)
-        
-        # Combine with Company data
+        # Combine with Company data using select_related
         results = []
-        for analysis in queryset:
-            # 재무 데이터 가져오기 (이미 메모리에 캐싱됨)
-            code = analysis.code
-            매출 = finance_dict.get(code, {}).get('매출액', [])
-            영업이익 = finance_dict.get(code, {}).get('영업이익', [])
-            
-            # 성장률 계산
+        for analysis in queryset.select_related("code"):
+            finance = StockFinancialStatement.objects.filter(
+                code=analysis.code
+            ).order_by("-year", "-quarter")
+            매출 = (
+                finance.filter(account_name="매출액")
+                .values_list("amount", flat=True)
+                .distinct()
+            )
+            영업이익 = (
+                finance.filter(account_name="영업이익")
+                .values_list("amount", flat=True)
+                .distinct()
+            )
             매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else 0.0
-            영업이익증가율 = growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
+            영업이익증가율 = (
+                growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
+            )
             
             # 현재가 조회 (최근 OHLCV 데이터에서 - 분석일 이후의 최신 데이터)
             latest_ohlcv = StockOHLCV.objects.filter(
@@ -862,7 +720,6 @@ def find_stock_52w_high(request, date: str = None, format: str = "json"):
         500: ErrorResponse,
     },
 )
-@cache_api_response(timeout=1800)  # 30분 캐시 (비교적 정적 데이터)
 def find_stock_ohlcv(request, code: str = "005930", limit: int = 63):
     """
     주식 OHLCV 데이터를 조회합니다.\n
@@ -945,7 +802,6 @@ def find_stock_ohlcv(request, code: str = "005930", limit: int = 63):
         500: ErrorResponse,
     },
 )
-@cache_api_response(timeout=1200)  # 20분 캐시
 def find_stock_analysis(request, code: str = "005930", limit: int = 63):
     """
     주식 분석 데이터를 조회합니다.\n
@@ -1301,7 +1157,6 @@ def find_stock_index(request, code: str = "005930", limit: int = 10):
         500: ErrorResponse,
     },
 )
-@cache_api_response(timeout=900)  # 15분 캐시
 def find_stock_50d_high(request, date: str = None, format: str = "json"):
     """
     50일 신고가를 기록한 종목을 조회합니다.\n
@@ -1338,11 +1193,11 @@ def find_stock_50d_high(request, date: str = None, format: str = "json"):
             query_date = latest_analysis.date
 
         # 50일 신고가 조건: max_50d_date가 조회 날짜와 같은 종목들 조회 (52주 신고가 API와 동일한 로직)
-        # 최적화: 필터 조건 결합과 select_related 추가
         queryset = StockAnalysis.objects.filter(
-            max_50d_date=query_date,
-            date=query_date
-        ).select_related("code").order_by("-rsRank")
+            max_50d_date=query_date
+        ).order_by("-rsRank")
+
+        queryset = queryset.filter(date=query_date)
 
         # Check if any records exist
         if not queryset.exists():
@@ -1351,41 +1206,26 @@ def find_stock_50d_high(request, date: str = None, format: str = "json"):
                 message="No stocks found with 50-day high on the specified date",
             )
 
-        # 대량 데이터 최적화: 모든 종목의 재무 데이터를 한 번에 조회
-        company_codes = [analysis.code for analysis in queryset]
-        
-        # 매출액과 영업이익 데이터를 벌크로 조회
-        finance_data = StockFinancialStatement.objects.filter(
-            code__in=company_codes,
-            account_name__in=["매출액", "영업이익"]
-        ).order_by('code', 'account_name', '-year', '-quarter').values(
-            'code', 'account_name', 'amount'
-        )
-        
-        # 재무 데이터를 딕셔너리로 그룹화하여 빠른 조회 가능하게 함
-        finance_dict = {}
-        for item in finance_data:
-            code = item['code']
-            account = item['account_name']
-            amount = item['amount']
-            
-            if code not in finance_dict:
-                finance_dict[code] = {'매출액': [], '영업이익': []}
-            
-            if account in finance_dict[code]:
-                finance_dict[code][account].append(amount)
-        
-        # Combine with Company data
+        # Combine with Company data using select_related
         results = []
-        for analysis in queryset:
-            # 재무 데이터 가져오기 (이미 메모리에 캐싱됨)
-            code = analysis.code
-            매출 = finance_dict.get(code, {}).get('매출액', [])
-            영업이익 = finance_dict.get(code, {}).get('영업이익', [])
-            
-            # 성장률 계산
+        for analysis in queryset.select_related("code"):
+            finance = StockFinancialStatement.objects.filter(
+                code=analysis.code
+            ).order_by("-year", "-quarter")
+            매출 = (
+                finance.filter(account_name="매출액")
+                .values_list("amount", flat=True)
+                .distinct()
+            )
+            영업이익 = (
+                finance.filter(account_name="영업이익")
+                .values_list("amount", flat=True)
+                .distinct()
+            )
             매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else 0.0
-            영업이익증가율 = growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
+            영업이익증가율 = (
+                growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
+            )
             
             # 현재가 조회 (최근 OHLCV 데이터에서 - 분석일 이후의 최신 데이터)
             latest_ohlcv = StockOHLCV.objects.filter(
