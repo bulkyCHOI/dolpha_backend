@@ -696,24 +696,43 @@ def getAndSave_stock_data(request, code: str = None, area: str = "KR", limit: in
 
                 # DataFrame을 날짜 기준으로 정렬 (오래된 날짜부터)
                 df_sorted = df.sort_index()
+                
+                # Feature flag를 사용한 변동률 계산 방식 선택
+                if USE_NEW_CHANGE_CALCULATION:
+                    # 새로운 방식: DB 기반 정확한 계산
+                    dates_in_df = [idx.date() for idx in df_sorted.index]
+                    prev_close_lookup = batch_get_previous_closes([company], dates_in_df)
 
                 for i, (index, row) in enumerate(df_sorted.iterrows()):
-                    # 전일종가 대비 당일 종가 변동률 계산
-                    if (
-                        i > 0
-                    ):  # 첫 번째 데이터가 아닌 경우 (DataFrame 내에서 전일 데이터 사용)
-                        prev_close = df_sorted.iloc[i - 1]["close"]
-                        current_close = row["close"]
-                        if prev_close > 0:
-                            change_rate = (current_close - prev_close) / prev_close
+                    current_date = index.date()
+                    current_close = float(row["close"])
+                    
+                    # Feature flag에 따른 변동률 계산
+                    if USE_NEW_CHANGE_CALCULATION:
+                        # 새로운 방식: 정확한 변동률 계산
+                        if i > 0:
+                            # DataFrame 내에서 이전 데이터 사용 (연속 데이터인 경우)
+                            prev_close = float(df_sorted.iloc[i - 1]["close"])
+                            if prev_close > 0:
+                                change_rate = (current_close - prev_close) / prev_close
+                            else:
+                                change_rate = 0.0
                         else:
-                            change_rate = 0.0
+                            # 첫 번째 데이터: DB에서 실제 이전 거래일 종가 사용
+                            change_rate = calculate_accurate_change_rate(
+                                company.code, current_close, prev_close_lookup
+                            )
+                        
+                        # API 제공 change 값과 비교 검증 (개발 시에만)
+                        api_change = float(row["change"] if "change" in row else 0.0)
+                        if abs(change_rate - api_change) > 0.001:  # 0.1% 이상 차이
+                            logger.info(
+                                f"변동률 차이: {company.code} {current_date} "
+                                f"DB계산={change_rate:.4f} API값={api_change:.4f}"
+                            )
                     else:
-                        # 첫 번째 데이터는 API에서 제공한 change 값 사용 (성능 최적화)
-                        # N+1 쿼리 문제 해결: 개별 DB 조회 대신 API 데이터 사용
-                        change_rate = float(
-                            row["change"] if "change" in row else 0.0
-                        )
+                        # 기존 방식: 롤백용
+                        change_rate = calculate_change_rate_legacy(df_sorted, i, row)
 
                     stock_ohlcv = StockOHLCV(
                         code=company,
@@ -1103,6 +1122,293 @@ def optimize_ohlcv_data_loading(companies, target_date):
         ohlcv_data_dict[current_code] = current_data
     
     return ohlcv_data_dict
+
+
+# ============================================================================
+# 주식 가격 변동률 계산 유틸리티 함수들 (Phase 3: Change 계산 정확성 개선)
+# ============================================================================
+
+def get_previous_trading_day_close(company, current_date):
+    """
+    특정 회사의 이전 거래일 종가를 조회합니다.
+    
+    Args:
+        company: Company 객체
+        current_date: 현재 날짜 (date 객체)
+    
+    Returns:
+        float: 이전 거래일의 종가, 없으면 None
+    """
+    try:
+        previous_ohlcv = StockOHLCV.objects.filter(
+            code=company,
+            date__lt=current_date
+        ).order_by('-date').first()
+        
+        return previous_ohlcv.close if previous_ohlcv else None
+    except Exception as e:
+        logger.error(f"이전 거래일 종가 조회 오류 ({company.code}): {str(e)}")
+        return None
+
+
+def batch_get_previous_closes(companies, target_dates):
+    """
+    여러 회사의 이전 거래일 종가를 배치로 조회하여 N+1 쿼리 방지
+    
+    Args:
+        companies: Company 객체 리스트
+        target_dates: 처리할 날짜 리스트
+    
+    Returns:
+        dict: {company_code: previous_close_price} 형태의 딕셔너리
+    """
+    try:
+        if not companies or not target_dates:
+            return {}
+        
+        # 가장 이른 날짜 기준으로 이전 데이터 조회
+        earliest_date = min(target_dates)
+        company_codes = [company.code for company in companies]
+        
+        # 모든 회사의 이전 거래일 종가를 한 번에 조회
+        # distinct('code')를 사용하여 각 회사별로 가장 최근 데이터만 가져옴
+        previous_data = StockOHLCV.objects.filter(
+            code__code__in=company_codes,
+            date__lt=earliest_date
+        ).select_related('code').order_by('code__code', '-date')
+        
+        # 회사별 가장 최근 종가만 저장
+        prev_close_lookup = {}
+        for item in previous_data:
+            if item.code.code not in prev_close_lookup:
+                prev_close_lookup[item.code.code] = item.close
+        
+        return prev_close_lookup
+        
+    except Exception as e:
+        logger.error(f"배치 이전 거래일 종가 조회 오류: {str(e)}")
+        return {}
+
+
+def calculate_accurate_change_rate(company_code, current_close, prev_close_lookup):
+    """
+    정확한 주식 가격 변동률을 계산합니다.
+    
+    Args:
+        company_code: 회사 코드 (문자열)
+        current_close: 현재 종가 (float)
+        prev_close_lookup: 이전 종가 딕셔너리 {company_code: prev_close}
+    
+    Returns:
+        float: 변동률 (소수점 형태, 예: 0.05 = 5% 상승)
+    """
+    try:
+        prev_close = prev_close_lookup.get(company_code)
+        
+        if prev_close and prev_close > 0 and current_close > 0:
+            change_rate = (current_close - prev_close) / prev_close
+            return change_rate
+        else:
+            # 이전 데이터가 없거나 유효하지 않은 경우
+            return 0.0
+            
+    except Exception as e:
+        logger.error(f"변동률 계산 오류 ({company_code}): {str(e)}")
+        return 0.0
+
+
+def validate_change_calculation(company, date, old_change, new_change):
+    """
+    변동률 계산 결과를 검증하고 로깅합니다.
+    
+    Args:
+        company: Company 객체
+        date: 날짜
+        old_change: 기존 변동률
+        new_change: 새로 계산한 변동률
+    
+    Returns:
+        bool: 유의미한 차이가 있는지 여부
+    """
+    try:
+        diff = abs(new_change - old_change)
+        threshold = 0.001  # 0.1% 이상 차이를 유의미하다고 판단
+        
+        if diff > threshold:
+            logger.warning(
+                f"변동률 차이 발견: {company.code} {date} "
+                f"기존={old_change:.4f} 신규={new_change:.4f} 차이={diff:.4f}"
+            )
+            return True
+        return False
+        
+    except Exception as e:
+        logger.error(f"변동률 검증 오류 ({company.code}): {str(e)}")
+        return False
+
+
+# ============================================================================
+# 변동률 계산 테스트 및 검증 API
+# ============================================================================
+
+@data_router.post(
+    "/test_change_calculation",
+    response={200: SuccessResponse, 400: ErrorResponse, 500: ErrorResponse},
+)
+@performance_monitor("Change Calculation Test")
+def test_change_calculation(request, code: str = None, days: int = 30):
+    """
+    변동률 계산 정확성을 테스트하고 검증합니다.
+    
+    Args:
+        code (str): 테스트할 종목 코드 (없으면 전체)
+        days (int): 테스트할 일수 (기본값: 30일)
+    
+    Returns:
+        SuccessResponse: 테스트 결과 및 통계
+    """
+    try:
+        # 테스트 대상 회사 선택
+        companies = []
+        if code:
+            try:
+                company = Company.objects.get(code=code)
+                companies = [company]
+            except Company.DoesNotExist:
+                return 404, {"error": f"No company found with code: {code}"}
+        else:
+            # 전체 회사 중 무작위로 10개 선택 (테스트 용도)
+            companies = list(Company.objects.filter(
+                market__in=["KOSPI", "KOSDAQ"]
+            ).order_by('?')[:10])
+        
+        if not companies:
+            return 404, {"error": "No companies found for testing"}
+        
+        # 최근 days일간의 데이터로 테스트
+        from datetime import date, timedelta
+        end_date = date.today()
+        start_date = end_date - timedelta(days=days)
+        
+        test_results = []
+        total_tests = 0
+        significant_diffs = 0
+        
+        for company in companies:
+            # 해당 기간의 OHLCV 데이터 조회
+            ohlcv_data = StockOHLCV.objects.filter(
+                code=company,
+                date__gte=start_date,
+                date__lte=end_date
+            ).order_by('date')
+            
+            for i, current_data in enumerate(ohlcv_data):
+                if i == 0:  # 첫 번째 데이터는 건너뛰기
+                    continue
+                
+                # 이전 거래일 데이터 조회
+                prev_data = get_previous_trading_day_close(company, current_data.date)
+                
+                if prev_data and prev_data > 0:
+                    # 새로운 방식으로 계산
+                    new_change = (current_data.close - prev_data) / prev_data
+                    
+                    # 기존 저장된 값과 비교
+                    old_change = current_data.change
+                    diff = abs(new_change - old_change)
+                    
+                    total_tests += 1
+                    
+                    if diff > 0.001:  # 0.1% 이상 차이
+                        significant_diffs += 1
+                        test_results.append({
+                            "company_code": company.code,
+                            "company_name": company.name,
+                            "date": current_data.date.strftime("%Y-%m-%d"),
+                            "old_change": round(old_change, 4),
+                            "new_change": round(new_change, 4),
+                            "difference": round(diff, 4),
+                            "prev_close": prev_data,
+                            "current_close": current_data.close
+                        })
+        
+        # 통계 계산
+        accuracy_rate = ((total_tests - significant_diffs) / total_tests * 100) if total_tests > 0 else 0
+        
+        return {
+            "status": "OK",
+            "message": "Change calculation test completed",
+            "statistics": {
+                "total_tests": total_tests,
+                "significant_differences": significant_diffs,
+                "accuracy_rate": round(accuracy_rate, 2),
+                "test_period_days": days,
+                "companies_tested": len(companies)
+            },
+            "differences_found": test_results[:20]  # 상위 20개만 반환
+        }
+        
+    except Exception as e:
+        return handle_api_error("Change Calculation Test", e)
+
+
+def calculate_change_rate_legacy(df_sorted, i, row):
+    """
+    기존 변동률 계산 방식 (롤백용 백업)
+    
+    Args:
+        df_sorted: 정렬된 DataFrame
+        i: 현재 인덱스
+        row: 현재 행 데이터
+    
+    Returns:
+        float: 변동률
+    """
+    if i > 0:
+        prev_close = df_sorted.iloc[i - 1]["close"]
+        current_close = row["close"]
+        if prev_close > 0:
+            return (current_close - prev_close) / prev_close
+        else:
+            return 0.0
+    else:
+        # API 제공 change 값 사용
+        return float(row["change"] if "change" in row else 0.0)
+
+
+# Feature flag for change calculation method
+USE_NEW_CHANGE_CALCULATION = True  # True: 새로운 방식, False: 기존 방식
+
+
+@data_router.post(
+    "/toggle_change_calculation_method",
+    response={200: SuccessResponse, 400: ErrorResponse, 500: ErrorResponse},
+)
+def toggle_change_calculation_method(request, use_new: bool = True):
+    """
+    변동률 계산 방식을 전환합니다 (롤백/복구용)
+    
+    Args:
+        use_new (bool): True=새로운 방식, False=기존 방식
+    
+    Returns:
+        SuccessResponse: 현재 설정 상태
+    """
+    global USE_NEW_CHANGE_CALCULATION
+    
+    old_method = "새로운 방식" if USE_NEW_CHANGE_CALCULATION else "기존 방식"
+    USE_NEW_CHANGE_CALCULATION = use_new
+    new_method = "새로운 방식" if USE_NEW_CHANGE_CALCULATION else "기존 방식"
+    
+    logger.info(f"변동률 계산 방식 변경: {old_method} → {new_method}")
+    
+    return {
+        "status": "OK",
+        "message": f"변동률 계산 방식이 '{new_method}'으로 변경되었습니다.",
+        "previous_method": old_method,
+        "current_method": new_method,
+        "use_new_calculation": USE_NEW_CHANGE_CALCULATION
+    }
 
 
 # 주식 분석 데이터를 계산하여 StockAnalysis 테이블에 저장합니다.
