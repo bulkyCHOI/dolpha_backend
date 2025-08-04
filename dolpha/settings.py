@@ -10,9 +10,9 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
-from pathlib import Path
 import platform
-import os
+from datetime import timedelta
+from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -53,24 +53,25 @@ SCHEDULER_DEFAULT = True  # 앱 시작 시 스케줄러 자동 실행
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
-    'django.middleware.common.CommonMiddleware',
 ]
 
-# CORS 설정 - credentials를 지원하기 위해 구체적인 도메인 허용
-CORS_ALLOWED_ORIGINS = [
+# 허용된 도메인 목록 (CORS와 CSRF에서 공통 사용)
+ALLOWED_FRONTEND_ORIGINS = [
     "http://localhost:3000",  # React 개발 서버
     "http://127.0.0.1:3000",
     "http://218.152.32.218:3000",  # 실제 서버 도메인
     "http://dolpha.iptime.org:3000",  # 실제 서버 도메인
 ]
 
+# CORS 설정 - credentials를 지원하기 위해 구체적인 도메인 허용
+CORS_ALLOWED_ORIGINS = ALLOWED_FRONTEND_ORIGINS
 CORS_ALLOW_CREDENTIALS = True  # 쿠키, 인증 헤더 허용
 
 # 허용할 헤더 설정
@@ -87,12 +88,7 @@ CORS_ALLOW_HEADERS = [
 ]
 
 # CSRF 설정 - 프론트엔드 도메인을 신뢰할 수 있는 출처로 추가
-CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://218.152.32.218:3000",  # 실제 서버 도메인
-    "http://dolpha.iptime.org:3000",  # 실제 서버 도메인
-]
+CSRF_TRUSTED_ORIGINS = ALLOWED_FRONTEND_ORIGINS
 
 ROOT_URLCONF = 'dolpha.urls'
 
@@ -118,53 +114,26 @@ WSGI_APPLICATION = 'dolpha.wsgi.application'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASES = {
-    # 'default': {
-    #     'ENGINE': 'django.db.backends.sqlite3',
-    #     'NAME': BASE_DIR / 'db.sqlite3',
-    # }
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        # 'NAME': 'dolpha',  # 데이터베이스 이름
-        # 'USER': 'root',  # 또는 'root'
-        # 'PASSWORD': 'qwe123!@#',  # 사용자 비밀번호
-        # 'HOST': 'localhost',
-        # 'PORT': '3306',  # MariaDB 기본 포트
-        # 'OPTIONS': {
-        #     'charset': 'utf8mb4',
-        # },
-        
-        'NAME': 'dolpha_db',  # 데이터베이스 이름
-        'USER': 'dolpha',  # 또는 'root'
-        'PASSWORD': 'dolpha123',  # 사용자 비밀번호
-        'HOST': 'localhost',
-        'PORT': '3306',  # MariaDB 기본 포트
-    }
-}
-
-# 환경 변수 또는 OS에 따라 DB 설정 변경
-if platform.system() in ['Windows', 'Darwin']:  # Windows 또는 macOS
-    DATABASES['default'] = {
-        'ENGINE': 'django.db.backends.mysql',  # 또는 'django.db.backends.mysql' (MariaDB와 호환)
-        'NAME': 'dolpha_db',  # 데이터베이스 이름
-        'USER': 'dolpha',  # 또는 'root'
-        'PASSWORD': 'dolpha123',  # 사용자 비밀번호
-        'HOST': '218.152.32.218',
-        'PORT': '3306',  # MariaDB 기본 포트
-        # 'NAME': 'dolpha',  # 데이터베이스 이름
-        # 'USER': 'root',  # 또는 'root'
-        # 'PASSWORD': 'qwe123!@#',  # 사용자 비밀번호
-        # 'HOST': 'localhost',
-        # 'PORT': '3306',  # MariaDB 기본 포트
-    }
-else:  # Ubuntu (Docker 환경)
-    DATABASES['default'] = {
-        'ENGINE': 'django.db.backends.mysql',  # 또는 'django.db.backends.mysql'
         'NAME': 'dolpha_db',
         'USER': 'dolpha',
         'PASSWORD': 'dolpha123',
-        'HOST': 'mariadb',
-        'PORT': 3306,
+        'HOST': 'localhost',
+        'PORT': '3306',
     }
+}
+
+# 환경별 데이터베이스 설정
+if platform.system() in ['Windows', 'Darwin']:  # Windows 또는 macOS
+    DATABASES['default'].update({
+        'HOST': '218.152.32.218',  # 원격 서버
+    })
+else:  # Ubuntu (Docker 환경)
+    DATABASES['default'].update({
+        'HOST': 'mariadb',  # Docker 컨테이너명
+        'PORT': 3306,
+    })
 
 
 # Password validation
@@ -225,7 +194,6 @@ REST_FRAMEWORK = {
 }
 
 # Simple JWT 설정
-from datetime import timedelta
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),

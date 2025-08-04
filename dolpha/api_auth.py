@@ -1,12 +1,17 @@
-from ninja import NinjaAPI, Router
-from django.http import JsonResponse
-from django.contrib.auth import get_user_model
-from django.conf import settings
-from django.views.decorators.csrf import csrf_exempt
-from django.utils.decorators import method_decorator
-from rest_framework_simplejwt.tokens import RefreshToken
+# standard library
 import json
 import requests as http_requests
+
+# third-party
+from ninja import NinjaAPI, Router
+from rest_framework_simplejwt.tokens import RefreshToken
+
+# Django
+from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.http import JsonResponse
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
 
 # Google OAuth 관련 import를 try-except로 감싸기
 try:
