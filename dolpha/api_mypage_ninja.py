@@ -17,7 +17,7 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from django.contrib.auth.models import AnonymousUser
 
-from myweb.models import User, UserProfile, TradingConfig, TradingDefaults
+from myweb.models import User, UserProfile, TradingConfig, TradingDefaults, FavoriteStock, Company, StockAnalysis, StockOHLCV
 
 
 mypage_router = Router()
@@ -137,11 +137,48 @@ class TradingDefaultsSchema(Schema):
     turtle_position_size: float = 25.0
     turtle_positions: List[float] = []
     turtle_pyramiding_entries: List[str] = []
-    turtle_use_trailing_stop: bool = True
-    turtle_trailing_stop_percent: float = 3.0
-    # 공통 설정
-    default_entry_trigger: float = 1.0
-    default_exit_trigger: float = 2.0
+
+# 즐겨찾기 관련 스키마
+class FavoriteStockSchema(Schema):
+    stock_code: str
+    stock_name: str
+    memo: Optional[str] = ""
+
+class FavoriteStockResponseSchema(Schema):
+    id: int
+    stock_code: str
+    stock_name: str
+    memo: str
+    created_at: str
+    # 추가 정보 (Company 테이블에서 가져온 정보)
+    name: Optional[str] = None
+    current_price: Optional[float] = None
+    change_percent: Optional[float] = None
+    rsRank: Optional[float] = None
+    is_favorite: bool = True
+
+# 종목 검색 관련 스키마
+class StockSearchResponseSchema(Schema):
+    code: str
+    name: str
+    market: Optional[str] = None
+    industry: Optional[str] = None
+    current_price: Optional[float] = None
+    change_percent: Optional[float] = None
+    rsRank: Optional[float] = None
+    is_favorite: bool = False
+
+class StockSearchResultSchema(Schema):
+    success: bool
+    stocks: List[StockSearchResponseSchema]
+    total: int
+    message: Optional[str] = None
+
+class FavoriteStocksResponseSchema(Schema):
+    success: bool
+    favorites: List[FavoriteStockResponseSchema]
+    total: int
+    message: Optional[str] = None
 
 class TradingDefaultsResponseSchema(Schema):
     id: int
@@ -940,3 +977,143 @@ def get_defaults_for_new_config(request):
             'success': False,
             'error': str(e)
         }, status=500)
+
+
+# 즐겨찾기 관련 API 엔드포인트
+@mypage_router.get("/favorites", response=FavoriteStocksResponseSchema)
+def get_favorite_stocks(request):
+    """사용자의 즐겨찾기 목록 조회"""
+    try:
+        user = get_authenticated_user(request)
+        if not user:
+            return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
+        
+        # 즐겨찾기 목록 조회
+        favorites = FavoriteStock.objects.filter(user=user).order_by('-created_at')
+        
+        result_favorites = []
+        for favorite in favorites:
+            # Company 테이블에서 추가 정보 조회
+            try:
+                company = Company.objects.get(code=favorite.stock_code)
+                company_name = company.name
+                
+                # 최신 분석 데이터 조회
+                latest_analysis = StockAnalysis.objects.filter(
+                    code=company
+                ).order_by('-date').first()
+                
+                # 최신 OHLCV 데이터 조회 (현재가)
+                latest_ohlcv = StockOHLCV.objects.filter(
+                    code=company
+                ).order_by('-date').first()
+                
+                current_price = latest_ohlcv.close if latest_ohlcv else None
+                change_percent = latest_ohlcv.change if latest_ohlcv else None
+                rsRank = latest_analysis.rsRank if latest_analysis else None
+                
+            except Company.DoesNotExist:
+                current_price = None
+                change_percent = None
+                rsRank = None
+                company_name = favorite.stock_name
+            
+            result_favorites.append({
+                'id': favorite.id,
+                'stock_code': favorite.stock_code,
+                'stock_name': favorite.stock_name,
+                'memo': favorite.memo,
+                'created_at': favorite.created_at.isoformat(),
+                'name': company_name,
+                'current_price': current_price,
+                'change_percent': change_percent,
+                'rsRank': rsRank,
+                'is_favorite': True
+            })
+        
+        return {
+            'success': True,
+            'favorites': result_favorites,
+            'total': len(result_favorites)
+        }
+        
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=500)
+
+
+@mypage_router.post("/favorites", response=ResponseSchema)
+def add_favorite_stock(request, data: FavoriteStockSchema):
+    """즐겨찾기에 종목 추가"""
+    try:
+        user = get_authenticated_user(request)
+        if not user:
+            return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
+        
+        # 이미 즐겨찾기에 있는지 확인
+        existing = FavoriteStock.objects.filter(
+            user=user,
+            stock_code=data.stock_code
+        ).first()
+        
+        if existing:
+            return {
+                'success': False,
+                'error': '이미 즐겨찾기에 등록된 종목입니다.'
+            }
+        
+        # 새로운 즐겨찾기 생성
+        favorite = FavoriteStock.objects.create(
+            user=user,
+            stock_code=data.stock_code,
+            stock_name=data.stock_name,
+            memo=data.memo
+        )
+        
+        return {
+            'success': True,
+            'message': f'{data.stock_name}이(가) 즐겨찾기에 추가되었습니다.'
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+@mypage_router.delete("/favorites/{stock_code}", response=ResponseSchema)
+def remove_favorite_stock(request, stock_code: str):
+    """즐겨찾기에서 종목 제거"""
+    try:
+        user = get_authenticated_user(request)
+        if not user:
+            return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
+        
+        # 즐겨찾기에서 찾기
+        favorite = FavoriteStock.objects.filter(
+            user=user,
+            stock_code=stock_code
+        ).first()
+        
+        if not favorite:
+            return {
+                'success': False,
+                'error': '즐겨찾기에서 해당 종목을 찾을 수 없습니다.'
+            }
+        
+        stock_name = favorite.stock_name
+        favorite.delete()
+        
+        return {
+            'success': True,
+            'message': f'{stock_name}이(가) 즐겨찾기에서 제거되었습니다.'
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
