@@ -22,8 +22,12 @@ from django.http import HttpResponse
 from . import stockCommon as Common
 from .schemas import *
 from myweb.models import (
-    StockOHLCV, Company, StockAnalysis, StockFinancialStatement,
-    StockIndex, IndexOHLCV
+    StockOHLCV,
+    Company,
+    StockAnalysis,
+    StockFinancialStatement,
+    StockIndex,
+    IndexOHLCV,
 )
 
 # 데이터 조회 관련 API 라우터
@@ -77,22 +81,24 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
                 )
         else:
             # If no date is provided, find the latest date with rising stocks
-            latest_date_with_data = StockOHLCV.objects.filter(
-                change__gt=0
-            ).order_by("-date").values_list("date", flat=True).first()
-            
+            latest_date_with_data = (
+                StockOHLCV.objects.filter(change__gt=0)
+                .order_by("-date")
+                .values_list("date", flat=True)
+                .first()
+            )
+
             if not latest_date_with_data:
                 return 404, ErrorResponse(
                     status="error",
                     message="No rising stocks data found in database",
                 )
-            
+
             query_date = latest_date_with_data
 
         # 해당 날짜의 상승률 TOP 50 종목 조회 (change 필드 기준 내림차순 정렬)
         ohlcv_queryset = StockOHLCV.objects.filter(
-            date=query_date,
-            change__gt=0  # 상승한 종목만
+            date=query_date, change__gt=0  # 상승한 종목만
         ).order_by("-change")[:50]
 
         # Check if any records exist
@@ -105,9 +111,11 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
         # 해당 종목들의 분석 데이터 조회
         stock_codes = [ohlcv.code for ohlcv in ohlcv_queryset]
         analysis_data = StockAnalysis.objects.filter(
-            code__in=stock_codes,
-            date=query_date
+            code__in=stock_codes, date=query_date
         ).select_related("code")
+        print(
+            f"Found {len(analysis_data)} analysis records for {len(stock_codes)} stocks on {query_date}"
+        )
 
         # 분석 데이터를 딕셔너리로 변환 (빠른 조회를 위해)
         analysis_dict = {analysis.code.code: analysis for analysis in analysis_data}
@@ -117,12 +125,12 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
             # 분석 데이터가 있는 종목만 포함
             if ohlcv.code.code in analysis_dict:
                 analysis = analysis_dict[ohlcv.code.code]
-                
+
                 # 재무 데이터 조회
                 finance = StockFinancialStatement.objects.filter(
                     code=analysis.code
                 ).order_by("-year", "-quarter")
-                
+
                 매출 = (
                     finance.filter(account_name="매출액")
                     .values_list("amount", flat=True)
@@ -133,7 +141,7 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
                     .values_list("amount", flat=True)
                     .distinct()
                 )
-                
+
                 매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else 0.0
                 영업이익증가율 = (
                     growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
@@ -192,14 +200,14 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
             output = BytesIO()
             df = pd.DataFrame(results)
             filename = f"top_rising_stocks_{date or 'latest'}.xlsx"
-            
+
             # DataFrame을 BytesIO 버퍼에 쓰기
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
                 df.to_excel(writer, index=False)
-            
+
             # 버퍼 포인터를 처음으로 되돌리기
             output.seek(0)
-            
+
             # Excel 파일을 HttpResponse로 반환
             response = HttpResponse(
                 content=output.getvalue(),
@@ -439,18 +447,20 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
             # Calculate MTT duration days
             mtt_duration_days = 0
             # Get historical analysis data for this stock in descending date order
-            historical_analysis = StockAnalysis.objects.filter(
-                code=analysis.code,
-                date__lte=analysis.date
-            ).order_by("-date").values("date", "is_minervini_trend")
-            
+            historical_analysis = (
+                StockAnalysis.objects.filter(
+                    code=analysis.code, date__lte=analysis.date
+                )
+                .order_by("-date")
+                .values("date", "is_minervini_trend")
+            )
+
             # Count consecutive days with is_minervini_trend=True from most recent
             for hist in historical_analysis:
                 if hist["is_minervini_trend"]:
                     mtt_duration_days += 1
                 else:
                     break
-            
 
             combined_data = {
                 # Company fields
@@ -577,9 +587,9 @@ def find_stock_52w_high(request, date: str = None, format: str = "json"):
             query_date = StockAnalysis.objects.latest("date").date
 
         # 52주 신고가 조건: max_52w_date가 최신 데이터 날짜와 같은 종목들 조회
-        queryset = StockAnalysis.objects.filter(
-            max_52w_date=query_date
-        ).order_by("-rsRank")
+        queryset = StockAnalysis.objects.filter(max_52w_date=query_date).order_by(
+            "-rsRank"
+        )
 
         queryset = queryset.filter(date=query_date)
 
@@ -610,27 +620,31 @@ def find_stock_52w_high(request, date: str = None, format: str = "json"):
             영업이익증가율 = (
                 growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
             )
-            
+
             # 현재가 조회 (최근 OHLCV 데이터에서 - 분석일 이후의 최신 데이터)
-            latest_ohlcv = StockOHLCV.objects.filter(
-                code=analysis.code, 
-                date__gte=analysis.date
-            ).order_by("-date").first()
-            
+            latest_ohlcv = (
+                StockOHLCV.objects.filter(code=analysis.code, date__gte=analysis.date)
+                .order_by("-date")
+                .first()
+            )
+
             if latest_ohlcv:
                 current_price = latest_ohlcv.close
             else:
                 # 분석일 이후 데이터가 없으면 분석일의 데이터 사용
                 analysis_day_ohlcv = StockOHLCV.objects.filter(
-                    code=analysis.code, 
-                    date=analysis.date
+                    code=analysis.code, date=analysis.date
                 ).first()
-                current_price = analysis_day_ohlcv.close if analysis_day_ohlcv else analysis.max_52w
-            
+                current_price = (
+                    analysis_day_ohlcv.close if analysis_day_ohlcv else analysis.max_52w
+                )
+
             # 52주 최저가 대비 상승률 계산
             if analysis.min_52w and analysis.min_52w > 0:
                 # 52주 신고가 종목이므로 max_52w를 현재가로 사용
-                min_52w_gain_percent = round(((analysis.max_52w - analysis.min_52w) / analysis.min_52w) * 100, 2)
+                min_52w_gain_percent = round(
+                    ((analysis.max_52w - analysis.min_52w) / analysis.min_52w) * 100, 2
+                )
             else:
                 min_52w_gain_percent = 0.0
 
@@ -1198,9 +1212,9 @@ def find_stock_50d_high(request, date: str = None, format: str = "json"):
             query_date = latest_analysis.date
 
         # 50일 신고가 조건: max_50d_date가 조회 날짜와 같은 종목들 조회 (52주 신고가 API와 동일한 로직)
-        queryset = StockAnalysis.objects.filter(
-            max_50d_date=query_date
-        ).order_by("-rsRank")
+        queryset = StockAnalysis.objects.filter(max_50d_date=query_date).order_by(
+            "-rsRank"
+        )
 
         queryset = queryset.filter(date=query_date)
 
@@ -1231,29 +1245,35 @@ def find_stock_50d_high(request, date: str = None, format: str = "json"):
             영업이익증가율 = (
                 growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
             )
-            
+
             # 현재가 조회 (최근 OHLCV 데이터에서 - 분석일 이후의 최신 데이터)
-            latest_ohlcv = StockOHLCV.objects.filter(
-                code=analysis.code, 
-                date__gte=analysis.date
-            ).order_by("-date").first()
-            
+            latest_ohlcv = (
+                StockOHLCV.objects.filter(code=analysis.code, date__gte=analysis.date)
+                .order_by("-date")
+                .first()
+            )
+
             if latest_ohlcv:
                 current_price = latest_ohlcv.close
                 current_open = latest_ohlcv.open
             else:
                 # 분석일 이후 데이터가 없으면 분석일의 데이터 사용
                 analysis_day_ohlcv = StockOHLCV.objects.filter(
-                    code=analysis.code, 
-                    date=analysis.date
+                    code=analysis.code, date=analysis.date
                 ).first()
-                current_price = analysis_day_ohlcv.close if analysis_day_ohlcv else analysis.max_50d
-                current_open = analysis_day_ohlcv.open if analysis_day_ohlcv else current_price
-            
+                current_price = (
+                    analysis_day_ohlcv.close if analysis_day_ohlcv else analysis.max_50d
+                )
+                current_open = (
+                    analysis_day_ohlcv.open if analysis_day_ohlcv else current_price
+                )
+
             # 50일 최저가 대비 상승률 계산
             if analysis.min_50d and analysis.min_50d > 0:
                 # 50일 신고가 종목이므로 max_50d를 현재가로 사용
-                min_50d_gain_percent = round(((analysis.max_50d - analysis.min_50d) / analysis.min_50d) * 100, 2)
+                min_50d_gain_percent = round(
+                    ((analysis.max_50d - analysis.min_50d) / analysis.min_50d) * 100, 2
+                )
             else:
                 min_50d_gain_percent = 0.0
 
@@ -1291,7 +1311,11 @@ def find_stock_50d_high(request, date: str = None, format: str = "json"):
                 "is_minervini_trend": analysis.is_minervini_trend,
                 # Current price and change data
                 "close": current_price,
-                "change": round(((current_price - current_open) / current_open) * 100, 2) if current_open > 0 else 0.0,
+                "change": (
+                    round(((current_price - current_open) / current_open) * 100, 2)
+                    if current_open > 0
+                    else 0.0
+                ),
                 # 50일 신고가 관련 데이터
                 "max_50d": analysis.max_50d,
                 "min_50d": analysis.min_50d,
