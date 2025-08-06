@@ -1117,3 +1117,5 @@ def remove_favorite_stock(request, stock_code: str):
             'success': False,
             'error': str(e)
         }
+
+
