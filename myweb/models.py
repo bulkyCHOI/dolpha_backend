@@ -136,6 +136,23 @@ class StockAnalysis(models.Model):
         default=False
     )  # 미너비니 트렌드 템플릿 조건 충족 여부
 
+    # High Tight Flag (HTF) 패턴 관련 필드
+    htf_8week_gain = models.FloatField(default=0.0)  # 8주간 최대 상승률 (%)
+    htf_max_pullback = models.FloatField(default=0.0)  # 최대 조정폭 (%)
+    htf_pattern_detected = models.BooleanField(default=False)  # HTF 패턴 인식 여부
+    htf_pattern_start_date = models.DateField(null=True, blank=True)  # 패턴 시작일 (최저점)
+    htf_pattern_peak_date = models.DateField(null=True, blank=True)  # 고점 날짜
+    htf_current_status = models.CharField(
+        max_length=20, 
+        default='none',
+        choices=[
+            ('none', '해당 없음'),
+            ('rising', '상승중'),
+            ('pullback', '조정중'),
+            ('breakout', '돌파'),
+        ]
+    )  # 현재 HTF 패턴 상태
+
     class Meta:
         # 테이블 이름 지정 (기존 테이블과 매핑)
         db_table = "stock_analysis"
@@ -251,6 +268,7 @@ class TradingConfig(models.Model):
         ("weekly_high", "52주 신고가"),
         ("fifty_day_high", "50일 신고가"),
         ("daily_top50", "일일 Top50"),
+        ("htf", "High Tight Flag"),
     ]
 
     user = models.ForeignKey(

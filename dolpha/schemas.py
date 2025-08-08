@@ -160,3 +160,58 @@ class SuccessResponseStockIndexSchema(Schema):
 class SuccessResponseIndexOhlcvSchema(Schema):
     status: str
     data: List[StockOhlcvSchema]  # JSON 형태를 표현
+
+
+# =====================================================================
+# HTF (High Tight Flag) 관련 스키마
+
+class HTFStockSchema(Schema):
+    """HTF 패턴 종목 스키마"""
+    code: str
+    name: str
+    market: Optional[str] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+    analysis_date: str
+    htf_8week_gain: float
+    htf_max_pullback: float
+    htf_pattern_start_date: Optional[str] = None
+    htf_pattern_peak_date: Optional[str] = None
+    htf_current_status: str
+    rs_rank: float
+    is_minervini_trend: bool
+
+
+class HTFAnalysisDetailSchema(Schema):
+    """HTF 분석 상세 스키마"""
+    stock_info: Dict[str, Any]
+    htf_analysis: Dict[str, Any]
+    pattern_data: List[Dict[str, Any]]
+
+
+class HTFCalculationResultSchema(Schema):
+    """HTF 계산 결과 스키마"""
+    total: int
+    success: int
+    failed: int
+    success_rate: float
+    failed_stocks: List[str]
+
+
+class HTFStocksResponse(Schema):
+    """HTF 종목 리스트 응답"""
+    status: str
+    data: List[HTFStockSchema]
+    total_count: int
+
+
+class HTFAnalysisResponse(Schema):
+    """HTF 분석 상세 응답"""
+    status: str
+    data: HTFAnalysisDetailSchema
+
+
+class HTFCalculationResponse(Schema):
+    """HTF 계산 결과 응답"""
+    status: str
+    data: HTFCalculationResultSchema
