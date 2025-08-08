@@ -29,143 +29,159 @@ logger = logging.getLogger(__name__)
 
 # HTF Pattern Analysis Utility Functions
 
-def calculate_htf_pattern(ohlcv_data, target_date, min_gain_percent=100.0, max_pullback_percent=25.0, analysis_period_days=56):
+
+def calculate_htf_pattern(
+    ohlcv_data,
+    target_date,
+    min_gain_percent=100.0,
+    max_pullback_percent=25.0,
+    analysis_period_days=56,
+):
     """
     특정 날짜의 HTF 패턴 계산 (유틸리티 함수)
-    
+
     Args:
         ohlcv_data: OHLCV QuerySet (ordered by date)
         target_date: 분석 대상 날짜
         min_gain_percent: 최소 상승률 (기본 100%)
         max_pullback_percent: 최대 조정폭 (기본 25%)
         analysis_period_days: 분석 기간 (기본 56일 = 8주)
-        
+
     Returns:
         HTF 패턴 분석 결과 딕셔너리
     """
     try:
         # DataFrame으로 변환
-        ohlcv_list = list(ohlcv_data.filter(date__lte=target_date).order_by('date').values('date', 'open', 'high', 'low', 'close', 'volume'))
-        
+        ohlcv_list = list(
+            ohlcv_data.filter(date__lte=target_date)
+            .order_by("date")
+            .values("date", "open", "high", "low", "close", "volume")
+        )
+
         if len(ohlcv_list) < analysis_period_days:
             return {
-                'detected': False,
-                'gain_percent': 0.0,
-                'pullback_percent': 0.0,
-                'start_date': None,
-                'peak_date': None,
-                'status': 'none'
+                "detected": False,
+                "gain_percent": 0.0,
+                "pullback_percent": 0.0,
+                "start_date": None,
+                "peak_date": None,
+                "status": "none",
             }
-            
+
         df = pd.DataFrame(ohlcv_list)
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.sort_values('date')
-        
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date")
+
         # 최근 analysis_period_days 데이터 선택
         window_data = df.tail(analysis_period_days).copy()
-        
+
         if len(window_data) < analysis_period_days:
             return {
-                'detected': False,
-                'gain_percent': 0.0,
-                'pullback_percent': 0.0,
-                'start_date': None,
-                'peak_date': None,
-                'status': 'none'
+                "detected": False,
+                "gain_percent": 0.0,
+                "pullback_percent": 0.0,
+                "start_date": None,
+                "peak_date": None,
+                "status": "none",
             }
-            
-        current_price = window_data.iloc[-1]['close']
-        
+
+        current_price = window_data.iloc[-1]["close"]
+
         # HTF 패턴 분석
-        return _check_htf_pattern(window_data, current_price, min_gain_percent, max_pullback_percent)
-        
+        return _check_htf_pattern(
+            window_data, current_price, min_gain_percent, max_pullback_percent
+        )
+
     except Exception as e:
         logger.error(f"HTF 패턴 계산 중 오류: {str(e)}")
         return {
-            'detected': False,
-            'gain_percent': 0.0,
-            'pullback_percent': 0.0,
-            'start_date': None,
-            'peak_date': None,
-            'status': 'none'
+            "detected": False,
+            "gain_percent": 0.0,
+            "pullback_percent": 0.0,
+            "start_date": None,
+            "peak_date": None,
+            "status": "none",
         }
 
 
-def _check_htf_pattern(window_data, current_price, min_gain_percent, max_pullback_percent):
+def _check_htf_pattern(
+    window_data, current_price, min_gain_percent, max_pullback_percent
+):
     """
     HTF 패턴 조건 확인 (내부 함수)
-    
+
     Args:
         window_data: 8주 윈도우 데이터
         current_price: 현재 가격
         min_gain_percent: 최소 상승률
         max_pullback_percent: 최대 조정폭
-        
+
     Returns:
         패턴 분석 결과
     """
     try:
         # 1. 8주간 최저점 찾기
-        min_idx = window_data['low'].idxmin()
-        min_price = window_data.loc[min_idx, 'low']
-        min_date = window_data.loc[min_idx, 'date'].date()
-        
+        min_idx = window_data["low"].idxmin()
+        min_price = window_data.loc[min_idx, "low"]
+        min_date = window_data.loc[min_idx, "date"].date()
+
         # 2. 최저점 이후 최고점 찾기
         after_min = window_data[window_data.index > min_idx]
         if after_min.empty:
             return _default_htf_result()
-            
-        max_idx = after_min['high'].idxmax()
-        max_price = after_min.loc[max_idx, 'high']
-        max_date = after_min.loc[max_idx, 'date'].date()
-        
+
+        max_idx = after_min["high"].idxmax()
+        max_price = after_min.loc[max_idx, "high"]
+        max_date = after_min.loc[max_idx, "date"].date()
+
         # 3. 상승률 계산
         if min_price == 0:
             return _default_htf_result()  # 0으로 나누기 방지
         gain_percent = ((max_price - min_price) / min_price) * 100
-        
+
         # 4. 최소 상승률 조건 확인
-        if gain_percent < min_gain_percent:
-            return _default_htf_result()
-            
+        # 넘지 않더라도 DB에는 기록해주자
+        # if gain_percent < min_gain_percent:
+        #     return _default_htf_result()
+
         # 5. 최고점 이후 조정폭 계산
         after_max = after_min[after_min.index > max_idx]
         pullback_percent = 0.0
-        current_status = 'rising'
-        
+        current_status = "rising"
+
         if not after_max.empty:
             # 최고점 이후 최저점
-            pullback_min_price = after_max['low'].min()
+            pullback_min_price = after_max["low"].min()
             pullback_percent = ((max_price - pullback_min_price) / max_price) * 100
-            
+
             # 현재 상태 판단
             if pullback_percent > 0:
                 if current_price < max_price * 0.98:  # 2% 이상 하락
-                    current_status = 'pullback'
+                    current_status = "pullback"
                 elif current_price > max_price:  # 신고가 돌파
-                    current_status = 'breakout'
+                    current_status = "breakout"
                 else:
-                    current_status = 'pullback'
-                    
+                    current_status = "pullback"
+
         # 6. 조정폭 조건 확인
         if pullback_percent > max_pullback_percent:
             return _default_htf_result()
-            
+
         # 7. HTF 패턴 확인
         pattern_detected = (
-            gain_percent >= min_gain_percent and
-            pullback_percent <= max_pullback_percent
+            gain_percent >= min_gain_percent
+            and pullback_percent <= max_pullback_percent
         )
-        
+
         return {
-            'detected': pattern_detected,
-            'gain_percent': round(gain_percent, 2),
-            'pullback_percent': round(pullback_percent, 2),
-            'start_date': min_date,
-            'peak_date': max_date,
-            'status': current_status
+            "detected": pattern_detected,
+            "gain_percent": round(gain_percent, 2),
+            "pullback_percent": round(pullback_percent, 2),
+            "start_date": min_date,
+            "peak_date": max_date,
+            "status": current_status,
         }
-        
+
     except Exception as e:
         logger.error(f"HTF 패턴 확인 중 오류: {str(e)}")
         return _default_htf_result()
@@ -174,12 +190,12 @@ def _check_htf_pattern(window_data, current_price, min_gain_percent, max_pullbac
 def _default_htf_result():
     """기본 HTF 결과 반환"""
     return {
-        'detected': False,
-        'gain_percent': 0.0,
-        'pullback_percent': 0.0,
-        'start_date': None,
-        'peak_date': None,
-        'status': 'none'
+        "detected": False,
+        "gain_percent": 0.0,
+        "pullback_percent": 0.0,
+        "start_date": None,
+        "peak_date": None,
+        "status": "none",
     }
 
 
@@ -1976,12 +1992,12 @@ def calculate_stock_analysis(
 
             # HTF(High Tight Flag) 패턴 계산
             htf_result = calculate_htf_pattern(ohlcv_data, target_date)
-            htf_8week_gain = htf_result['gain_percent']
-            htf_max_pullback = htf_result['pullback_percent']
-            htf_pattern_detected = htf_result['detected']
-            htf_pattern_start_date = htf_result['start_date']
-            htf_pattern_peak_date = htf_result['peak_date']
-            htf_current_status = htf_result['status']
+            htf_8week_gain = htf_result["gain_percent"]
+            htf_max_pullback = htf_result["pullback_percent"]
+            htf_pattern_detected = htf_result["detected"]
+            htf_pattern_start_date = htf_result["start_date"]
+            htf_pattern_peak_date = htf_result["peak_date"]
+            htf_current_status = htf_result["status"]
 
             rs_data_all.append(
                 {
@@ -2342,16 +2358,19 @@ from django.db.models import Max
 
 # HTF 관련 유틸리티 함수들 (통합된 StockAnalysis 데이터 사용)
 
-def get_htf_stocks_from_analysis(area="KR", min_gain=100.0, max_pullback=25.0, limit=100):
+
+def get_htf_stocks_from_analysis(
+    area="KR", min_gain=100.0, max_pullback=25.0, limit=100
+):
     """
     StockAnalysis 테이블에서 HTF 조건을 만족하는 종목 조회 (통합 버전)
-    
+
     Args:
         area: 시장 지역 ("KR" 또는 "US")
         min_gain: 최소 상승률
         max_pullback: 최대 조정폭
         limit: 결과 제한 수
-        
+
     Returns:
         HTF 조건을 만족하는 종목 리스트
     """
@@ -2362,15 +2381,15 @@ def get_htf_stocks_from_analysis(area="KR", min_gain=100.0, max_pullback=25.0, l
             markets = ["NASDAQ", "NYSE"]
         else:
             raise ValueError("지원하지 않는 시장입니다. 'KR' 또는 'US'를 선택하세요.")
-            
+
         # StockAnalysis에서 HTF 패턴 종목 조회 (최신 데이터만)
-        latest_date_subquery = StockAnalysis.objects.aggregate(
-            max_date=Max('date')
-        )['max_date']
-        
+        latest_date_subquery = StockAnalysis.objects.aggregate(max_date=Max("date"))[
+            "max_date"
+        ]
+
         if not latest_date_subquery:
             return []
-            
+
         htf_stocks = (
             StockAnalysis.objects.filter(
                 date=latest_date_subquery,
@@ -2382,49 +2401,51 @@ def get_htf_stocks_from_analysis(area="KR", min_gain=100.0, max_pullback=25.0, l
             .select_related("code")
             .order_by("-htf_8week_gain")[:limit]
         )
-        
+
         result = []
         for analysis in htf_stocks:
-            result.append({
-                "code": analysis.code.code,
-                "name": analysis.code.name,
-                "market": analysis.code.market,
-                "sector": analysis.code.sector,
-                "industry": analysis.code.industry,
-                "analysis_date": (
-                    analysis.date.isoformat() if analysis.date else None
-                ),
-                "htf_8week_gain": analysis.htf_8week_gain,
-                "htf_max_pullback": analysis.htf_max_pullback,
-                "htf_pattern_start_date": (
-                    analysis.htf_pattern_start_date.isoformat()
-                    if analysis.htf_pattern_start_date
-                    else None
-                ),
-                "htf_pattern_peak_date": (
-                    analysis.htf_pattern_peak_date.isoformat()
-                    if analysis.htf_pattern_peak_date
-                    else None
-                ),
-                "htf_current_status": analysis.htf_current_status,
-                "rs_rank": analysis.rsRank,
-                "is_minervini_trend": analysis.is_minervini_trend,
-            })
-            
+            result.append(
+                {
+                    "code": analysis.code.code,
+                    "name": analysis.code.name,
+                    "market": analysis.code.market,
+                    "sector": analysis.code.sector,
+                    "industry": analysis.code.industry,
+                    "analysis_date": (
+                        analysis.date.isoformat() if analysis.date else None
+                    ),
+                    "htf_8week_gain": analysis.htf_8week_gain,
+                    "htf_max_pullback": analysis.htf_max_pullback,
+                    "htf_pattern_start_date": (
+                        analysis.htf_pattern_start_date.isoformat()
+                        if analysis.htf_pattern_start_date
+                        else None
+                    ),
+                    "htf_pattern_peak_date": (
+                        analysis.htf_pattern_peak_date.isoformat()
+                        if analysis.htf_pattern_peak_date
+                        else None
+                    ),
+                    "htf_current_status": analysis.htf_current_status,
+                    "rs_rank": analysis.rsRank,
+                    "is_minervini_trend": analysis.is_minervini_trend,
+                }
+            )
+
         return result
-        
+
     except Exception as e:
         logger.error(f"HTF 종목 조회 중 오류: {str(e)}")
         return []
 
-        
+
 def get_htf_analysis_from_analysis(stock_code):
     """
     StockAnalysis 테이블에서 특정 종목의 HTF 분석 상세 정보 조회 (통합 버전)
-    
+
     Args:
         stock_code: 종목 코드
-        
+
     Returns:
         HTF 상세 분석 정보
     """
@@ -2438,10 +2459,10 @@ def get_htf_analysis_from_analysis(stock_code):
             .order_by("-date")
             .first()
         )
-        
+
         if not latest_analysis:
             return {"error": f"종목 {stock_code}의 HTF 분석 데이터가 없습니다"}
-            
+
         # HTF 패턴 기간 OHLCV 데이터 조회
         pattern_data = []
         if latest_analysis.htf_pattern_start_date:
@@ -2454,9 +2475,9 @@ def get_htf_analysis_from_analysis(stock_code):
                 .order_by("date")
                 .values("date", "open", "high", "low", "close", "volume")
             )
-            
+
             pattern_data = list(ohlcv_data)
-            
+
         return {
             "stock_info": {
                 "code": latest_analysis.code.code,
@@ -2477,10 +2498,12 @@ def get_htf_analysis_from_analysis(stock_code):
             },
             "pattern_data": pattern_data,
         }
-        
+
     except Exception as e:
         logger.error(f"HTF 상세 분석 조회 중 오류 ({stock_code}): {str(e)}")
         return {"error": str(e)}
+
+
 from .schemas import HTFStocksResponse, HTFAnalysisResponse, HTFCalculationResponse
 
 
@@ -2602,19 +2625,16 @@ def calculate_htf_patterns_api(
         # 통합된 주식 분석 API 호출 (HTF 패턴 포함)
         # 최신 날짜만 계산하여 HTF 데이터 업데이트
         analysis_result = calculate_stock_analysis(
-            request=request,
-            area=area, 
-            offset=0, 
-            limit=0  # 최신 날짜만 계산
+            request=request, area=area, offset=0, limit=0  # 최신 날짜만 계산
         )
-        
+
         if isinstance(analysis_result, tuple):  # 오류 발생 시
             status_code, error_dict = analysis_result
             return status_code, ErrorResponse(
-                status="ERROR", 
-                message=error_dict.get("error", "HTF 패턴 계산 중 오류가 발생했습니다")
+                status="ERROR",
+                message=error_dict.get("error", "HTF 패턴 계산 중 오류가 발생했습니다"),
             )
-            
+
         # 처리된 종목 수 계산
         result = {
             "total": analysis_result.get("count_saved", 0),
@@ -2622,7 +2642,7 @@ def calculate_htf_patterns_api(
             "failed": 0,
             "success_rate": 100.0,
             "failed_stocks": [],
-            "message": f"HTF 패턴을 포함한 주식 분석이 완료되었습니다. {analysis_result.get('count_saved', 0)}개 종목 처리됨"
+            "message": f"HTF 패턴을 포함한 주식 분석이 완료되었습니다. {analysis_result.get('count_saved', 0)}개 종목 처리됨",
         }
 
         if "error" in result:
