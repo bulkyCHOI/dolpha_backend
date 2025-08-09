@@ -34,7 +34,7 @@ def calculate_htf_pattern(
     ohlcv_data,
     target_date,
     min_gain_percent=100.0,
-    max_pullback_percent=25.0,
+    max_pullback_percent=30.0,
     analysis_period_days=56,
 ):
     """
@@ -136,8 +136,9 @@ def _check_htf_pattern(
 
         # 3. 상승률 계산
         if min_price == 0:
-            return _default_htf_result()  # 0으로 나누기 방지
-        gain_percent = ((max_price - min_price) / min_price) * 100
+            gain_percent = 0.0
+        else:
+            gain_percent = ((max_price - min_price) / min_price) * 100
 
         # 4. 최소 상승률 조건 확인
         # 넘지 않더라도 DB에는 기록해주자
@@ -156,7 +157,7 @@ def _check_htf_pattern(
 
             # 현재 상태 판단
             if pullback_percent > 0:
-                if current_price < max_price * 0.98:  # 2% 이상 하락
+                if current_price < max_price:
                     current_status = "pullback"
                 elif current_price > max_price:  # 신고가 돌파
                     current_status = "breakout"
@@ -164,8 +165,9 @@ def _check_htf_pattern(
                     current_status = "pullback"
 
         # 6. 조정폭 조건 확인
-        if pullback_percent > max_pullback_percent:
-            return _default_htf_result()
+        # 조정폭이 넘어도 일단 기록은 하자
+        # if pullback_percent > max_pullback_percent:
+        #     return _default_htf_result()
 
         # 7. HTF 패턴 확인
         pattern_detected = (
