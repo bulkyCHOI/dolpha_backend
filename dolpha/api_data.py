@@ -153,7 +153,10 @@ def _check_htf_pattern(
         if not after_max.empty:
             # 최고점 이후 최저점
             pullback_min_price = after_max["low"].min()
-            pullback_percent = ((max_price - pullback_min_price) / max_price) * 100
+            if max_price == 0:
+                pullback_percent = 0.0
+            else:
+                pullback_percent = ((max_price - pullback_min_price) / max_price) * 100
 
             # 현재 상태 판단
             if pullback_percent > 0:
@@ -2518,7 +2521,7 @@ def get_htf_stocks_api(
     request,
     area: str = "KR",
     min_gain: float = 100.0,
-    max_pullback: float = 25.0,
+    max_pullback: float = 30.0,
     limit: int = 100,
 ):
     """
