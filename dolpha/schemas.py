@@ -24,6 +24,7 @@ class StockDescriptionResponse(Schema):
     count_total: int
     count_created: int
     count_updated: int
+    count_delisted: int  # 상장폐지 종목 삭제 수 추가
     count_failed: int
     failed_records: Optional[List[FailedRecord]] = None
 
@@ -165,8 +166,10 @@ class SuccessResponseIndexOhlcvSchema(Schema):
 # =====================================================================
 # HTF (High Tight Flag) 관련 스키마
 
+
 class HTFStockSchema(Schema):
     """HTF 패턴 종목 스키마"""
+
     code: str
     name: str
     market: Optional[str] = None
@@ -184,6 +187,7 @@ class HTFStockSchema(Schema):
 
 class HTFAnalysisDetailSchema(Schema):
     """HTF 분석 상세 스키마"""
+
     stock_info: Dict[str, Any]
     htf_analysis: Dict[str, Any]
     pattern_data: List[Dict[str, Any]]
@@ -191,6 +195,7 @@ class HTFAnalysisDetailSchema(Schema):
 
 class HTFCalculationResultSchema(Schema):
     """HTF 계산 결과 스키마"""
+
     total: int
     success: int
     failed: int
@@ -200,6 +205,7 @@ class HTFCalculationResultSchema(Schema):
 
 class HTFStocksResponse(Schema):
     """HTF 종목 리스트 응답"""
+
     status: str
     data: List[HTFStockSchema]
     total_count: int
@@ -207,11 +213,13 @@ class HTFStocksResponse(Schema):
 
 class HTFAnalysisResponse(Schema):
     """HTF 분석 상세 응답"""
+
     status: str
     data: HTFAnalysisDetailSchema
 
 
 class HTFCalculationResponse(Schema):
     """HTF 계산 결과 응답"""
+
     status: str
     data: HTFCalculationResultSchema
