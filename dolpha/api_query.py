@@ -49,7 +49,9 @@ def growth_rate(current, previous):
         500: ErrorResponse,
     },
 )
-def find_stock_top_rising(request, date: str = None, format: str = "json"):
+def find_stock_top_rising(
+    request, area: str = "KR", date: str = None, format: str = "json"
+):
     """
     최근 거래일 기준 상승률 TOP 50 종목을 조회합니다.\n
     ㅇ Args\n
@@ -95,10 +97,20 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
                 )
 
             query_date = latest_date_with_data
+        print(query_date)
+
+        if area == "KR":
+            markets = ["KOSPI", "KOSDAQ"]
+        elif area == "US":
+            markets = ["NYSE", "NASDAQ"]
+        else:
+            return 400, ErrorResponse(
+                status="error", message="Invalid area. Use 'KR' or 'US'"
+            )
 
         # 해당 날짜의 상승률 TOP 50 종목 조회 (change 필드 기준 내림차순 정렬)
         ohlcv_queryset = StockOHLCV.objects.filter(
-            date=query_date, change__gt=0  # 상승한 종목만
+            code__market__in=markets, date=query_date, change__gt=0  # 상승한 종목만
         ).order_by("-change")[:50]
 
         # Check if any records exist
@@ -110,6 +122,7 @@ def find_stock_top_rising(request, date: str = None, format: str = "json"):
 
         # 해당 종목들의 분석 데이터 조회
         stock_codes = [ohlcv.code for ohlcv in ohlcv_queryset]
+        print(stock_codes)
         analysis_data = StockAnalysis.objects.filter(
             code__in=stock_codes, date=query_date
         ).select_related("code")
