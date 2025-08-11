@@ -413,8 +413,8 @@ def getAndSave_stock_description(request, stock: str = "KRX-DESC"):
                         should_update = True
 
                     if should_update:
-                        # 실제 객체는 업데이트 시에만 조회
-                        update_obj = Company.objects.get(id=existing_data["id"])
+                        # 실제 객체는 업데이트 시에만 조회 (code가 primary key)
+                        update_obj = Company.objects.get(code=existing_data["code"])
                         for field, value in updates.items():
                             setattr(update_obj, field, value)
                         companies_to_update.append(update_obj)
