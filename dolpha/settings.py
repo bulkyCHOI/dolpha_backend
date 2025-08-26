@@ -237,3 +237,6 @@ SIMPLE_JWT = {
 # Google OAuth 설정
 GOOGLE_OAUTH2_CLIENT_ID = '117169175456-hvvdlf539dva9fp2tmbacs4kphnnv1mf.apps.googleusercontent.com'
 GOOGLE_OAUTH2_CLIENT_SECRET = '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'
+
+# Autobot API 설정
+AUTOBOT_API_URL = 'http://localhost:8080'

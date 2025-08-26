@@ -417,3 +417,54 @@ class TradingResult(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.stock_name} {self.trade_type}"
+
+
+class TradingSummary(models.Model):
+    """매매복기를 위한 종목별 거래 요약 모델"""
+    
+    TRADING_MODES = [
+        ("manual", "Manual"),
+        ("turtle", "Turtle"),
+    ]
+    
+    FINAL_STATUS = [
+        ("CLOSED", "Closed"),
+        ("HOLDING", "Holding"),
+    ]
+    
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="trading_summaries"
+    )
+    stock_code = models.CharField(max_length=10)  # 종목 코드
+    stock_name = models.CharField(max_length=100)  # 종목명
+    first_entry_date = models.DateTimeField(null=True, blank=True)  # 첫 매수일
+    last_exit_date = models.DateTimeField(null=True, blank=True)  # 마지막 매도일
+    total_buy_amount = models.BigIntegerField(default=0)  # 총 매수 금액
+    total_sell_amount = models.BigIntegerField(default=0)  # 총 매도 금액
+    total_profit_loss = models.BigIntegerField(default=0)  # 총 손익
+    profit_loss_percent = models.FloatField(default=0.0)  # 손익률 (%)
+    max_drawdown = models.FloatField(null=True, blank=True)  # 최대 손실률
+    holding_days = models.FloatField(default=0.0)  # 보유 일수
+    entry_count = models.IntegerField(default=0)  # 매수 횟수
+    exit_count = models.IntegerField(default=0)  # 매도 횟수
+    trading_mode = models.CharField(max_length=20, choices=TRADING_MODES)  # 거래 모드
+    win_rate = models.FloatField(default=0.0)  # 승률
+    avg_holding_days = models.FloatField(default=0.0)  # 평균 보유 일수
+    max_profit_percent = models.FloatField(null=True, blank=True)  # 최대 수익률
+    final_status = models.CharField(max_length=10, choices=FINAL_STATUS)  # 최종 상태
+    memo = models.TextField(blank=True)  # 사용자 메모
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = "trading_summary"
+        ordering = ["-updated_at"]
+        unique_together = ["user", "stock_code", "first_entry_date"]
+        indexes = [
+            models.Index(fields=["user", "final_status"]),
+            models.Index(fields=["user", "trading_mode"]),
+            models.Index(fields=["stock_code"]),
+        ]
+    
+    def __str__(self):
+        return f"{self.user.username} - {self.stock_name} ({self.final_status})"
