@@ -125,10 +125,15 @@ DATABASES = {
 }
 
 # 환경별 데이터베이스 설정
-if platform.system() in ['Windows', 'Darwin']:  # Windows 또는 macOS
+import os
+if os.environ.get('DJANGO_DB_HOST'):  # 환경변수로 직접 지정한 경우
     DATABASES['default'].update({
-        'HOST': '218.152.32.218',  # 원격 서버
+        'HOST': os.environ.get('DJANGO_DB_HOST'),
     })
+elif platform.system() in ['Windows', 'Darwin']:  # Windows 또는 macOS
+    # 로컬 MariaDB 사용 (localhost), 원격 서버 사용 시 아래 주석 해제
+    # DATABASES['default'].update({'HOST': '218.152.32.218'})
+    pass  # localhost (기본값) 사용
 else:  # Ubuntu (Docker 환경)
     DATABASES['default'].update({
         'HOST': 'mariadb',  # Docker 컨테이너명

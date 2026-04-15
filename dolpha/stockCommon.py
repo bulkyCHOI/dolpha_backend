@@ -145,7 +145,7 @@ def GetOhlcv2(area, stock_code, limit = 500, adj_ok = "1"):
 
 
     else:
-        df = yfinance.download(stock_code, period='max')
+        df = yfinance.download(stock_code, period='max', timeout=30)
 
     if adj_ok == "1":
             
@@ -211,9 +211,22 @@ def GetStockList(area = "KRX"):
         # 2차 시도: pykrx fallback
         try:
             print("pykrx로 fallback 시도...")
-            
-            # 기본 오늘 날짜
-            today = datetime.now().strftime('%Y%m%d')
+
+            # 최근 영업일 탐색 (공휴일/주말에 0개 반환 방지, 최대 10일 이전까지 시도)
+            today = None
+            for days_back in range(0, 10):
+                candidate = (datetime.now() - timedelta(days=days_back)).strftime('%Y%m%d')
+                try:
+                    test = stock.get_market_ticker_list(candidate, market="KOSPI")
+                    if len(test) > 0:
+                        today = candidate
+                        print(f"pykrx 조회 기준일: {today} ({days_back}일 전)")
+                        break
+                except Exception:
+                    continue
+            if today is None:
+                today = datetime.now().strftime('%Y%m%d')
+                print(f"영업일 탐색 실패, 오늘 날짜 사용: {today}")
             
             # area에 따른 처리
             if area in ["KRX", "KRX-DESC"]:
