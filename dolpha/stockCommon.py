@@ -1,5 +1,4 @@
 import FinanceDataReader as fdr
-import pandas_datareader.data as web
 import yfinance
 
 from datetime import datetime, timedelta
@@ -42,47 +41,59 @@ def GetFromNowDateStr(area = "KRX", type= "NONE" , days=100):
         return next.strftime("%Y-%m-%d")
 
 ############################################################################################################################################################
-#OHLCV 값을 가져옴!!
-def GetOhlcv(area, stock_code, limit = 500, adj_ok = "1"):
+# KIS API 사용 여부 확인 (환경변수 KIS_APP_KEY가 설정된 경우에만 활성화)
+def _kis_available() -> bool:
+    import os
+    return bool(os.environ.get("KIS_REAL_APP_KEY", "") or os.environ.get("KIS_APP_KEY", ""))
 
-    Adjlimit = limit * 1.7 #주말을 감안하면 5개를 가져오려면 적어도 7개는 뒤져야 된다. 1.4가 이상적이지만 혹시 모를 연속 공휴일 있을지 모르므로 1.7로 보정해준다
+
+############################################################################################################################################################
+#OHLCV 값을 가져옴!!
+# 우선순위: KRX → KIS(0) → FinanceDataReader(1) → pykrx(2) → yfinance(3)
+#           US  → FinanceDataReader(1) → yfinance(2)
+#
+# KIS는 KIS_APP_KEY 환경변수가 설정된 경우에만 1순위로 사용됩니다.
+# start_date / end_date: "YYYY-MM-DD" 형식. None 이면 오늘 하루.
+def GetOhlcv(area, stock_code, start_date=None, end_date=None, adj_ok="1"):
+    today = GetNowDateStr(area, "BAR")
+    if start_date is None:
+        start_date = today
+    if end_date is None:
+        end_date = today
+
+    if area == "KRX":
+        sources = []
+        if _kis_available():
+            sources.append(
+                lambda: GetOhlcvKIS(stock_code, start_date, end_date, adj_ok)  # 0순위: KIS API
+            )
+        sources += [
+            lambda: GetOhlcv1(area, stock_code, start_date, end_date, adj_ok),   # 1순위: FinanceDataReader
+            lambda: GetOhlcvPykrx(stock_code, start_date, end_date, adj_ok),      # 2순위: pykrx (KRX 공식)
+            lambda: GetOhlcv2(area, stock_code, start_date, end_date, adj_ok),    # 3순위: yfinance
+        ]
+    else:
+        sources = [
+            lambda: GetOhlcv1(area, stock_code, start_date, end_date, adj_ok),   # 1순위: FinanceDataReader
+            lambda: GetOhlcv2(area, stock_code, start_date, end_date, adj_ok),    # 2순위: yfinance
+        ]
 
     df = None
-
-    except_riase = False
-
-    try:
-
+    for i, source in enumerate(sources):
         try:
-            # print("----First try----")
-            df = GetOhlcv1(area,stock_code,Adjlimit,adj_ok)
-            
+            df = source()
+            if df is not None and len(df) > 0:
+                return df
         except Exception as e:
-            # print("")
-                
-            if df is None or len(df) == 0:
+            print(f"OHLCV source {i+1} failed for {stock_code}: {e}")
 
-                except_riase = False
-                try:
-                    # print("----Second try----")
-                    df = GetOhlcv2(area,stock_code,Adjlimit,adj_ok)
+    return df
 
-                    if df is None or len(df) == 0:
-                        except_riase = True
-                    
-                except Exception as e:
-                    except_riase = True
-                    
-    except Exception as e:
-        print(e)
-        except_riase = True
-    
 
-    if except_riase == True:
-        return df
-    else:
-        # print("---", limit)
-        return df[-limit:]
+# KIS API를 통한 국내 주식 OHLCV 조회 (KIS_APP_KEY 환경변수 필요)
+def GetOhlcvKIS(stock_code, start_date, end_date, adj_ok="1"):
+    from dolpha.kis.ohlcv import GetOhlcvKR
+    return GetOhlcvKR(stock_code, start_date, end_date, adj_ok)
 
 
 
@@ -90,92 +101,82 @@ def GetOhlcv(area, stock_code, limit = 500, adj_ok = "1"):
 
 #한국 주식은 KRX 정보데이터시스템에서 가져온다. 그런데 미국주식 크롤링의 경우 investing.com 에서 가져오는데 안전하게 2초 정도 쉬어야 한다!
 # https://financedata.github.io/posts/finance-data-reader-users-guide.html
-def GetOhlcv1(area, stock_code, limit = 500, adj_ok = "1"):
-    startDate = GetFromNowDateStr(area,"BAR",-limit)
-    endDate = GetNowDateStr(area,"BAR")
-    # df = fdr.DataReader(stock_code, startDate, endDate, exchange=area)
-    df = fdr.DataReader(stock_code, startDate, endDate)
+def GetOhlcv1(area, stock_code, start_date, end_date, adj_ok="1"):
+    df = fdr.DataReader(stock_code, start_date, end_date)
     if adj_ok == "1":
-        
-        try :
-            df = df[[ 'Open', 'High', 'Low', 'Adj Close', 'Volume']]
+        try:
+            df = df[['Open', 'High', 'Low', 'Adj Close', 'Volume']]
         except Exception:
-            df = df[[ 'Open', 'High', 'Low', 'Close', 'Volume']]
-
+            df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
     else:
-        df = df[[ 'Open', 'High', 'Low', 'Close', 'Volume']]
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
 
-
-
-    df.columns = [ 'open', 'high', 'low', 'close', 'volume']
+    df.columns = ['open', 'high', 'low', 'close', 'volume']
     df.index.name = "Date"
 
-    #거래량과 시가,종가,저가,고가의 평균을 곱해 대략의 거래대금을 구해서 value 라는 항목에 넣는다 ㅎ
-    df.insert(5,'value',((df['open'] + df['high'] + df['low'] + df['close'])/4.0) * df['volume'])
+    df.insert(5, 'value', ((df['open'] + df['high'] + df['low'] + df['close']) / 4.0) * df['volume'])
+    df.insert(6, 'change', (df['close'] - df['close'].shift(1)) / df['close'].shift(1))
+    df[['open', 'high', 'low', 'close', 'volume', 'change']] = df[['open', 'high', 'low', 'close', 'volume', 'change']].apply(pd.to_numeric)
 
-
-    df.insert(6,'change',(df['close'] - df['close'].shift(1)) / df['close'].shift(1))
-
-    df[[ 'open', 'high', 'low', 'close', 'volume', 'change']] = df[[ 'open', 'high', 'low', 'close', 'volume', 'change']].apply(pd.to_numeric)
-
-    #미국주식은 2초를 쉬어주자! 안그러면 24시간 정지당할 수 있다!
     if area == "US":
         time.sleep(2.0)
     else:
         time.sleep(0.2)
 
-
-
     df.index = pd.to_datetime(df.index).strftime('%Y-%m-%d')
-
-
     return df
 
 
 
 
-#https://blog.naver.com/zacra/222986007794
-def GetOhlcv2(area, stock_code, limit = 500, adj_ok = "1"):
-
-    df = None
-
-    if area == "KRX":
-
-        df = web.DataReader(stock_code, "naver", GetFromNowDateStr(area,"BAR",-limit),GetNowDateStr(area,"BAR"))
-
-
-    else:
-        df = yfinance.download(stock_code, period='max', timeout=30)
+# yfinance 폴백 (KRX/US 공통)
+# yfinance의 end는 exclusive이므로 하루 더해서 전달
+def GetOhlcv2(area, stock_code, start_date, end_date, adj_ok="1"):
+    end_exclusive = (pd.to_datetime(end_date) + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+    df = yfinance.download(stock_code, start=start_date, end=end_exclusive, timeout=30)
 
     if adj_ok == "1":
-            
-        try :
-            df = df[[ 'Open', 'High', 'Low', 'Adj Close', 'Volume']]
+        try:
+            df = df[['Open', 'High', 'Low', 'Adj Close', 'Volume']]
         except Exception:
-            df = df[[ 'Open', 'High', 'Low', 'Close', 'Volume']]
-
+            df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
     else:
-        df = df[[ 'Open', 'High', 'Low', 'Close', 'Volume']]
+        df = df[['Open', 'High', 'Low', 'Close', 'Volume']]
 
-    
-    df.columns = [ 'open', 'high', 'low', 'close', 'volume']
-    df = df.astype({'open':float,'high':float,'low':float,'close':float,'volume':float})
+    df.columns = ['open', 'high', 'low', 'close', 'volume']
+    df = df.astype({'open': float, 'high': float, 'low': float, 'close': float, 'volume': float})
     df.index.name = "Date"
 
-
-    #거래량과 시가,종가,저가,고가의 평균을 곱해 대략의 거래대금을 구해서 value 라는 항목에 넣는다 ㅎ
-    df.insert(5,'value',((df['open'] + df['high'] + df['low'] + df['close'])/4.0) * df['volume'])
-    df.insert(6,'change',(df['close'] - df['close'].shift(1)) / df['close'].shift(1))
-
-    df[[ 'open', 'high', 'low', 'close', 'volume', 'change']] = df[[ 'open', 'high', 'low', 'close', 'volume', 'change']].apply(pd.to_numeric)
-
+    df.insert(5, 'value', ((df['open'] + df['high'] + df['low'] + df['close']) / 4.0) * df['volume'])
+    df.insert(6, 'change', (df['close'] - df['close'].shift(1)) / df['close'].shift(1))
+    df[['open', 'high', 'low', 'close', 'volume', 'change']] = df[['open', 'high', 'low', 'close', 'volume', 'change']].apply(pd.to_numeric)
 
     df.index = pd.to_datetime(df.index).strftime('%Y-%m-%d')
-
     time.sleep(0.2)
-        
+    return df
 
 
+# pykrx 기반 OHLCV (KRX 공식 데이터, GetOhlcv1 실패 시 2순위 폴백)
+# pykrx는 YYYYMMDD 형식을 사용
+def GetOhlcvPykrx(stock_code, start_date, end_date, adj_ok="1"):
+    start_yyyymmdd = start_date.replace('-', '')
+    end_yyyymmdd   = end_date.replace('-', '')
+
+    df = stock.get_market_ohlcv(start_yyyymmdd, end_yyyymmdd, stock_code)
+
+    if df is None or len(df) == 0:
+        return df
+
+    df = df[['시가', '고가', '저가', '종가', '거래량', '거래대금']]
+    df.columns = ['open', 'high', 'low', 'close', 'volume', 'value']
+    df.index.name = "Date"
+    df = df.astype({'open': float, 'high': float, 'low': float, 'close': float, 'volume': float, 'value': float})
+
+    df.insert(6, 'change', (df['close'] - df['close'].shift(1)) / df['close'].shift(1))
+    df[['open', 'high', 'low', 'close', 'volume', 'change']] = df[['open', 'high', 'low', 'close', 'volume', 'change']].apply(pd.to_numeric)
+
+    df.index = pd.to_datetime(df.index).strftime('%Y-%m-%d')
+    time.sleep(0.2)
     return df
 
 def GetStockList(area = "KRX"):

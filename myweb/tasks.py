@@ -1,3 +1,5 @@
+import os
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from django_apscheduler.jobstores import DjangoJobStore, register_events
 from django.utils import timezone
@@ -10,9 +12,9 @@ from dolpha.api_data import (
     getAndSave_stock_description,
     getAndSave_stock_data,
     calculate_stock_analysis,
-    getAndSave_stock_dartData,
     getAndSave_index_data,
 )
+from dolpha.dart_parallel import run_parallel
 import sys
 import traceback  # 누락된 import 추가
 
@@ -91,17 +93,61 @@ def my_cron_task_calculate_stock_analysis():
 
 
 def my_cron_task_getAndSave_stock_dartData():
-    execute_api_task(
-        getAndSave_stock_dartData,
-        "getAndSave_stock_dartData",
-        "/getAndSave_stock_dartData",
-    )
+    try:
+        result = run_parallel(workers=10)
+        print(f"DART 수집 완료: {result['message']}")
+    except Exception as e:
+        traceback.print_exc()
+        print(f"DART 수집 오류: {e}")
 
 
 def my_cron_task_getAndSave_index_list():
     execute_api_task(
         getAndSave_index_list, "getAndSave_index_list", "/getAndSave_index_list"
     )
+
+
+# ──────────────────────────────────────────────────────────────
+# 자동매매 주기적 실행 (KIS_APP_KEY 환경변수가 있을 때만 활성화)
+# ──────────────────────────────────────────────────────────────
+
+def run_all_trading_cycles():
+    """
+    활성 TradingConfig가 있는 모든 유저의 트레이딩 사이클을 실행합니다.
+    KIS_APP_KEY 환경변수가 없으면 즉시 반환합니다.
+    """
+    if not os.environ.get("KIS_APP_KEY", ""):
+        return  # KIS 미설정 → 자동매매 비활성
+
+    try:
+        from myweb.models import TradingConfig
+        from dolpha.trading_engine import TradingEngine
+
+        # 활성 설정이 있는 유저 집합 추출 (distinct)
+        users = (
+            TradingConfig.objects
+            .filter(is_active=True)
+            .select_related("user")
+            .values_list("user", flat=True)
+            .distinct()
+        )
+
+        if not users:
+            return
+
+        from myweb.models import User
+        for user_id in users:
+            try:
+                user = User.objects.get(pk=user_id)
+                engine = TradingEngine(user=user)
+                engine.run_trading_cycle()
+            except Exception as e:
+                traceback.print_exc()
+                print(f"[자동매매] 유저 {user_id} 사이클 오류: {e}")
+
+    except Exception as e:
+        traceback.print_exc()
+        print(f"[자동매매] run_all_trading_cycles 오류: {e}")
 
 
 def my_cron_task_getAndSave_index_data():
@@ -236,6 +282,20 @@ def start():
     # 모든 작업을 스케줄에 추가
     for func, hour, minute, job_id, description in job_schedule:
         add_cron_job(func, hour, minute, job_id, description)
+
+    # ── 자동매매 사이클 (KIS 설정 시에만 등록) ──────────────────────
+    if os.environ.get("KIS_APP_KEY", ""):
+        scheduler.add_job(
+            run_all_trading_cycles,
+            trigger="cron",
+            day_of_week="mon-fri",   # 평일만
+            hour="9-15",             # 9시~15시 (is_market_open이 15:30 이후 차단)
+            minute="*",              # 매 분
+            id="auto_trading_cycle",
+            max_instances=1,         # 중복 실행 방지
+            replace_existing=True,
+        )
+        print("Scheduled job 'auto_trading_cycle' at every minute (09:00-15:59 Mon-Fri)")
 
     register_events(scheduler)  # Django 관리자 인터페이스와 통합
     scheduler.start()

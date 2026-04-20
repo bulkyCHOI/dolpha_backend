@@ -16,6 +16,7 @@ from .api_query import query_router
 from .api_trading_status import trading_status_router
 from .api_search import search_router
 from .api_trading_reviews import trading_reviews_router
+from .api_data_status import data_status_router
 
 api = NinjaAPI()
 
@@ -51,6 +52,9 @@ api.add_router("/search", search_router)
 # 매매복기 API 라우터 추가
 
 api.add_router("/", trading_reviews_router)
+
+# 데이터 수집 현황 API 라우터 추가
+api.add_router("/data-status", data_status_router)
 
 
 # 주가 조회 API 엔드포인트

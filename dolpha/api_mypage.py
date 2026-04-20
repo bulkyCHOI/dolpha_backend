@@ -48,10 +48,6 @@ class UserProfileView(View):
                     'date_joined': request.user.date_joined.isoformat() if request.user.date_joined else None,
                 },
                 'profile': {
-                    'autobot_server_ip': profile.autobot_server_ip,
-                    'autobot_server_port': profile.autobot_server_port,
-                    'server_status': profile.server_status,
-                    'last_connection': profile.last_connection.isoformat() if profile.last_connection else None,
                     'created_at': profile.created_at.isoformat() if profile.created_at else None,
                     'updated_at': profile.updated_at.isoformat() if profile.updated_at else None,
                 }
@@ -83,13 +79,6 @@ class UserProfileView(View):
             
             # 프로필 정보 업데이트
             profile, created = UserProfile.objects.get_or_create(user=request.user)
-            profile_data = data.get('profile', {})
-            
-            if 'autobot_server_ip' in profile_data:
-                profile.autobot_server_ip = profile_data['autobot_server_ip']
-            if 'autobot_server_port' in profile_data:
-                profile.autobot_server_port = profile_data['autobot_server_port']
-            
             profile.save()
             
             return JsonResponse({
@@ -107,128 +96,35 @@ class UserProfileView(View):
 @method_decorator(csrf_exempt, name='dispatch')
 @method_decorator(login_required, name='dispatch')
 class ServerSettingsView(View):
-    """autobot 서버 설정 관리 API"""
-    
+    """서버 설정 API (autobot 통합 후 — 하위 호환 stub)"""
+
     def get(self, request):
-        """서버 설정 조회"""
-        try:
-            profile, created = UserProfile.objects.get_or_create(user=request.user)
-            
-            data = {
-                'autobot_server_ip': profile.autobot_server_ip,
-                'autobot_server_port': profile.autobot_server_port,
-                'server_status': profile.server_status,
-                'last_connection': profile.last_connection.isoformat() if profile.last_connection else None,
-            }
-            
-            return JsonResponse({
-                'success': True,
-                'data': data
-            })
-            
-        except Exception as e:
-            return JsonResponse({
-                'success': False,
-                'error': str(e)
-            }, status=500)
-    
+        """서버 설정 조회 (autobot 통합 완료, 별도 서버 정보 없음)"""
+        return JsonResponse({
+            'success': True,
+            'data': {},
+            'message': 'autobot이 백엔드에 통합되어 별도 서버 설정이 필요하지 않습니다.'
+        })
+
     def post(self, request):
-        """서버 설정 저장/업데이트"""
-        try:
-            data = json.loads(request.body)
-            
-            ip = data.get('autobot_server_ip')
-            port = data.get('autobot_server_port', 8080)
-            
-            if not ip:
-                return JsonResponse({
-                    'success': False,
-                    'error': 'IP 주소는 필수입니다.'
-                }, status=400)
-            
-            profile, created = UserProfile.objects.get_or_create(user=request.user)
-            profile.autobot_server_ip = ip
-            profile.autobot_server_port = port
-            profile.save()
-            
-            return JsonResponse({
-                'success': True,
-                'message': '서버 설정이 저장되었습니다.'
-            })
-            
-        except Exception as e:
-            return JsonResponse({
-                'success': False,
-                'error': str(e)
-            }, status=500)
+        """서버 설정 저장 (더 이상 사용하지 않음)"""
+        return JsonResponse({
+            'success': True,
+            'message': 'autobot이 백엔드에 통합되어 별도 서버 설정이 필요하지 않습니다.'
+        })
 
 
 @method_decorator(csrf_exempt, name='dispatch')
 @method_decorator(login_required, name='dispatch')
 class ServerConnectionTestView(View):
-    """autobot 서버 연결 테스트 API"""
-    
+    """서버 연결 테스트 API (autobot 통합 완료 — stub)"""
+
     def post(self, request):
-        """서버 연결 테스트"""
-        try:
-            data = json.loads(request.body)
-            ip = data.get('ip')
-            port = data.get('port', 8080)
-            
-            if not ip:
-                return JsonResponse({
-                    'success': False,
-                    'error': 'IP 주소는 필수입니다.'
-                }, status=400)
-            
-            # autobot 서버 헬스 체크
-            try:
-                response = requests.get(
-                    f'http://{ip}:{port}/health',
-                    timeout=5
-                )
-                
-                if response.status_code == 200:
-                    # 연결 성공 시 프로필 업데이트
-                    profile, created = UserProfile.objects.get_or_create(user=request.user)
-                    profile.server_status = 'online'
-                    profile.last_connection = timezone.now()
-                    profile.save()
-                    
-                    return JsonResponse({
-                        'success': True,
-                        'message': '서버 연결 성공',
-                        'status': 'connected'
-                    })
-                else:
-                    # 연결 실패
-                    profile, created = UserProfile.objects.get_or_create(user=request.user)
-                    profile.server_status = 'error'
-                    profile.save()
-                    
-                    return JsonResponse({
-                        'success': False,
-                        'error': f'서버 응답 오류: {response.status_code}',
-                        'status': 'failed'
-                    })
-                    
-            except requests.exceptions.RequestException as e:
-                # 네트워크 오류
-                profile, created = UserProfile.objects.get_or_create(user=request.user)
-                profile.server_status = 'offline'
-                profile.save()
-                
-                return JsonResponse({
-                    'success': False,
-                    'error': f'서버 연결 실패: {str(e)}',
-                    'status': 'failed'
-                })
-                
-        except Exception as e:
-            return JsonResponse({
-                'success': False,
-                'error': str(e)
-            }, status=500)
+        return JsonResponse({
+            'success': True,
+            'message': 'autobot이 백엔드에 통합되어 별도 서버 연결 테스트가 필요하지 않습니다.',
+            'status': 'integrated'
+        })
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -254,7 +150,6 @@ class TradingConfigView(View):
                     'pyramiding_count': config.pyramiding_count,
                     'entry_point': config.entry_point,
                     'is_active': config.is_active,
-                    'autobot_config_id': config.autobot_config_id,
                     'created_at': config.created_at.isoformat(),
                     'updated_at': config.updated_at.isoformat(),
                 })
@@ -292,7 +187,6 @@ class TradingConfigView(View):
             ).update(is_active=False)
             
             with transaction.atomic():
-                # Django DB에 저장
                 trading_config = TradingConfig.objects.create(
                     user=request.user,
                     stock_code=data['stock_code'],
@@ -305,20 +199,11 @@ class TradingConfigView(View):
                     entry_point=data.get('entry_point'),
                     is_active=data.get('is_active', True),
                 )
-                
-                # autobot 서버로 설정 전달
-                autobot_config_id = self._send_to_autobot_server(request.user, data)
-                if autobot_config_id:
-                    trading_config.autobot_config_id = autobot_config_id
-                    trading_config.save()
-                
+
                 return JsonResponse({
                     'success': True,
                     'message': '자동매매 설정이 저장되었습니다.',
-                    'data': {
-                        'id': trading_config.id,
-                        'autobot_config_id': autobot_config_id,
-                    }
+                    'data': {'id': trading_config.id}
                 })
                 
         except Exception as e:
@@ -327,51 +212,6 @@ class TradingConfigView(View):
                 'error': str(e)
             }, status=500)
     
-    def _send_to_autobot_server(self, user, config_data):
-        """autobot 서버로 설정 전달"""
-        try:
-            profile = UserProfile.objects.get(user=user)
-            
-            if not profile.autobot_server_ip:
-                print(f"사용자 {user.username}의 autobot 서버 IP가 설정되지 않음")
-                return None
-            
-            # autobot 서버 API 호출
-            autobot_data = {
-                'stock_code': config_data['stock_code'],
-                'stock_name': config_data['stock_name'],
-                'trading_mode': config_data['trading_mode'],
-                'max_loss': config_data.get('max_loss'),
-                'stop_loss': config_data.get('stop_loss'),
-                'take_profit': config_data.get('take_profit'),
-                'pyramiding_count': config_data.get('pyramiding_count', 0),
-                'entry_point': config_data.get('entry_point'),
-                'user_id': user.google_id or str(user.id),  # Google ID 우선, 없으면 User ID
-                'is_active': config_data.get('is_active', True),
-            }
-            
-            response = requests.post(
-                f'http://{profile.autobot_server_ip}:{profile.autobot_server_port}/trading-configs',
-                json=autobot_data,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                autobot_response = response.json()
-                return autobot_response.get('id')
-            else:
-                print(f"autobot 서버 오류: {response.status_code} - {response.text}")
-                return None
-                
-        except UserProfile.DoesNotExist:
-            print(f"사용자 {user.username}의 프로필이 없음")
-            return None
-        except requests.exceptions.RequestException as e:
-            print(f"autobot 서버 연결 실패: {str(e)}")
-            return None
-        except Exception as e:
-            print(f"autobot 서버 전달 중 오류: {str(e)}")
-            return None
 
 
 @method_decorator(csrf_exempt, name='dispatch')

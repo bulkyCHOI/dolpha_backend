@@ -40,6 +40,20 @@ class ErrorResponse(Schema):
     message: str
 
 
+class DailyPipelineStepResult(Schema):
+    status: str          # "ok" | "error" | "skipped"
+    elapsed_sec: int
+    count_saved: Optional[int] = None
+    message: Optional[str] = None
+
+
+class DailyPipelineResponse(Schema):
+    status: str          # "ok" | "partial" | "error"
+    message: str
+    total_elapsed_sec: int
+    steps: Dict[str, Any]
+
+
 class SuccessResponseStockDart(Schema):
     status: str
     data: List[Dict[str, Any]]  # JSON 형태를 표현

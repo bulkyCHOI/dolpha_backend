@@ -268,6 +268,126 @@ def validate_required_data(data, required_fields: list, operation_name: str):
 data_router = Router()
 
 
+# ============================================================================
+# [일간 전체 파이프라인] 수집 → 가공을 순서대로 한번에 실행
+# ============================================================================
+def _run_dart_parallel():
+    from dolpha.dart_parallel import run_parallel
+    return run_parallel(workers=10)
+
+
+@data_router.post(
+    "/run_daily_pipeline",
+    response={200: DailyPipelineResponse, 500: ErrorResponse},
+)
+def run_daily_pipeline(
+    request,
+    start_date: str = None,
+    end_date: str = None,
+    skip_dart: bool = False,
+):
+    """
+    일간 데이터 수집 및 가공 파이프라인을 순서대로 한번에 실행합니다.
+
+    실행 순서:
+      1. 인덱스 목록 수집        (getAndSave_index_list)
+      2. 주식 설명 수집          (getAndSave_stock_description)
+      3. 인덱스 OHLCV 수집      (getAndSave_index_data)
+      4. 주식 OHLCV 수집        (getAndSave_stock_data)
+      5. 주식 기술적 분석 계산   (calculate_stock_analysis)
+      6. DART 재무제표 수집      (getAndSave_stock_dartData) — skip_dart=true 시 건너뜀
+
+    Args:
+        start_date (str): 수집 시작일 "YYYY-MM-DD". None이면 오늘.
+        end_date (str): 수집 종료일 "YYYY-MM-DD". None이면 오늘.
+        skip_dart (bool): DART 수집(약 1시간)을 건너뛸지 여부. 기본값 false.
+
+    Returns:
+        DailyPipelineResponse: 각 단계별 결과 및 소요 시간.
+    """
+    from datetime import date as _date
+    today_str = _date.today().isoformat()
+    if start_date is None:
+        start_date = today_str
+    if end_date is None:
+        end_date = today_str
+
+    pipeline_start = datetime.now()
+    steps: Dict[str, Any] = {}
+
+    pipeline_steps = [
+        ("index_list",        "인덱스 목록 수집",       lambda: getAndSave_index_list(request)),
+        ("stock_description", "주식 설명 수집",         lambda: getAndSave_stock_description(request)),
+        ("index_data",        "인덱스 OHLCV 수집",      lambda: getAndSave_index_data(request, start_date=start_date, end_date=end_date)),
+        ("stock_data",        "주식 OHLCV 수집",        lambda: getAndSave_stock_data(request, area="KR", start_date=start_date, end_date=end_date)),
+        ("stock_analysis",    "주식 기술적 분석 계산",   lambda: calculate_stock_analysis(request, area="KR", start_date=start_date, end_date=end_date)),
+        ("dart_data",         "DART 재무제표 수집",      lambda: _run_dart_parallel()),
+    ]
+
+    for key, label, fn in pipeline_steps:
+        if key == "dart_data" and skip_dart:
+            steps[key] = {"status": "skipped", "label": label, "elapsed_sec": 0}
+            continue
+
+        step_start = datetime.now()
+        try:
+            result = fn()
+
+            # Ninja 함수는 성공 시 dict, 실패 시 (status_code, dict) 튜플을 반환
+            if isinstance(result, tuple):
+                status_code, data = result
+                if status_code == 200:
+                    steps[key] = {
+                        "status": "ok",
+                        "label": label,
+                        "elapsed_sec": int((datetime.now() - step_start).total_seconds()),
+                        "count_saved": data.get("count_saved"),
+                        "message": data.get("message"),
+                    }
+                else:
+                    steps[key] = {
+                        "status": "error",
+                        "label": label,
+                        "elapsed_sec": int((datetime.now() - step_start).total_seconds()),
+                        "message": data.get("message", str(data)),
+                    }
+            else:
+                steps[key] = {
+                    "status": "ok",
+                    "label": label,
+                    "elapsed_sec": int((datetime.now() - step_start).total_seconds()),
+                    "count_saved": result.get("count_saved") if isinstance(result, dict) else None,
+                    "message": result.get("message") if isinstance(result, dict) else None,
+                }
+
+        except Exception as e:
+            steps[key] = {
+                "status": "error",
+                "label": label,
+                "elapsed_sec": int((datetime.now() - step_start).total_seconds()),
+                "message": str(e),
+            }
+            logger.error(f"[run_daily_pipeline] {label} 실패: {e}", exc_info=True)
+
+    total_elapsed = int((datetime.now() - pipeline_start).total_seconds())
+    error_steps = [k for k, v in steps.items() if v["status"] == "error"]
+
+    overall_status = "ok" if not error_steps else "partial"
+    summary = f"일간 파이프라인 완료 ({total_elapsed}초)"
+    if error_steps:
+        summary += f" — 실패 단계: {', '.join(error_steps)}"
+
+    return 200, {
+        "status": overall_status,
+        "message": summary,
+        "total_elapsed_sec": total_elapsed,
+        "steps": steps,
+    }
+
+
+# ============================================================================
+
+
 # 모든 주식의 설명 데이터를 조회하고 Django ORM을 사용해 데이터베이스에 저장합니다.
 @data_router.post(
     "/getAndSave_stock_description",
@@ -473,15 +593,16 @@ def getAndSave_index_list(request):
         IndexListResponse: 처리 결과, 저장된 종목 코드 리스트
     """
     try:
-        # 종목정보 조회
-        df_krx = Common.GetSnapDataReader()
-        print(f"조회된 KRX 인덱스 데이터: {len(df_krx)}개")
+        # KIS 업종코드 정적 목록 조회 (pykrx/FDR 대체)
+        from dolpha.kis.index import GetIndexListKR
+        df_krx = GetIndexListKR()
+        print(f"조회된 KIS 업종 목록: {len(df_krx)}개")
 
         # 입력 데이터 검증
         if df_krx is None or df_krx.empty:
             return 400, {
                 "status": "ERROR",
-                "message": "KRX 데이터를 가져올 수 없습니다.",
+                "message": "KIS 업종 목록을 가져올 수 없습니다.",
             }
 
         # 컬럼명 매핑 및 검증
@@ -563,68 +684,8 @@ def getAndSave_index_list(request):
                 )
                 print(f"인덱스 {len(stockIndex_to_update)}개 업데이트 완료")
 
-            # 인덱스-종목 관계 설정 최적화
-            print("인덱스별 종목 관계 설정 시작...")
-
-            # 모든 인덱스와 회사 데이터를 한 번에 메모리로 로드
-            all_indices = {obj.code: obj for obj in StockIndex.objects.all()}
-            all_companies = {obj.code: obj for obj in Company.objects.all()}
-
-            # 배치로 관계 데이터 수집
-            relationship_data = []  # [(index_obj, [company_objs])]
-
-            for code in tqdm(df_krx["code"], desc="인덱스별 종목 관계 데이터 수집"):
-                try:
-                    # 인덱스에 속한 종목 조회
-                    df_stocks = Common.GetSnapDataReader_IndexCode(code)
-
-                    if df_stocks is None or df_stocks.empty:
-                        continue
-
-                    # 종목 코드 리스트 추출 및 정리
-                    stock_codes = df_stocks["Code"].astype(str).str.strip().tolist()
-
-                    # 인덱스 객체 가져오기
-                    if code in all_indices:
-                        index_obj = all_indices[code]
-
-                        # 유효한 종목만 필터링 (메모리에서 처리)
-                        valid_companies = [
-                            all_companies[stock_code]
-                            for stock_code in stock_codes
-                            if stock_code in all_companies
-                        ]
-
-                        if valid_companies:
-                            relationship_data.append((index_obj, valid_companies))
-
-                except Exception as e:
-                    print(f"인덱스 {code} 데이터 수집 중 오류: {str(e)}")
-                    failed_records.append(
-                        {"code": code, "error": f"관계 데이터 수집 오류: {str(e)}"}
-                    )
-                    continue
-
-            # 관계 설정을 배치로 처리 (DB 액세스 최소화)
-            print(f"관계 설정 시작: {len(relationship_data)}개 인덱스")
-            for index_obj, companies in tqdm(relationship_data, desc="관계 설정 처리"):
-                try:
-                    # 기존 관계를 모두 지우고 새로 설정
-                    index_obj.companies.clear()
-
-                    # 배치 크기를 제한하여 메모리 효율성 확보
-                    batch_size = 1000
-                    for i in range(0, len(companies), batch_size):
-                        batch_companies = companies[i : i + batch_size]
-                        index_obj.companies.add(*batch_companies)
-
-                except Exception as e:
-                    print(f"인덱스 {index_obj.code} 관계 설정 중 오류: {str(e)}")
-                    failed_records.append(
-                        {"code": index_obj.code, "error": f"관계 설정 오류: {str(e)}"}
-                    )
-
-        print("인덱스별 종목 관계 설정 완료")
+            # KIS API는 업종별 종목 목록 조회를 지원하지 않으므로 관계 설정 생략
+            print("KIS 업종 목록 저장 완료 (업종-종목 관계는 설정하지 않음)")
 
         # 응답 구성
         response = {
@@ -652,19 +713,26 @@ def getAndSave_index_list(request):
         500: ErrorResponse,
     },
 )
-def getAndSave_index_data(request, code: str = None, limit: int = 1):
+def getAndSave_index_data(request, code: str = None, start_date: str = None, end_date: str = None):
     """
     Index 코드에 해당하는 OHLCV 데이터를 데이터베이스에 저장합니다.
     코드를 입력하지 않으면, 모든 인덱스의 OHLCV 데이터를 가져옵니다.
 
     Args:
         code (str): 인덱스 코드
-        limit (int): 가져올 데이터의 개수 (기본값: 1)
+        start_date (str): 수집 시작일 "YYYY-MM-DD". None이면 오늘.
+        end_date (str): 수집 종료일 "YYYY-MM-DD". None이면 오늘.
 
     Returns:
         SuccessResponse: 데이터 저장 성공 시 메시지와 저장된 레코드 수
         ErrorResponse: 에러 발생 시 에러 메시지
     """
+    from datetime import date as _date
+    today_str = _date.today().isoformat()
+    if start_date is None:
+        start_date = today_str
+    if end_date is None:
+        end_date = today_str
     indices = []
 
     if code is not None:
@@ -683,13 +751,11 @@ def getAndSave_index_data(request, code: str = None, limit: int = 1):
     if len(indices) == 0:
         return 404, {"error": "No indices found in the database."}
 
-    for stockIndex in tqdm(indices, desc="Processing indices..."):
-        # print(index.code, index.name)
+    from dolpha.kis.index import GetIndexOhlcvKR
 
-        df = Common.GetOhlcv(
-            "KR", f"KRX-INDEX:{stockIndex.code}", limit=limit, adj_ok="1"
-        )
-        # print(df.head())
+    total_saved = 0
+    for stockIndex in tqdm(indices, desc="Processing indices..."):
+        df = GetIndexOhlcvKR(stockIndex.code, start_date=start_date, end_date=end_date)
 
         if df is None or len(df) == 0:
             # return 400, {"error": "No OHLCV data found for the given index code."}
@@ -770,6 +836,7 @@ def getAndSave_index_data(request, code: str = None, limit: int = 1):
                     ).delete()
                     # 새 데이터 삽입
                     IndexOHLCV.objects.bulk_create(index_ohlcv_list)
+                    total_saved += len(index_ohlcv_list)
         except Exception as e:
             traceback.print_exc()
             # return 500, {"error": f"Failed to save index data: {str(e)}"}
@@ -777,9 +844,35 @@ def getAndSave_index_data(request, code: str = None, limit: int = 1):
 
     return {
         "status": "OK",
-        "message": f"Index data {len(indices)} saved successfully.",
-        "count_saved": limit,
+        "message": f"Index OHLCV {total_saved}건 저장 완료 ({len(indices)}개 업종).",
+        "count_saved": total_saved,
     }
+
+
+@data_router.post(
+    "/rebuild_company_indices",
+    response={200: SuccessResponse, 500: ErrorResponse},
+)
+def rebuild_company_indices_endpoint(request):
+    """
+    모든 KOSPI/KOSDAQ 종목의 업종명을 KIS API로 조회하고
+    myweb_company_indices(Company↔StockIndex M2M) 테이블을 재구성합니다.
+    약 2500개 종목 × 0.22초 ≈ 9분 소요.
+    """
+    try:
+        from dolpha.kis.company_index import rebuild_company_indices
+        result = rebuild_company_indices()
+        if result.get("status") != "OK":
+            return 500, {"status": "ERROR", "message": result.get("message", "알 수 없는 오류")}
+        msg = (
+            f"Company-Index 관계 재구성 완료: "
+            f"매핑 {result['mapped']}개 / 전체 {result['total']}개 "
+            f"(스킵 {result['skipped']}개)"
+        )
+        return {"status": "OK", "message": msg, "count_saved": result["mapped"]}
+    except Exception as e:
+        traceback.print_exc()
+        return 500, {"status": "ERROR", "message": f"rebuild_company_indices 실패: {str(e)}"}
 
 
 # 주식 코드에 해당하는 OHLCV 데이터를 데이터베이스에 저장합니다.
@@ -792,7 +885,7 @@ def getAndSave_index_data(request, code: str = None, limit: int = 1):
         500: ErrorResponse,
     },
 )
-def getAndSave_stock_data(request, code: str = None, area: str = "KR", limit: int = 1):
+def getAndSave_stock_data(request, code: str = None, area: str = "KR", start_date: str = None, end_date: str = None):
     """
     주식 코드에 해당하는 OHLCV 데이터를 데이터베이스에 저장합니다.
     코드를 입력하지 않으면, 모든 회사의 OHLCV 데이터를 가져옵니다.
@@ -800,12 +893,20 @@ def getAndSave_stock_data(request, code: str = None, area: str = "KR", limit: in
     Args:
         code (str): 주식 코드
         area (str): 주식 시장 지역 (기본값: "KR" - 한국, "US" - 미국)
-        limit (int): 가져올 데이터의 개수 (기본값: 1)
+        start_date (str): 수집 시작일 "YYYY-MM-DD". None이면 오늘.
+        end_date (str): 수집 종료일 "YYYY-MM-DD". None이면 오늘.
 
     Returns:
         SuccessResponse: 데이터 저장 성공 시 메시지와 저장된 레코드 수
         ErrorResponse: 에러 발생 시 에러 메시지
     """
+    from datetime import date as _date
+    today_str = _date.today().isoformat()
+    if start_date is None:
+        start_date = today_str
+    if end_date is None:
+        end_date = today_str
+
     companies = []
 
     if code is not None:
@@ -838,9 +939,9 @@ def getAndSave_stock_data(request, code: str = None, area: str = "KR", limit: in
         # print(company.code, company.name)
 
         if company.market in ["KOSDAQ", "KONEX", "KOSPI"]:
-            df = Common.GetOhlcv("KR", company.code, limit=limit, adj_ok="1")
+            df = Common.GetOhlcv("KR", company.code, start_date=start_date, end_date=end_date, adj_ok="1")
         elif company.market in ["NASDAQ", "NYSE", "S&P500"]:
-            df = Common.GetOhlcv("US", company.code, limit=limit, adj_ok="1")
+            df = Common.GetOhlcv("US", company.code, start_date=start_date, end_date=end_date, adj_ok="1")
         else:
             return 400, {"error": f"Unsupported market type: {company.market}"}
             continue
@@ -956,7 +1057,7 @@ def getAndSave_stock_data(request, code: str = None, area: str = "KR", limit: in
     return {
         "status": "OK",
         "message": f"Stock data {len(companies)} saved successfully.",
-        "count_saved": limit,
+        "count_saved": len(companies),
     }
 
 
@@ -1879,33 +1980,31 @@ def toggle_change_calculation_method(request, use_new: bool = True):
 
 
 def calculate_stock_analysis(
-    request, area: str = "KR", offset: int = 0, limit: int = 0
+    request,
+    area: str = "KR",
+    offset: int = 0,
+    limit: int = 0,
+    start_date: str = None,
+    end_date: str = None,
 ):
     """
     주식 분석 데이터를 계산하여 StockAnalysis 테이블에 저장합니다.
-    최근 거래일부터 지정된 `limit`만큼의 거래일에 대해 모든 회사의 이동평균, 52주 신고가/신저가, RS 점수,
-    미너비니 트렌드 조건을 계산합니다. 휴일(예: 주말)은 StockOHLCV 데이터가 없으므로 자동으로 제외됩니다.
+
+    날짜 지정 방법 (우선순위 순):
+      1. start_date / end_date (YYYY-MM-DD): 해당 범위의 거래일을 정확히 처리.
+      2. offset / limit (거래일 인덱스): DB 거래일 목록 기준 슬라이싱 (하위 호환).
 
     Args:
         request: Ninja API 요청 객체.
-        area (str): 주식 시장 지역 ("KR" - 한국, "US" - 미국). 기본값: "KR".
-        offset (int, optional): 처리할 데이터의 시작 위치. 기본값: 0.
-        limit (int, optional): 처리할 거래일 수. 0이면 offset 거래일만 처리. 기본값: 0.
-        즉 offset ~ limit 범위의 거래일을 처리합니다.\n
-        0, 0: 오늘 거래일만 처리합니다.\n
-        0, 50: 오늘부터 50일 전까지의 거래일을 처리합니다.\n
-        50, 100: 50일 전부터 150(50+100)일 전까지의 거래일을 처리합니다.\n
+        area (str): "KR" 또는 "US". 기본값: "KR".
+        start_date (str): 처리 시작일 "YYYY-MM-DD". end_date와 함께 사용.
+        end_date (str): 처리 종료일 "YYYY-MM-DD". start_date와 함께 사용.
+        offset (int): start_date 미지정 시 거래일 인덱스 시작 위치. 기본값: 0.
+        limit (int): start_date 미지정 시 처리할 거래일 수. 0이면 1일치. 기본값: 0.
 
     Returns:
-        dict: 처리 결과를 포함하는 응답.
-            - message (str): 처리 결과 메시지.
-            - count_saved (int): 저장된 StockAnalysis 레코드 수.
-            - dates_processed (list): 처리된 날짜 목록 (YYYY-MM-DD 형식).
-        tuple: 에러 발생 시 (HTTP 상태 코드, 에러 메시지 딕셔너리).
-
-    Raises:
-        DatabaseError: 데이터베이스 저장 중 오류 발생 시.
-        Exception: 기타 예상치 못한 오류 발생 시.
+        dict: message, count_saved, dates_processed 포함.
+        tuple: 에러 시 (HTTP 상태 코드, 에러 dict).
     """
 
     # 모든 회사의 데이터를 가져옴
@@ -1929,12 +2028,19 @@ def calculate_stock_analysis(
         "1month": 21,  # 1개월
     }
 
-    # StockOHLCV의 고유 날짜 목록 가져오기 (최근 순, limit 적용)
+    # StockOHLCV의 고유 날짜 목록 가져오기
     date_list = StockOHLCV.objects.values("date").distinct().order_by("-date")
-    if limit > 0:
-        date_list = date_list[offset : offset + limit]  # 최근 limit개의 거래일만 선택
+    if start_date and end_date:
+        # 날짜 범위가 명시된 경우: 정확히 해당 거래일만 처리
+        date_list = date_list.filter(date__gte=start_date, date__lte=end_date)
+    elif start_date:
+        date_list = date_list.filter(date__gte=start_date)
+    elif end_date:
+        date_list = date_list.filter(date__lte=end_date)
+    elif limit > 0:
+        date_list = date_list[offset : offset + limit]
     else:
-        date_list = date_list[offset : offset + 1]  # limit=0이면 최신 날짜만
+        date_list = date_list[offset : offset + 1]
 
     if not date_list:
         print("StockOHLCV 데이터가 없습니다.")
@@ -1964,7 +2070,13 @@ def calculate_stock_analysis(
 
             # 해당 날짜의 종가 가져오기
             latest_ohlcv = ohlcv_data.filter(date=target_date).first()
-            latest_close = latest_ohlcv.close if latest_ohlcv else 0.0
+
+            # 거래정지 / 비정상 데이터 스킵 (high=0 또는 volume=0)
+            if not latest_ohlcv or latest_ohlcv.high == 0 or latest_ohlcv.volume == 0:
+                print(f"{company.code} ({company.name}): {target_date} 거래정지 또는 데이터 없음 → 스킵")
+                continue
+
+            latest_close = latest_ohlcv.close
 
             # 이동평균 계산
             mas = calculate_moving_averages(ohlcv_data, target_date)
@@ -2330,9 +2442,9 @@ def getAndSave_stock_dartData(request, code: str = None):
                                 )
                             )
 
-                        # 벌크 생성 (update_or_create 대신 bulk_create 사용)
+                        # 벌크 생성 (중복 시 무시)
                         StockFinancialStatement.objects.bulk_create(
-                            financial_objects, batch_size=500
+                            financial_objects, batch_size=500, ignore_conflicts=True
                         )
                         print(
                             f"{company.code}: {len(financial_objects)}개 재무 데이터 저장 완료"

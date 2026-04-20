@@ -30,11 +30,11 @@ class IndexOHLCV(models.Model):
         StockIndex, on_delete=models.CASCADE, related_name="index_ohlcv"
     )  # 지수 코드 (StockIndex 모델과 연결)
     date = models.DateField()  # 날짜
-    open = models.IntegerField()  # 시가
-    high = models.IntegerField()  # 고가
-    low = models.IntegerField()  # 저가
-    close = models.IntegerField()  # 종가
-    volume = models.IntegerField()  # 거래량
+    open = models.FloatField(default=0.0)  # 시가
+    high = models.FloatField(default=0.0)  # 고가
+    low = models.FloatField(default=0.0)  # 저가
+    close = models.FloatField(default=0.0)  # 종가
+    volume = models.FloatField(default=0.0)  # 거래량
     change = models.FloatField(default=0.0)  # 전일 대비 변화율
 
     class Meta:
@@ -217,23 +217,8 @@ class User(AbstractUser):
 
 class UserProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="profile")
-    trading_server_ip = models.GenericIPAddressField(
-        null=True, blank=True
-    )  # 기존 필드 (호환성 유지)
-    autobot_server_ip = models.GenericIPAddressField(
-        null=True, blank=True
-    )  # autobot 서버 IP
-    autobot_server_port = models.IntegerField(default=8080)  # autobot 서버 포트
-    server_status = models.CharField(
-        max_length=20,
-        default="offline",
-        choices=[
-            ("online", "온라인"),
-            ("offline", "오프라인"),
-            ("error", "오류"),
-        ],
-    )  # 서버 상태
-    last_connection = models.DateTimeField(null=True, blank=True)  # 마지막 연결 시간
+    # autobot 통합 후 서버 IP/포트/상태 필드 제거 (2026-04-17)
+    # autobot_server_ip, autobot_server_port, server_status, last_connection 삭제됨
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -292,9 +277,7 @@ class TradingConfig(models.Model):
         default=list, blank=True
     )  # 1차, 2차, 3차... 포지션 비율 배열
     is_active = models.BooleanField(default=True)  # 활성화 여부
-    autobot_config_id = models.IntegerField(
-        null=True, blank=True
-    )  # autobot 서버의 설정 ID
+    # autobot_config_id 제거됨 (autobot 통합, 2026-04-17)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -468,3 +451,114 @@ class TradingSummary(models.Model):
     
     def __str__(self):
         return f"{self.user.username} - {self.stock_name} ({self.final_status})"
+
+
+class TradeEntry(models.Model):
+    """
+    KIS API를 통한 실제 매매 체결 기록.
+
+    과거 autobot(FastAPI)이 관리하던 개별 주문 내역을 Django DB로 통합.
+    TradingConfig → 전략 설정, TradingSummary → 종목별 집계와 연결된다.
+    """
+
+    TRADE_TYPES = [
+        ("BUY", "매수"),
+        ("SELL", "매도"),
+    ]
+
+    ORDER_STATUS = [
+        ("SUBMITTED", "주문접수"),
+        ("FILLED", "체결완료"),
+        ("PARTIAL", "부분체결"),
+        ("CANCELLED", "취소"),
+        ("FAILED", "실패"),
+    ]
+
+    ENTRY_TYPES = [
+        ("INITIAL", "최초진입"),
+        ("PYRAMIDING", "피라미딩"),
+        ("EXIT_PARTIAL", "부분청산"),
+        ("EXIT_FULL", "전량청산"),
+        ("STOP_LOSS", "손절"),
+        ("TRAILING_STOP", "트레일링스탑"),
+    ]
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="trade_entries"
+    )
+    trading_config = models.ForeignKey(
+        TradingConfig,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="entries",
+    )
+    trading_summary = models.ForeignKey(
+        TradingSummary,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="entries",
+    )
+
+    stock_code = models.CharField(max_length=10)   # 종목 코드
+    stock_name = models.CharField(max_length=100)  # 종목명
+
+    trade_type = models.CharField(max_length=10, choices=TRADE_TYPES)  # 매수/매도
+    entry_type = models.CharField(
+        max_length=20, choices=ENTRY_TYPES, default="INITIAL"
+    )  # 진입/청산 유형
+
+    # ── 주문 정보 ──────────────────────────────
+    order_no = models.CharField(max_length=20, blank=True)  # KIS 주문번호
+    order_quantity = models.IntegerField(default=0)         # 주문 수량
+    order_price = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0
+    )  # 주문가 (0=시장가)
+
+    # ── 체결 정보 ──────────────────────────────
+    filled_quantity = models.IntegerField(default=0)   # 체결 수량
+    filled_price = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0
+    )  # 평균 체결가
+    filled_amount = models.DecimalField(
+        max_digits=15, decimal_places=2, default=0
+    )  # 체결 금액 (filled_price × filled_quantity)
+
+    # ── 손익 (매도 시) ─────────────────────────
+    profit_loss = models.DecimalField(
+        max_digits=15, decimal_places=2, null=True, blank=True
+    )  # 손익 금액
+    profit_loss_percent = models.FloatField(null=True, blank=True)  # 손익률 (%)
+
+    status = models.CharField(
+        max_length=20, choices=ORDER_STATUS, default="SUBMITTED"
+    )  # 주문 상태
+
+    # ── ATR 기반 매매 보조 정보 ───────────────
+    atr_value = models.FloatField(null=True, blank=True)    # 진입 시 ATR 값
+    stop_price = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )  # 손절가
+
+    note = models.TextField(blank=True)  # 비고/메모
+
+    ordered_at = models.DateTimeField(null=True, blank=True)  # 주문 시각
+    filled_at = models.DateTimeField(null=True, blank=True)   # 체결 시각
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "trade_entry"
+        ordering = ["-ordered_at"]
+        indexes = [
+            models.Index(fields=["user", "stock_code"]),
+            models.Index(fields=["user", "status"]),
+            models.Index(fields=["order_no"]),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.user.username} - {self.stock_name} "
+            f"{self.trade_type} {self.filled_quantity}주 ({self.status})"
+        )

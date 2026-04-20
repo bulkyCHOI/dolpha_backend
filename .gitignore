@@ -50,6 +50,7 @@ docs_cache/
 *.key
 *.pem
 secrets.json
+kis_token*.json
 .env.local
 .env.development.local
 .env.test.local

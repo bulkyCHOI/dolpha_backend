@@ -1,11 +1,8 @@
 """
 마이페이지 관련 API 엔드포인트 (Django Ninja)
 - 사용자 프로필 관리
-- autobot 서버 설정 관리
-- 자동매매 설정 관리
+- 자동매매 설정 관리 (autobot 통합 후 Django DB 단독 관리)
 """
-
-import requests
 from datetime import datetime
 from ninja import Router, Schema
 from ninja.security import django_auth
@@ -60,24 +57,13 @@ class UserProfileSchema(Schema):
     date_joined: Optional[str] = None
 
 class ProfileSchema(Schema):
-    autobot_server_ip: Optional[str] = None
-    autobot_server_port: int = 8080
-    server_status: str = 'offline'
-    last_connection: Optional[str] = None
+    # autobot 서버 관련 필드 제거됨 (autobot 통합, 2026-04-17)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
 class UserProfileResponseSchema(Schema):
     user: UserProfileSchema
     profile: ProfileSchema
-
-class ServerSettingsSchema(Schema):
-    autobot_server_ip: str
-    autobot_server_port: int = 8080
-
-class ServerConnectionTestSchema(Schema):
-    ip: str
-    port: int = 8080
 
 class TradingConfigSchema(Schema):
     stock_code: str
@@ -107,7 +93,6 @@ class TradingConfigResponseSchema(Schema):
     pyramiding_entries: List[str] = []  # 피라미딩 진입시점 배열
     positions: List[float] = []  # 포지션 배열
     is_active: bool = True
-    autobot_config_id: Optional[int] = None
     created_at: str
     updated_at: str
 
@@ -233,10 +218,6 @@ def get_user_profile(request):
                 'date_joined': user.date_joined.isoformat() if user.date_joined else None,
             },
             'profile': {
-                'autobot_server_ip': profile.autobot_server_ip,
-                'autobot_server_port': profile.autobot_server_port,
-                'server_status': profile.server_status,
-                'last_connection': profile.last_connection.isoformat() if profile.last_connection else None,
                 'created_at': profile.created_at.isoformat() if profile.created_at else None,
                 'updated_at': profile.updated_at.isoformat() if profile.updated_at else None,
             }
@@ -250,114 +231,25 @@ def get_user_profile(request):
 
 @mypage_router.get("/server-settings", response=ProfileSchema)
 def get_server_settings(request):
-    """서버 설정 조회 - 실제 DB 연동"""
+    """서버 설정 조회 (autobot 통합 후 프로필 기본 정보만 반환)"""
     try:
         user = get_authenticated_user(request)
-        
         profile, created = UserProfile.objects.get_or_create(user=user)
-        
         return {
-            'autobot_server_ip': profile.autobot_server_ip,
-            'autobot_server_port': profile.autobot_server_port,
-            'server_status': profile.server_status,
-            'last_connection': profile.last_connection.isoformat() if profile.last_connection else None,
             'created_at': profile.created_at.isoformat() if profile.created_at else None,
             'updated_at': profile.updated_at.isoformat() if profile.updated_at else None,
         }
     except Exception as e:
-        return JsonResponse({
-            'success': False,
-            'error': str(e)
-        }, status=500)
-
-
-@mypage_router.post("/server-settings", response=ResponseSchema)
-def save_server_settings(request, data: ServerSettingsSchema):
-    """서버 설정 저장/업데이트 - 실제 DB 연동"""
-    try:
-        if not data.autobot_server_ip:
-            return {
-                'success': False,
-                'error': 'IP 주소는 필수입니다.'
-            }
-        
-        user = get_authenticated_user(request)
-        
-        profile, created = UserProfile.objects.get_or_create(user=user)
-        profile.autobot_server_ip = data.autobot_server_ip
-        profile.autobot_server_port = data.autobot_server_port
-        profile.save()
-        
-        return {
-            'success': True,
-            'message': '서버 설정이 데이터베이스에 저장되었습니다!'
-        }
-    except Exception as e:
-        return {
-            'success': False,
-            'error': str(e)
-        }
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
 @mypage_router.post("/server-connection-test", response=ResponseSchema)
-def test_server_connection(request, data: ServerConnectionTestSchema):
-    """autobot 서버 연결 테스트 - 실제 DB 연동"""
-    try:
-        if not data.ip:
-            return {
-                'success': False,
-                'error': 'IP 주소는 필수입니다.'
-            }
-        
-        user = get_authenticated_user(request)
-        
-        # autobot 서버 헬스 체크
-        try:
-            response = requests.get(
-                f'http://{data.ip}:{data.port}/health',
-                timeout=5
-            )
-            
-            profile, created = UserProfile.objects.get_or_create(user=user)
-            
-            if response.status_code == 200:
-                profile.server_status = 'online'
-                profile.last_connection = timezone.now()
-                profile.save()
-                
-                return {
-                    'success': True,
-                    'message': '서버 연결 성공'
-                }
-            else:
-                profile.server_status = 'error'
-                profile.save()
-                
-                return {
-                    'success': False,
-                    'error': f'서버 응답 오류: {response.status_code}'
-                }
-                
-        except requests.exceptions.RequestException as e:
-            profile, created = UserProfile.objects.get_or_create(user=user)
-            profile.server_status = 'offline'
-            profile.save()
-            
-            return {
-                'success': False,
-                'error': f'서버 연결 실패: {str(e)}'
-            }
-            
-    except ValueError as e:
-        return {
-            'success': False,
-            'error': str(e)
-        }
-    except Exception as e:
-        return {
-            'success': False,
-            'error': str(e)
-        }
+def test_server_connection(request):
+    """autobot 서버 통합 완료 — 별도 서버 연결 테스트 불필요"""
+    return {
+        'success': True,
+        'message': 'autobot이 백엔드에 통합되어 별도 서버 연결이 필요하지 않습니다.'
+    }
 
 
 class TradingConfigSummarySchema(Schema):
@@ -406,11 +298,10 @@ def get_trading_configs(request, strategy_type: str = None):
                 'pyramiding_entries': config.pyramiding_entries,  # Django DB에서 직접 가져옴
                 'positions': config.positions,  # Django DB에서 직접 가져옴
                 'is_active': config.is_active,
-                'autobot_config_id': config.autobot_config_id,
                 'created_at': config.created_at.isoformat(),
                 'updated_at': config.updated_at.isoformat(),
             })
-        
+
         return result
     except Exception as e:
         return JsonResponse({
@@ -421,64 +312,35 @@ def get_trading_configs(request, strategy_type: str = None):
 
 @mypage_router.get("/trading-configs/summary", response=List[TradingConfigSummarySchema])
 def get_trading_configs_summary(request, strategy_type: str = None):
-    """자동매매 설정 개요 목록 조회 (두 단계 로딩의 1차 데이터, strategy_type 필터 지원)"""
+    """자동매매 설정 개요 목록 조회 (Django DB 직접 조회)"""
     try:
         user = get_authenticated_user(request)
-        
-        # autobot 서버 설정 확인
-        try:
-            profile = UserProfile.objects.get(user=user)
-            if not profile.autobot_server_ip:
-                # 서버 설정이 없으면 빈 배열 반환
-                return []
-            server_ip = profile.autobot_server_ip
-            server_port = profile.autobot_server_port
-        except UserProfile.DoesNotExist:
-            # 프로필이 없으면 빈 배열 반환
+        if not user:
             return []
-        
-        try:
-            user_id = user.google_id or f"user_{user.id}"
-            # strategy_type 필터를 쿼리 파라미터로 전달
-            query_params = f"?strategy_type={strategy_type}" if strategy_type else ""
-            response = requests.get(
-                f'http://{server_ip}:{server_port}/trading-configs/{user_id}{query_params}',
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                configs = response.json()
-                
-                # 개요 데이터 추출 (모든 설정 포함, 활성/비활성 구분)
-                summary_data = []
-                for config in configs:
-                    summary_data.append({
-                        'id': config.get('id'),
-                        'stock_code': config.get('stock_code'),
-                        'stock_name': config.get('stock_name'),
-                        'trading_mode': config.get('trading_mode'),
-                        'strategy_type': config.get('strategy_type', 'mtt'),
-                        'stop_loss': config.get('stop_loss'),  # 아코디언 헤더 표시용
-                        'take_profit': config.get('take_profit'),  # 아코디언 헤더 표시용
-                        'pyramiding_count': config.get('pyramiding_count', 0),  # 아코디언 헤더 표시용
-                        'entry_point': config.get('entry_point'),  # 아코디언 헤더 표시용
-                        'is_active': config.get('is_active', True),
-                        'created_at': config.get('created_at'),
-                        'updated_at': config.get('updated_at'),
-                    })
-                
-                return summary_data
-            else:
-                return []
-                
-        except requests.exceptions.RequestException as e:
-            return []
-            
+
+        configs = TradingConfig.objects.filter(user=user)
+        if strategy_type:
+            configs = configs.filter(strategy_type=strategy_type)
+
+        return [
+            {
+                'id': config.id,
+                'stock_code': config.stock_code,
+                'stock_name': config.stock_name,
+                'trading_mode': config.trading_mode,
+                'strategy_type': config.strategy_type,
+                'stop_loss': config.stop_loss,
+                'take_profit': config.take_profit,
+                'pyramiding_count': config.pyramiding_count,
+                'entry_point': config.entry_point,
+                'is_active': config.is_active,
+                'created_at': config.created_at.isoformat(),
+                'updated_at': config.updated_at.isoformat(),
+            }
+            for config in configs
+        ]
     except Exception as e:
-        return JsonResponse({
-            'success': False,
-            'error': str(e)
-        }, status=500)
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
 @mypage_router.post("/trading-configs", response=ResponseSchema)
@@ -489,14 +351,6 @@ def create_or_update_trading_config(request, data: TradingConfigSchema):
         if not user:
             return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
         
-        profile, created = UserProfile.objects.get_or_create(user=user)
-        
-        if not profile.autobot_server_ip:
-            return JsonResponse({
-                'success': False,
-                'error': 'SERVER_SETTINGS_REQUIRED',
-                'message': 'autobot 서버 설정을 먼저 완료해주세요. 마이페이지 > 서버 설정에서 autobot 서버 IP와 포트를 설정한 후 자동매매 설정을 저장할 수 있습니다.'
-            }, status=400)
         
         with transaction.atomic():
             # 기존 설정이 있는지 확인 (stock_code + strategy_type 조합으로 확인)
@@ -541,30 +395,10 @@ def create_or_update_trading_config(request, data: TradingConfigSchema):
                     is_active=data.is_active,
                 )
                 action = "생성"
-            
-            # autobot 서버로 설정 전달 (Django DB가 단일 소스)
-            autobot_config_dict = {
-                'stock_code': trading_config.stock_code,
-                'stock_name': trading_config.stock_name,
-                'trading_mode': trading_config.trading_mode,
-                'strategy_type': trading_config.strategy_type,
-                'max_loss': trading_config.max_loss,
-                'stop_loss': trading_config.stop_loss,
-                'take_profit': trading_config.take_profit,
-                'pyramiding_count': trading_config.pyramiding_count,
-                'entry_point': trading_config.entry_point,
-                'pyramiding_entries': trading_config.pyramiding_entries,
-                'positions': trading_config.positions,
-                'is_active': trading_config.is_active,
-            }
-            autobot_config_id = send_to_user_autobot_server(user, autobot_config_dict)
-            if autobot_config_id:
-                trading_config.autobot_config_id = autobot_config_id
-                trading_config.save()
-            
+
             return {
                 'success': True,
-                'message': f'자동매매 설정이 성공적으로 {action}되었습니다!\n\n✅ Django DB {action} (ID: {trading_config.id})\n✅ autobot 서버 전달 (ID: {autobot_config_id})'
+                'message': f'자동매매 설정이 성공적으로 {action}되었습니다! (DB ID: {trading_config.id})'
             }
             
     except Exception as e:
@@ -605,7 +439,6 @@ def get_trading_config_by_stock(request, stock_code: str, strategy_type: str = '
                 'pyramiding_entries': config.pyramiding_entries,  # Django DB에서 직접 가져옴
                 'positions': config.positions,  # Django DB에서 직접 가져옴
                 'is_active': config.is_active,
-                'autobot_config_id': config.autobot_config_id,
                 'created_at': config.created_at.isoformat(),
                 'updated_at': config.updated_at.isoformat(),
             }
@@ -626,42 +459,22 @@ def get_trading_config_by_stock(request, stock_code: str, strategy_type: str = '
 
 @mypage_router.delete("/trading-configs/stock/{stock_code}", response=ResponseSchema)
 def delete_trading_config_by_stock_code(request, stock_code: str, strategy_type: str = 'mtt'):
-    """자동매매 설정 삭제 - stock_code와 strategy_type을 사용하여 Django DB와 autobot 서버에서 모두 삭제"""
+    """자동매매 설정 삭제 — Django DB에서 삭제 (autobot 통합 후 단일 소스)"""
     try:
         user = get_authenticated_user(request)
         if not user:
             return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
-            
+
         config = TradingConfig.objects.get(
-            stock_code=stock_code, 
+            stock_code=stock_code,
             strategy_type=strategy_type,
             user=user
         )
-        
-        # autobot 서버에서 먼저 삭제 시도
-        autobot_success, autobot_error = delete_from_autobot_server(user, config.stock_code, config.strategy_type)
-        
-        if not autobot_success:
-            # autobot 서버 삭제 실패시 경고 메시지와 함께 진행
-            print(f"⚠️ Autobot 서버 삭제 실패: {autobot_error}")
-            
-            # 심각한 오류(서버 설정 없음, 네트워크 오류 등)인 경우 Django 삭제도 중단
-            if "SERVER_NOT_CONFIGURED" in str(autobot_error):
-                return {
-                    'success': False,
-                    'error': f'Autobot 서버 설정이 필요합니다. 마이페이지에서 서버 설정을 확인해주세요. ({autobot_error})'
-                }
-        
-        # Django DB에서 삭제
         config.delete()
-        
-        success_message = '설정이 삭제되었습니다.'
-        if not autobot_success:
-            success_message += f' (주의: Autobot 서버 동기화 실패 - {autobot_error})'
-        
+
         return {
             'success': True,
-            'message': success_message
+            'message': '설정이 삭제되었습니다.'
         }
     except TradingConfig.DoesNotExist:
         return {
@@ -673,127 +486,6 @@ def delete_trading_config_by_stock_code(request, stock_code: str, strategy_type:
             'success': False,
             'error': str(e)
         }
-
-
-def delete_from_autobot_server(user, stock_code, strategy_type='mtt'):
-    """
-    autobot 서버에서 자동매매 설정 삭제
-    Returns: (success: bool, error_message: str)
-    """
-    try:
-        # 사용자의 프로필에서 autobot 서버 정보 가져오기
-        try:
-            profile = UserProfile.objects.get(user=user)
-        except UserProfile.DoesNotExist:
-            # 프로필이 없으면 서버 설정이 없다는 의미
-            return False, "SERVER_NOT_CONFIGURED: 사용자 프로필이 없습니다"
-        
-        if not profile.autobot_server_ip:
-            # 서버 설정이 없으면 설정 필요
-            return False, "SERVER_NOT_CONFIGURED: Autobot 서버 IP가 설정되지 않았습니다"
-        
-        server_ip = profile.autobot_server_ip
-        server_port = profile.autobot_server_port
-        
-        # autobot 서버에서 설정 삭제 (strategy_type 포함)
-        user_id = user.google_id or f"user_{user.id}"
-        delete_url = f'http://{server_ip}:{server_port}/trading-configs/user/{user_id}/stock/{stock_code}?strategy_type={strategy_type}'
-        
-        print(f"🔄 Autobot 서버 삭제 요청: {delete_url}")
-        
-        try:
-            response = requests.delete(delete_url, timeout=10)
-            
-            if response.status_code == 200:
-                result = response.json()
-                print(f"✅ Autobot 서버 삭제 성공: {result.get('message', 'OK')}")
-                return True, "성공"
-            elif response.status_code == 404:
-                # 서버에 해당 설정이 없음 (이미 삭제되었거나 존재하지 않음)
-                print(f"⚠️ Autobot 서버에 설정 없음 (404): {stock_code}")
-                return True, "서버에 설정이 없음 (정상)"
-            else:
-                error_msg = f"서버 응답 오류 {response.status_code}"
-                try:
-                    error_detail = response.json().get('detail', 'Unknown error')
-                    error_msg += f": {error_detail}"
-                except:
-                    pass
-                print(f"❌ Autobot 서버 삭제 실패: {error_msg}")
-                return False, error_msg
-                
-        except requests.exceptions.Timeout:
-            error_msg = "서버 응답 시간 초과 (10초)"
-            print(f"⏰ Autobot 서버 삭제 타임아웃: {error_msg}")
-            return False, error_msg
-            
-        except requests.exceptions.ConnectionError:
-            error_msg = f"서버 연결 실패 ({server_ip}:{server_port})"
-            print(f"🔌 Autobot 서버 연결 실패: {error_msg}")
-            return False, error_msg
-            
-        except requests.exceptions.RequestException as e:
-            error_msg = f"네트워크 오류: {str(e)}"
-            print(f"🌐 Autobot 서버 네트워크 오류: {error_msg}")
-            return False, error_msg
-            
-    except Exception as e:
-        error_msg = f"예상치 못한 오류: {str(e)}"
-        print(f"💥 Autobot 서버 삭제 중 예외: {error_msg}")
-        return False, error_msg
-
-
-
-
-def send_to_user_autobot_server(user, config_data):
-    """사용자별 autobot 서버로 설정 전달 - 실제 DB 기반"""
-    try:
-        # 사용자의 프로필에서 autobot 서버 정보 가져오기
-        profile = UserProfile.objects.get(user=user)
-        
-        if not profile.autobot_server_ip:
-            # 서버 설정이 없으면 실패 반환
-            return None
-        
-        server_ip = profile.autobot_server_ip
-        server_port = profile.autobot_server_port
-        
-        # autobot 서버 API 호출
-        autobot_data = {
-            'stock_code': config_data['stock_code'],
-            'stock_name': config_data['stock_name'],
-            'trading_mode': config_data['trading_mode'],
-            'strategy_type': config_data.get('strategy_type', 'mtt'),
-            'max_loss': config_data.get('max_loss'),
-            'stop_loss': config_data.get('stop_loss'),
-            'take_profit': config_data.get('take_profit'),
-            'pyramiding_count': config_data.get('pyramiding_count', 0),
-            'entry_point': config_data.get('entry_point'),
-            'pyramiding_entries': config_data.get('pyramiding_entries', []),
-            'positions': config_data.get('positions', []),
-            'user_id': user.google_id or f"user_{user.id}",  # Google ID 우선, 없으면 User ID
-            'is_active': config_data.get('is_active', True),
-        }
-        
-        response = requests.post(
-            f'http://{server_ip}:{server_port}/trading-configs',
-            json=autobot_data,
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            autobot_response = response.json()
-            return autobot_response.get('id')
-        else:
-            return None
-            
-    except UserProfile.DoesNotExist:
-        # 프로필이 없으면 실패 반환
-        return None
-    except requests.exceptions.RequestException as e:
-        return None
-    except Exception as e:
-        return None
 
 
 # 자동매매 기본값 설정 API

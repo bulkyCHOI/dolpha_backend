@@ -1,5 +1,8 @@
 """
 매매복기 API 엔드포인트 (Django Ninja)
+
+autobot 통합 후: TradingSummary 모델에서 직접 조회합니다.
+(이전: autobot FastAPI 서버에 HTTP 프록시 → 현재: Django DB 직접 조회)
 """
 
 from datetime import datetime, date
@@ -12,7 +15,6 @@ from django.core.paginator import Paginator
 
 from myweb.models import TradingSummary
 from .api_mypage_ninja import get_authenticated_user
-from .autobot_service import autobot_service
 
 # 라우터 생성
 trading_reviews_router = Router()
@@ -292,227 +294,27 @@ def get_trading_summary_stats(request):
         }, status=500)
 
 
-# Autobot API 연동 엔드포인트들
-@trading_reviews_router.get("/autobot/trading-summary")
-def get_autobot_trading_summary(request):
-    """
-    Autobot에서 매매복기 데이터를 조회합니다.
-    """
-    try:
-        if not autobot_service.is_available():
-            return JsonResponse({
-                "success": False,
-                "error": "AUTOBOT_UNAVAILABLE",
-                "message": "Autobot 서버에 연결할 수 없습니다."
-            }, status=503)
-        
-        data = autobot_service.get_trading_summary()
-        if data is None:
-            return JsonResponse({
-                "success": False,
-                "error": "DATA_FETCH_ERROR",
-                "message": "Autobot에서 데이터를 가져올 수 없습니다."
-            }, status=502)
-        
-        return JsonResponse({
-            "success": True,
-            "data": data
-        })
-        
-    except Exception as e:
-        return JsonResponse({
-            "success": False,
-            "error": "INTERNAL_ERROR",
-            "message": str(e)
-        }, status=500)
-
-
-@trading_reviews_router.get("/autobot/trading-summary/stats")
-def get_autobot_trading_summary_stats(request):
-    """
-    Autobot에서 매매복기 통계를 조회합니다.
-    """
-    try:
-        if not autobot_service.is_available():
-            return JsonResponse({
-                "success": False,
-                "error": "AUTOBOT_UNAVAILABLE",
-                "message": "Autobot 서버에 연결할 수 없습니다."
-            }, status=503)
-        
-        data = autobot_service.get_trading_summary_stats()
-        if data is None:
-            return JsonResponse({
-                "success": False,
-                "error": "DATA_FETCH_ERROR",
-                "message": "Autobot에서 통계를 가져올 수 없습니다."
-            }, status=502)
-        
-        return JsonResponse({
-            "success": True,
-            "data": data
-        })
-        
-    except Exception as e:
-        return JsonResponse({
-            "success": False,
-            "error": "INTERNAL_ERROR",
-            "message": str(e)
-        }, status=500)
-
-
-@trading_reviews_router.get("/autobot/trading-summary/{stock_code}")
-def get_autobot_trading_summary_by_stock(request, stock_code: str):
-    """
-    Autobot에서 특정 종목의 매매복기 데이터를 조회합니다.
-    """
-    try:
-        if not autobot_service.is_available():
-            return JsonResponse({
-                "success": False,
-                "error": "AUTOBOT_UNAVAILABLE",
-                "message": "Autobot 서버에 연결할 수 없습니다."
-            }, status=503)
-        
-        data = autobot_service.get_trading_summary_by_stock(stock_code)
-        if data is None:
-            return JsonResponse({
-                "success": False,
-                "error": "DATA_NOT_FOUND",
-                "message": f"종목 '{stock_code}'의 데이터를 찾을 수 없습니다."
-            }, status=404)
-        
-        return JsonResponse({
-            "success": True,
-            "data": data
-        })
-        
-    except Exception as e:
-        return JsonResponse({
-            "success": False,
-            "error": "INTERNAL_ERROR",
-            "message": str(e)
-        }, status=500)
-
-
-@trading_reviews_router.get("/autobot/status")
-def get_autobot_status(request):
-    """
-    Autobot 서버 상태를 확인합니다.
-    """
-    try:
-        is_available = autobot_service.is_available()
-        file_status = autobot_service.check_trading_summary_file()
-        
-        return JsonResponse({
-            "success": True,
-            "data": {
-                "is_available": is_available,
-                "api_url": autobot_service.base_url,
-                "file_status": file_status
-            }
-        })
-        
-    except Exception as e:
-        return JsonResponse({
-            "success": False,
-            "error": "INTERNAL_ERROR",
-            "message": str(e)
-        }, status=500)
-
-
-@trading_reviews_router.post("/autobot/trading-summary")
-def autobot_create_trading_summary(request, payload: TradingSummaryIn):
-    """
-    Autobot에서 매매복기 데이터를 저장합니다. (인증 불필요)
-    """
-    try:
-        # 기본 사용자 ID (Autobot용)
-        from django.contrib.auth import get_user_model
-        User = get_user_model()
-        
-        # 기본 사용자 가져오기 또는 생성
-        user, created = User.objects.get_or_create(
-            id=1,
-            defaults={
-                "username": "autobot",
-                "email": "autobot@dolpha.com"
-            }
-        )
-        
-        # 중복 체크 (같은 사용자, 종목코드, 첫 매수일)
-        existing = TradingSummary.objects.filter(
-            user=user,
-            stock_code=payload.stock_code,
-            first_entry_date=payload.first_entry_date
-        ).first()
-        
-        if existing:
-            # 기존 데이터 업데이트
-            for attr, value in payload.dict().items():
-                if hasattr(existing, attr):
-                    setattr(existing, attr, value)
-            existing.save()
-            return JsonResponse({
-                "success": True,
-                "message": "데이터 업데이트 완료",
-                "data": {
-                    "id": existing.id,
-                    "stock_code": existing.stock_code,
-                    "stock_name": existing.stock_name
-                }
-            })
-        else:
-            # 새 데이터 생성
-            trading_summary = TradingSummary.objects.create(
-                user=user,
-                **payload.dict()
-            )
-            return JsonResponse({
-                "success": True,
-                "message": "데이터 생성 완료",
-                "data": {
-                    "id": trading_summary.id,
-                    "stock_code": trading_summary.stock_code,
-                    "stock_name": trading_summary.stock_name
-                }
-            })
-        
-    except Exception as e:
-        return JsonResponse({
-            "success": False,
-            "error": "INTERNAL_ERROR",
-            "message": str(e)
-        }, status=500)
-
-
+# ──────────────────────────────────────────────────────────────
+# 통합 매매복기 데이터 엔드포인트 (인증 기반, autobot 통합 버전)
+# ──────────────────────────────────────────────────────────────
 
 @trading_reviews_router.get("/autobot/trading-summary-data")
-def get_autobot_trading_summary_data(request):
+def get_trading_summary_data(request):
     """
-    Autobot 사용자의 매매복기 데이터를 조회합니다. (인증 불필요)
+    현재 로그인 유저의 매매복기 데이터를 조회합니다.
+
+    autobot 통합 후: user id=1 고정 조회 → 인증된 유저 조회로 변경.
+    프론트엔드 URL 호환성 유지를 위해 경로명은 그대로 유지합니다.
     """
     try:
-        # 기본 사용자 ID (Autobot용)
-        from django.contrib.auth import get_user_model
-        User = get_user_model()
-        
-        # 기본 사용자 가져오기
-        user = User.objects.filter(id=1).first()
+        user = get_authenticated_user(request)
         if not user:
-            return JsonResponse({
-                "success": False,
-                "error": "USER_NOT_FOUND",
-                "message": "Autobot 사용자를 찾을 수 없습니다."
-            }, status=404)
-        
-        # 매매복기 데이터 조회
+            return JsonResponse({"error": "인증이 필요합니다."}, status=401)
+
         queryset = TradingSummary.objects.filter(user=user).order_by("-updated_at")
-        
-        # 데이터 직렬화
-        data = []
-        for ts in queryset:
-            data.append({
+
+        data = [
+            {
                 "id": ts.id,
                 "stock_code": ts.stock_code,
                 "stock_name": ts.stock_name,
@@ -533,19 +335,13 @@ def get_autobot_trading_summary_data(request):
                 "final_status": ts.final_status,
                 "memo": ts.memo,
                 "created_at": ts.created_at.isoformat(),
-                "updated_at": ts.updated_at.isoformat()
-            })
-        
-        return JsonResponse({
-            "success": True,
-            "data": data,
-            "total": len(data)
-        })
-        
+                "updated_at": ts.updated_at.isoformat(),
+            }
+            for ts in queryset
+        ]
+
+        return JsonResponse({"success": True, "data": data, "total": len(data)})
+
     except Exception as e:
-        return JsonResponse({
-            "success": False,
-            "error": "INTERNAL_ERROR",
-            "message": str(e)
-        }, status=500)
+        return JsonResponse({"success": False, "error": "INTERNAL_ERROR", "message": str(e)}, status=500)
 

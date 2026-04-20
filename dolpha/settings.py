@@ -243,5 +243,21 @@ SIMPLE_JWT = {
 GOOGLE_OAUTH2_CLIENT_ID = '117169175456-hvvdlf539dva9fp2tmbacs4kphnnv1mf.apps.googleusercontent.com'
 GOOGLE_OAUTH2_CLIENT_SECRET = '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'
 
-# Autobot API 설정
-AUTOBOT_API_URL = 'http://localhost:8080'
+# ─────────────────────────────────────────────────────────────
+# KIS(한국투자증권) API 설정
+# KIS API 설정 — 실계좌 / 모의계좌 듀얼 지원
+# 아래 환경변수를 서버 환경(.env 또는 docker-compose)에 설정하세요.
+# ─────────────────────────────────────────────────────────────
+# 실계좌 (시세 조회 + 실거래)
+KIS_REAL_APP_KEY    = os.environ.get('KIS_REAL_APP_KEY', '')
+KIS_REAL_APP_SECRET = os.environ.get('KIS_REAL_APP_SECRET', '')
+KIS_REAL_ACCOUNT_NO = os.environ.get('KIS_REAL_ACCOUNT_NO', '')
+# 모의계좌 (자동매매 테스트)
+KIS_VIRTUAL_APP_KEY    = os.environ.get('KIS_VIRTUAL_APP_KEY', '')
+KIS_VIRTUAL_APP_SECRET = os.environ.get('KIS_VIRTUAL_APP_SECRET', '')
+KIS_VIRTUAL_ACCOUNT_NO = os.environ.get('KIS_VIRTUAL_ACCOUNT_NO', '')
+# 공통
+KIS_ACCOUNT_CD = os.environ.get('KIS_ACCOUNT_CD', '01')
+KIS_MODE       = os.environ.get('KIS_MODE', 'REAL')   # REAL | VIRTUAL (자동매매 모드)
+# KIS_APP_KEY가 설정된 경우 실계좌로 간주 (하위 호환)
+KIS_APP_KEY    = KIS_REAL_APP_KEY or os.environ.get('KIS_APP_KEY', '')
