@@ -20,7 +20,7 @@ from datetime import datetime
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 _REAL_URL    = "https://openapi.koreainvestment.com:9443"
-_VIRTUAL_URL = "https://openapivts.koreainvestment.com:9443"
+_VIRTUAL_URL = "https://openapivts.koreainvestment.com:29443"
 
 
 # ─────────────────────────────────────────────────────────────
