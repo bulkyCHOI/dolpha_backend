@@ -354,3 +354,54 @@ def MakeSellMarketOrder(stock_code: str, qty: int) -> dict | None:
         err = res.json().get("msg_cd", res.text)
         print(f"[KIS] MakeSellMarketOrder({stock_code}, {qty}) 실패: {err}")
         return None
+
+
+# ─────────────────────────────────────────────────────────────
+# 해외주식 시장가 매수
+# ─────────────────────────────────────────────────────────────
+
+def MakeBuyMarketOrderUS(stock_code: str, qty: int, exchange: str = "NASD") -> dict | None:
+    """
+    해외주식 시장가 매수 주문.
+
+    Args:
+        stock_code: 티커 (예: "NVDA")
+        qty: 수량
+        exchange: 거래소 코드 NASD(나스닥) / NYSE / AMEX / SEHK(홍콩) 등
+    Returns:
+        성공: {"OrderNum": str, "OrderTime": str}
+        실패: None
+    """
+    _sleep()
+
+    tr_id = "VTTT1002U" if _is_virtual() else "TTTT1002U"
+    path  = "uapi/overseas-stock/v1/trading/order"
+    url   = f"{get_url_base()}/{path}"
+
+    # 거래소별 시장가 주문 코드: NASD/NYSE/AMEX="32", 그 외="00"(지정가 0원)
+    mkt_dvsn = "32" if exchange in ("NASD", "NYSE", "AMEX") else "00"
+
+    data = {
+        **_account_params(),
+        "OVRS_EXCG_CD":    exchange,
+        "PDNO":            stock_code,
+        "ORD_DVSN":        mkt_dvsn,
+        "ORD_QTY":         str(int(qty)),
+        "OVRS_ORD_UNPR":   "0",
+        "ORD_SVR_DVSN_CD": "0",
+    }
+
+    headers = GetHeaders(tr_id=tr_id, custtype="P")
+    headers["hashkey"] = GetHashKey(data)
+
+    res = requests.post(url, headers=headers, data=json.dumps(data), timeout=10, verify=False)
+    if res.status_code == 200 and res.json().get("rt_cd") == "0":
+        order = res.json().get("output", {})
+        return {
+            "OrderNum":  order.get("ODNO", ""),
+            "OrderTime": order.get("ORD_TMD", ""),
+        }
+    else:
+        d = res.json()
+        print(f"[KIS] MakeBuyMarketOrderUS({stock_code}) 실패: {d.get('msg_cd')} — {d.get('msg1', res.text[:200])}")
+        return None
