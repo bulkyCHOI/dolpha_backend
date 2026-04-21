@@ -203,6 +203,7 @@ def start():
             id=job_id,
             max_instances=1,
             replace_existing=True,
+            misfire_grace_time=3600,  # 서버 재시작 시 1시간 이내 missed job 즉시 실행
         )
         print(f"Scheduled job '{job_id}' at {hour:02d}:{minute:02d} - {description}")
 
