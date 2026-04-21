@@ -1,4 +1,7 @@
 import os
+import sys
+import traceback
+from datetime import datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from django_apscheduler.jobstores import DjangoJobStore, register_events
@@ -15,8 +18,19 @@ from dolpha.api_data import (
     getAndSave_index_data,
 )
 from dolpha.dart_parallel import run_parallel
-import sys
-import traceback  # 누락된 import 추가
+
+SCHEDULER_LOG = "/tmp/scheduler.log"
+
+
+def _slog(msg: str):
+    """스케줄러 전용 로그 파일에 타임스탬프와 함께 기록 + stdout 출력"""
+    line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    try:
+        with open(SCHEDULER_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 # 스케줄링할 작업 정의
 # def my_scheduled_task():
@@ -32,42 +46,31 @@ def execute_api_task(api_function, api_name, endpoint_url):
         api_name: API 이름 (로깅용)
         endpoint_url: 엔드포인트 URL
     """
-    print(f"[Cron task] {api_name} executed at {timezone.now()}!")
+    _slog(f"[데이터수집] {api_name} 시작")
     try:
-        # Request 객체 생성
         request_factory = RequestFactory()
         request = request_factory.post(endpoint_url)
-
-        # API 뷰 호출
         response = api_function(request)
 
-        # 응답 처리
         if isinstance(response, tuple):
-            # Ninja API는 (status_code, data) 튜플을 반환할 수 있음
             status_code, data = response
             if status_code == 200 and data.get("status") == "OK":
-                print(f"[Cron task] {api_name} successfully completed.")
+                _slog(f"[데이터수집] {api_name} 완료")
             else:
-                print(
-                    f"[Cron task] Failed to execute {api_name}: Status {status_code}, Data: {data}"
-                )
+                _slog(f"[데이터수집] {api_name} 실패: Status {status_code}, Data: {data}")
         elif hasattr(response, "status_code"):
-            # HttpResponse 객체인 경우
             if response.status_code == 200:
-                print(f"[Cron task] {api_name} successfully completed.")
+                _slog(f"[데이터수집] {api_name} 완료")
             else:
-                print(
-                    f"[Cron task] Failed to execute {api_name}: Status {response.status_code}"
-                )
+                _slog(f"[데이터수집] {api_name} 실패: Status {response.status_code}")
         elif isinstance(response, dict) and response.get("status") == "OK":
-            # 딕셔너리 응답인 경우
-            print(f"[Cron task] {api_name} successfully completed.")
+            _slog(f"[데이터수집] {api_name} 완료")
         else:
-            print(f"[Cron task] {api_name} completed with response: {response}")
+            _slog(f"[데이터수집] {api_name} 완료 (응답: {response})")
 
     except Exception as e:
-        traceback.print_exc()  # 에러 추적 정보 출력
-        print(f"[Cron task] Error in {api_name}: {str(e)}")
+        _slog(f"[데이터수집] {api_name} 오류: {str(e)}")
+        traceback.print_exc()
 
 
 def my_cron_task_getAndSave_stock_description():
@@ -99,12 +102,13 @@ def my_cron_task_calculate_stock_analysis():
 
 
 def my_cron_task_getAndSave_stock_dartData():
+    _slog("[데이터수집] DART 재무제표 수집 시작")
     try:
         result = run_parallel(workers=10)
-        print(f"DART 수집 완료: {result['message']}")
+        _slog(f"[데이터수집] DART 재무제표 수집 완료: {result['message']}")
     except Exception as e:
+        _slog(f"[데이터수집] DART 재무제표 수집 오류: {e}")
         traceback.print_exc()
-        print(f"DART 수집 오류: {e}")
 
 
 def my_cron_task_getAndSave_index_list():
@@ -131,7 +135,6 @@ def run_all_trading_cycles():
         from myweb.models import TradingConfig
         from dolpha.trading_engine import TradingEngine
 
-        # 활성 설정이 있는 유저 집합 추출 (distinct)
         users = (
             TradingConfig.objects
             .filter(is_active=True)
@@ -143,19 +146,21 @@ def run_all_trading_cycles():
         if not users:
             return
 
+        _slog(f"[자동매매] 사이클 시작 (활성 유저 {len(users)}명)")
         from myweb.models import User
         for user_id in users:
             try:
                 user = User.objects.get(pk=user_id)
                 engine = TradingEngine(user=user)
                 engine.run_trading_cycle()
+                _slog(f"[자동매매] 유저 {user.email} 사이클 완료")
             except Exception as e:
+                _slog(f"[자동매매] 유저 {user_id} 사이클 오류: {e}")
                 traceback.print_exc()
-                print(f"[자동매매] 유저 {user_id} 사이클 오류: {e}")
 
     except Exception as e:
+        _slog(f"[자동매매] run_all_trading_cycles 오류: {e}")
         traceback.print_exc()
-        print(f"[자동매매] run_all_trading_cycles 오류: {e}")
 
 
 def my_cron_task_getAndSave_index_data():

@@ -307,11 +307,12 @@ def get_logs(request, source: str = "dart", lines: int = 200):
     source: dart | server
     """
     log_files = {
-        "daily":    "/tmp/daily_pipeline.log",
-        "dart":     "/tmp/dart_collect.log",
-        "ohlcv":    "/tmp/ohlcv_collect.log",
-        "index":    "/tmp/index_collect.log",
-        "analysis": "/tmp/analysis_collect.log",
+        "daily":     "/tmp/daily_pipeline.log",
+        "dart":      "/tmp/dart_collect.log",
+        "ohlcv":     "/tmp/ohlcv_collect.log",
+        "index":     "/tmp/index_collect.log",
+        "analysis":  "/tmp/analysis_collect.log",
+        "scheduler": "/tmp/scheduler.log",
         "server": os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "server.log"
