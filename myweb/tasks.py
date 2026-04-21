@@ -90,6 +90,12 @@ def my_cron_task_calculate_stock_analysis():
         "calculate_stock_analysis",
         "/calculate_stock_analysis",
     )
+    # 분석 완료 후 MTT 캐시 무효화
+    try:
+        from dolpha.api_query import invalidate_mtt_cache
+        invalidate_mtt_cache()
+    except Exception:
+        pass
 
 
 def my_cron_task_getAndSave_stock_dartData():

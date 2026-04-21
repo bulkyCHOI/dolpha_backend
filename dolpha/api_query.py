@@ -3,6 +3,7 @@ import traceback
 from datetime import datetime
 from io import BytesIO
 from typing import Dict
+import threading
 
 # third-party
 import numpy as np
@@ -32,6 +33,44 @@ from myweb.models import (
 
 # 데이터 조회 관련 API 라우터
 query_router = Router()
+
+# ────────────────────────────────────────────
+# MTT 결과 인메모리 캐시 (분석은 하루 1-2회만 실행되므로 당일 유지)
+# ────────────────────────────────────────────
+_mtt_cache_lock = threading.Lock()
+_mtt_cache: Dict = {}        # key: date_str → results list
+_latest_date_cache: Dict = {} # "latest_date" → date object
+
+
+def _get_latest_date_cached():
+    """latest("date") 결과를 캐시에서 가져옴 (없으면 DB 조회 후 저장)."""
+    with _mtt_cache_lock:
+        if "latest_date" in _latest_date_cache:
+            return _latest_date_cache["latest_date"]
+    # 캐시 없으면 DB 조회
+    latest = StockAnalysis.objects.latest("date").date
+    with _mtt_cache_lock:
+        _latest_date_cache["latest_date"] = latest
+    return latest
+
+
+def _get_mtt_cache(date_str: str):
+    """캐시에서 결과를 가져옴. 없으면 None 반환."""
+    with _mtt_cache_lock:
+        return _mtt_cache.get(date_str)
+
+
+def _set_mtt_cache(date_str: str, results):
+    """결과를 캐시에 저장."""
+    with _mtt_cache_lock:
+        _mtt_cache[date_str] = results
+
+
+def invalidate_mtt_cache():
+    """분석 재실행 후 캐시를 무효화할 때 호출."""
+    with _mtt_cache_lock:
+        _mtt_cache.clear()
+        _latest_date_cache.clear()
 
 
 def growth_rate(current, previous):
@@ -419,8 +458,16 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                     status="error", message="Invalid date format. Use YYYY-MM-DD"
                 )
         else:
-            # If no date is provided, use the latest date from StockAnalysis
-            query_date = StockAnalysis.objects.latest("date").date
+            # latest date 도 캐싱 (매 요청마다 전체 테이블 스캔 방지)
+            query_date = _get_latest_date_cached()
+
+        date_str = str(query_date)
+
+        # JSON 응답은 캐시 우선 (분석은 하루 1-2회만 실행되므로 당일 캐시 유지)
+        if format.lower() == "json":
+            cached = _get_mtt_cache(date_str)
+            if cached is not None:
+                return 200, SuccessResponseStockAnalysis(status="OK", data=cached)
 
         # Build query
         queryset = StockAnalysis.objects.filter(is_minervini_trend=True).order_by(
@@ -436,44 +483,59 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 message="No stocks found matching Minervini Trend Template",
             )
 
-        # Combine with Company data using select_related
+        # select_related로 Company 조인 후 평가 (단일 쿼리)
+        analyses = list(queryset.select_related("code"))
+        company_codes = [a.code_id for a in analyses]
+
+        # 재무 데이터 벌크 조회 (N+1 → 1 쿼리)
+        finance_qs = (
+            StockFinancialStatement.objects.filter(
+                code_id__in=company_codes,
+                account_name__in=["매출액", "영업이익"],
+            )
+            .order_by("code_id", "account_name", "-year", "-quarter")
+            .values("code_id", "account_name", "amount")
+        )
+        finance_dict: Dict = {}
+        for item in finance_qs:
+            cid = item["code_id"]
+            acct = item["account_name"]
+            finance_dict.setdefault(cid, {}).setdefault(acct, []).append(item["amount"])
+
+        # MTT 연속 유지일 벌크 계산 (N+1 → 1 쿼리)
+        # query_date 이전의 모든 분석 데이터를 한 번에 가져와 Python에서 계산
+        hist_qs = (
+            StockAnalysis.objects.filter(
+                code_id__in=company_codes,
+                date__lte=query_date,
+            )
+            .order_by("code_id", "-date")
+            .values("code_id", "is_minervini_trend")
+        )
+        mtt_duration_dict: Dict = {cid: 0 for cid in company_codes}
+        current_code = None
+        counting = True
+        for hist in hist_qs:
+            cid = hist["code_id"]
+            if cid != current_code:
+                current_code = cid
+                counting = True
+            if counting:
+                if hist["is_minervini_trend"]:
+                    mtt_duration_dict[cid] += 1
+                else:
+                    counting = False
+
         results = []
-        for analysis in queryset.select_related("code"):
-            finance = StockFinancialStatement.objects.filter(
-                code=analysis.code
-            ).order_by("-year", "-quarter")
-            매출 = (
-                finance.filter(account_name="매출액")
-                .values_list("amount", flat=True)
-                .distinct()
-            )
-            영업이익 = (
-                finance.filter(account_name="영업이익")
-                .values_list("amount", flat=True)
-                .distinct()
-            )
+        for analysis in analyses:
+            cid = analysis.code_id
+            매출 = finance_dict.get(cid, {}).get("매출액", [])
+            영업이익 = finance_dict.get(cid, {}).get("영업이익", [])
             매출증가율 = growth_rate(매출[0], 매출[1]) if len(매출) > 1 else 0.0
             영업이익증가율 = (
                 growth_rate(영업이익[0], 영업이익[1]) if len(영업이익) > 1 else 0.0
             )
-
-            # Calculate MTT duration days
-            mtt_duration_days = 0
-            # Get historical analysis data for this stock in descending date order
-            historical_analysis = (
-                StockAnalysis.objects.filter(
-                    code=analysis.code, date__lte=analysis.date
-                )
-                .order_by("-date")
-                .values("date", "is_minervini_trend")
-            )
-
-            # Count consecutive days with is_minervini_trend=True from most recent
-            for hist in historical_analysis:
-                if hist["is_minervini_trend"]:
-                    mtt_duration_days += 1
-                else:
-                    break
+            mtt_duration_days = mtt_duration_dict.get(cid, 0)
 
             combined_data = {
                 # Company fields
@@ -544,7 +606,8 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
             return response
 
         elif format.lower() == "json":
-            # Return JSON response
+            # 캐시 저장 후 응답
+            _set_mtt_cache(date_str, results)
             return 200, SuccessResponseStockAnalysis(status="OK", data=results)
         else:
             return 400, ErrorResponse(

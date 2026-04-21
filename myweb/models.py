@@ -164,6 +164,20 @@ class StockAnalysis(models.Model):
         ]
         # 관리자 패널에서 보기 좋게 정렬
         ordering = ["code", "date"]
+        indexes = [
+            # latest("date") 쿼리 및 날짜별 필터 최적화
+            models.Index(fields=["date"], name="idx_stockanalysis_date"),
+            # MTT 필터 조건 최적화 (is_minervini_trend=True, date=X)
+            models.Index(
+                fields=["date", "is_minervini_trend"],
+                name="idx_stockanalysis_date_mtt",
+            ),
+            # MTT 연속 유지일 히스토리 쿼리 최적화 (code_id, date DESC)
+            models.Index(
+                fields=["code", "-date"],
+                name="idx_sa_code_date_desc",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.code} ({self.date})"
