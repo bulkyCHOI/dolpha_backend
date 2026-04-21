@@ -16,6 +16,7 @@ from dolpha.api_data import (
     getAndSave_stock_data,
     calculate_stock_analysis,
     getAndSave_index_data,
+    getAndSave_shares_outstanding,
 )
 from dolpha.dart_parallel import run_parallel
 
@@ -169,6 +170,14 @@ def my_cron_task_getAndSave_index_data():
     )
 
 
+def my_cron_task_getAndSave_shares_outstanding():
+    execute_api_task(
+        getAndSave_shares_outstanding,
+        "getAndSave_shares_outstanding",
+        "/getAndSave_shares_outstanding",
+    )
+
+
 def start():
     scheduler = BackgroundScheduler(timezone="Asia/Seoul")  # 시간대 설정
     scheduler.add_jobstore(
@@ -295,6 +304,19 @@ def start():
     # 모든 작업을 스케줄에 추가
     for func, hour, minute, job_id, description in job_schedule:
         add_cron_job(func, hour, minute, job_id, description)
+
+    # ── 상장주식수 주간 갱신 (월요일 08:00) ──────────────────────────
+    scheduler.add_job(
+        my_cron_task_getAndSave_shares_outstanding,
+        trigger="cron",
+        day_of_week="mon",
+        hour=8,
+        minute=0,
+        id="shares_outstanding_weekly",
+        max_instances=1,
+        replace_existing=True,
+    )
+    print("Scheduled job 'shares_outstanding_weekly' at Monday 08:00 - 상장주식수 갱신 (약 8분)")
 
     # ── 자동매매 사이클 (KIS 설정 시에만 등록) ──────────────────────
     _kis_mode = os.environ.get("KIS_MODE", "VIRTUAL")

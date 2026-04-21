@@ -2116,6 +2116,11 @@ def calculate_stock_analysis(
             htf_pattern_peak_date = htf_result["peak_date"]
             htf_current_status = htf_result["status"]
 
+            # 시가총액 계산: 종가 × 상장주식수
+            market_cap = None
+            if company.shares_outstanding:
+                market_cap = int(latest_close * company.shares_outstanding)
+
             rs_data_all.append(
                 {
                     "date": target_date,
@@ -2178,6 +2183,7 @@ def calculate_stock_analysis(
                     htf_pattern_start_date=htf_pattern_start_date,
                     htf_pattern_peak_date=htf_pattern_peak_date,
                     htf_current_status=htf_current_status,
+                    market_cap=market_cap,
                 )
             )
 
@@ -2769,3 +2775,70 @@ def calculate_htf_patterns_api(
 
     except Exception as e:
         return handle_api_error("HTF 패턴 계산", e)
+
+
+# ─────────────────────────────────────────────────────────────
+# 상장주식수(발행주식수) 수집 - KIS API lstn_stcn 필드 활용
+# ─────────────────────────────────────────────────────────────
+
+@data_router.post(
+    "/getAndSave_shares_outstanding",
+    response={200: SuccessResponse, 500: ErrorResponse},
+)
+def getAndSave_shares_outstanding(request, area: str = "KR"):
+    """
+    KIS API에서 상장주식수(lstn_stcn)를 수집해 Company.shares_outstanding에 저장합니다.
+    시가총액 = 종가 × shares_outstanding 계산에 사용됩니다.
+
+    - KIS FHKST01010100 (inquire-price) 응답의 lstn_stcn 필드 사용
+    - 전체 KR 종목 대상, API 호출 간격 0.15s
+    - 약 3,000종목 기준 약 8분 소요
+    """
+    import requests as _req
+    import time as _time
+    from dolpha.kis.trade import GetHeaders, get_url_base
+
+    companies = list(Company.objects.filter(market__in=["KOSPI", "KOSDAQ"]) if area == "KR"
+                     else Company.objects.all())
+    total = len(companies)
+    updated = 0
+    failed = 0
+
+    path = "uapi/domestic-stock/v1/quotations/inquire-price"
+    url = f"{get_url_base()}/{path}"
+
+    update_list = []
+    for i, company in enumerate(companies):
+        try:
+            headers = GetHeaders(tr_id="FHKST01010100", custtype="P")
+            params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": company.code}
+            res = _req.get(url, headers=headers, params=params, timeout=10, verify=False)
+            if res.status_code == 200 and res.json().get("rt_cd") == "0":
+                lstn_stcn = res.json().get("output", {}).get("lstn_stcn")
+                if lstn_stcn:
+                    company.shares_outstanding = int(lstn_stcn)
+                    update_list.append(company)
+                    updated += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+
+        _time.sleep(0.15)
+
+        if (i + 1) % 100 == 0:
+            # 중간 bulk_update
+            Company.objects.bulk_update(update_list, ["shares_outstanding"])
+            print(f"[shares_outstanding] {i+1}/{total} 처리 중 (updated={updated}, failed={failed})")
+            update_list = []
+
+    # 잔여분 저장
+    if update_list:
+        Company.objects.bulk_update(update_list, ["shares_outstanding"])
+
+    print(f"[shares_outstanding] 완료: total={total}, updated={updated}, failed={failed}")
+    return {
+        "status": "OK",
+        "message": f"상장주식수 수집 완료: {updated}/{total}개 업데이트, {failed}개 실패",
+        "count_saved": updated,
+    }

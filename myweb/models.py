@@ -64,6 +64,7 @@ class Company(models.Model):
     industry = models.CharField(
         max_length=200, null=True, blank=True
     )  # 업종 (예: 'Software & Services')
+    shares_outstanding = models.BigIntegerField(null=True, blank=True)  # 상장주식수
     # listing_date = models.DateField()
     # settle_month = models.CharField(max_length=10)
     # representative = models.CharField(max_length=100)
@@ -135,6 +136,8 @@ class StockAnalysis(models.Model):
     is_minervini_trend = models.BooleanField(
         default=False
     )  # 미너비니 트렌드 템플릿 조건 충족 여부
+
+    market_cap = models.BigIntegerField(null=True, blank=True)  # 시가총액 (원)
 
     # High Tight Flag (HTF) 패턴 관련 필드
     htf_8week_gain = models.FloatField(default=0.0)  # 8주간 최대 상승률 (%)
