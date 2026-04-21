@@ -229,12 +229,24 @@ def get_stock_price(request, stock_code: str):
             pass
         return None
 
+    def try_kis(stock_code):
+        """KIS API 시도 (가장 정확한 실시간 데이터)"""
+        try:
+            from dolpha.kis.trade import GetCurrentPrice
+            price = GetCurrentPrice(stock_code)
+            if price:
+                return {"price": float(price), "change": 0, "source": "kis"}
+        except Exception:
+            pass
+        return None
+
     # 여러 데이터 소스 시도 (우선순위 순)
     data_sources = [
-        try_naver_finance,  # 1순위: 네이버 금융 (가장 정확)
-        try_yahoo_finance,  # 2순위: Yahoo Finance
-        try_alpha_vantage,  # 3순위: Alpha Vantage
-        try_investing_com,  # 4순위: Investing.com
+        try_kis,            # 1순위: KIS API (실시간, 가장 정확)
+        try_naver_finance,  # 2순위: 네이버 금융
+        try_yahoo_finance,  # 3순위: Yahoo Finance
+        try_alpha_vantage,  # 4순위: Alpha Vantage
+        try_investing_com,  # 5순위: Investing.com
     ]
 
     for source_func in data_sources:

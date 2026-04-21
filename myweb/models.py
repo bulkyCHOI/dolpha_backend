@@ -325,7 +325,7 @@ class TradingDefaults(models.Model):
     )  # 현재 선택된 매매 모드
 
     # Manual 모드 설정값들
-    manual_max_loss = models.FloatField(default=8.0)  # Manual 최대손실(%)
+    manual_max_loss = models.FloatField(default=2.0)  # Manual 최대손실(%)
     manual_stop_loss = models.FloatField(default=8.0)  # Manual 손절가(%)
     manual_take_profit = models.FloatField(null=True, blank=True)  # Manual 익절가(%)
     manual_pyramiding_count = models.IntegerField(default=0)  # Manual 피라미딩 횟수
@@ -344,7 +344,7 @@ class TradingDefaults(models.Model):
     )  # Manual 트레일링 스탑 비율(%)
 
     # Turtle(ATR) 모드 설정값들
-    turtle_max_loss = models.FloatField(default=8.0)  # Turtle 최대손실(ATR)
+    turtle_max_loss = models.FloatField(default=2.0)  # Turtle 최대손실(ATR)
     turtle_stop_loss = models.FloatField(default=2.0)  # Turtle 손절가(ATR)
     turtle_take_profit = models.FloatField(null=True, blank=True)  # Turtle 익절가(ATR)
     turtle_pyramiding_count = models.IntegerField(default=3)  # Turtle 피라미딩 횟수

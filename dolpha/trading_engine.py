@@ -284,7 +284,14 @@ class TradingEngine:
                 print(f"[{config.stock_name}] 피라미딩 횟수 초과")
                 return False
 
-            base_price = config.entry_point
+            # 실제 체결가를 기준가로 사용 (entry_point는 트리거 가격이므로 부적합)
+            from myweb.models import TradeEntry as _TradeEntry
+            initial_entry = _TradeEntry.objects.filter(
+                trading_config=config,
+                entry_type="INITIAL",
+                status="FILLED",
+            ).order_by("-filled_at").first()
+            base_price = float(initial_entry.filled_price) if initial_entry else config.entry_point
             if not base_price:
                 return False
 

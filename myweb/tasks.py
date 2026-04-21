@@ -122,7 +122,9 @@ def run_all_trading_cycles():
     활성 TradingConfig가 있는 모든 유저의 트레이딩 사이클을 실행합니다.
     KIS_APP_KEY 환경변수가 없으면 즉시 반환합니다.
     """
-    if not os.environ.get("KIS_APP_KEY", ""):
+    kis_mode = os.environ.get("KIS_MODE", "VIRTUAL")
+    key_var = "KIS_REAL_APP_KEY" if kis_mode == "REAL" else "KIS_VIRTUAL_APP_KEY"
+    if not os.environ.get(key_var, ""):
         return  # KIS 미설정 → 자동매매 비활성
 
     try:
@@ -290,7 +292,9 @@ def start():
         add_cron_job(func, hour, minute, job_id, description)
 
     # ── 자동매매 사이클 (KIS 설정 시에만 등록) ──────────────────────
-    if os.environ.get("KIS_APP_KEY", ""):
+    _kis_mode = os.environ.get("KIS_MODE", "VIRTUAL")
+    _key_var = "KIS_REAL_APP_KEY" if _kis_mode == "REAL" else "KIS_VIRTUAL_APP_KEY"
+    if os.environ.get(_key_var, ""):
         scheduler.add_job(
             run_all_trading_cycles,
             trigger="cron",
