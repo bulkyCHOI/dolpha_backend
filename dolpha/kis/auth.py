@@ -126,6 +126,7 @@ def GetToken(mode: str = None) -> str:
                 if datetime.now() < expires_dt:
                     return token
                 print(f"[KIS] {m} 토큰 만료, 재발급합니다.")
+                return MakeToken(m)
             except ValueError:
                 pass
 

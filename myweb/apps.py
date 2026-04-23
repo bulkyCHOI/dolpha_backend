@@ -6,7 +6,9 @@ class MywebConfig(AppConfig):
     name = 'myweb'
 
     def ready(self):
-        if settings.SCHEDULER_DEFAULT:
+        import os
+        # runserver의 auto-reloader가 띄우는 두 번째 프로세스에서는 실행하지 않음
+        if settings.SCHEDULER_DEFAULT and os.environ.get("RUN_MAIN") == "true":
             from .tasks import start
             start()
             print("Scheduler started")

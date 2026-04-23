@@ -1,5 +1,6 @@
 # standard library
 import json
+import os
 import requests as http_requests
 
 # third-party
@@ -61,7 +62,8 @@ def google_oauth_callback(request):
         )
         flow.redirect_uri = redirect_uri
         
-        # Authorization code를 토큰으로 교환
+        # Authorization code를 토큰으로 교환 (로컬 HTTP 환경 허용)
+        os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")

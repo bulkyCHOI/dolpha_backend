@@ -122,6 +122,11 @@ class TradingDefaultsSchema(Schema):
     turtle_position_size: float = 25.0
     turtle_positions: List[float] = []
     turtle_pyramiding_entries: List[str] = []
+    turtle_use_trailing_stop: bool = True
+    turtle_trailing_stop_percent: float = 2.0
+    # 공통 설정
+    default_entry_trigger: float = 1.0
+    default_exit_trigger: float = 2.0
 
 # 즐겨찾기 관련 스키마
 class FavoriteStockSchema(Schema):
@@ -459,7 +464,7 @@ def get_trading_config_by_stock(request, stock_code: str, strategy_type: str = '
 
 @mypage_router.delete("/trading-configs/stock/{stock_code}", response=ResponseSchema)
 def delete_trading_config_by_stock_code(request, stock_code: str, strategy_type: str = 'mtt'):
-    """자동매매 설정 삭제 — Django DB에서 삭제 (autobot 통합 후 단일 소스)"""
+    """자동매매 설정 삭제 — 보유 중이면 전량 시장가 매도 후 삭제"""
     try:
         user = get_authenticated_user(request)
         if not user:
@@ -470,11 +475,25 @@ def delete_trading_config_by_stock_code(request, stock_code: str, strategy_type:
             strategy_type=strategy_type,
             user=user
         )
+
+        # 보유 중이면 전량 시장가 매도 + 매매복기 기록
+        sell_message = ""
+        try:
+            from dolpha.trading_engine import TradingEngine
+            engine = TradingEngine(user=user)
+            sold = engine.execute_sell_order(config, reason="설정 삭제로 인한 전량 청산")
+            if sold:
+                sell_message = f" ({config.stock_name} 전량 매도 및 매매복기 기록 완료)"
+            else:
+                sell_message = " (보유 수량 없음 또는 매도 실패)"
+        except Exception as sell_err:
+            sell_message = f" (매도 중 오류: {sell_err} — 설정만 삭제됨)"
+
         config.delete()
 
         return {
             'success': True,
-            'message': '설정이 삭제되었습니다.'
+            'message': f'설정이 삭제되었습니다.{sell_message}'
         }
     except TradingConfig.DoesNotExist:
         return {

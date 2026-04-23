@@ -68,21 +68,28 @@ def get_trading_status(request):
             for c in TradingConfig.objects.filter(user=user, is_active=True)
         }
 
-        data = {}
-        for code, entries in entries_by_code.items():
-            total_qty = sum(e.filled_quantity for e in entries)
-            if total_qty <= 0:
-                continue
+        # DB 기록이 있는 종목 + KIS에 실제 보유 중인 종목 모두 포함
+        all_codes = set(entries_by_code.keys()) | set(kis_holdings.keys())
 
-            # KIS 실계좌 avg_price 우선, 없으면 DB 가중평균
-            if code in kis_holdings:
+        data = {}
+        for code in all_codes:
+            entries = entries_by_code.get(code, [])
+            config = configs.get(code)
+
+            # KIS 보유 수량/평단가 우선
+            if code in kis_holdings and kis_holdings[code]["qty"] > 0:
+                total_qty = kis_holdings[code]["qty"]
                 avg_price = kis_holdings[code]["avg_price"]
-            else:
+            elif entries:
+                total_qty = sum(e.filled_quantity for e in entries)
+                if total_qty <= 0:
+                    continue
                 total_amount = sum(float(e.filled_price) * e.filled_quantity for e in entries)
                 avg_price = round(total_amount / total_qty)
+            else:
+                continue
 
             actual_entries = len(entries)
-            config = configs.get(code)
             pyramiding_count = config.pyramiding_count if config else 0
             total_possible_entries = pyramiding_count + 1
 

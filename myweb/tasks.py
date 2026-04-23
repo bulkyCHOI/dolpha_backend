@@ -178,7 +178,75 @@ def my_cron_task_getAndSave_shares_outstanding():
     )
 
 
+PIPELINE_STEPS = [
+    my_cron_task_getAndSave_index_list,
+    my_cron_task_getAndSave_stock_description,
+    my_cron_task_getAndSave_index_data,
+    my_cron_task_getAndSave_stock_data,
+    my_cron_task_calculate_stock_analysis,
+    my_cron_task_getAndSave_stock_dartData,
+]
+
+
+def run_data_collection_pipeline(label: str = ""):
+    """데이터 수집 파이프라인 - 각 단계가 완료된 후 다음 단계를 순차 실행"""
+    tag = f"[파이프라인{':' + label if label else ''}]"
+    _slog(f"{tag} 시작")
+    for step in PIPELINE_STEPS:
+        step()
+    _slog(f"{tag} 완료")
+
+
+def _start_sleep_watchdog(get_scheduler_fn, restart_fn):
+    """
+    macOS 슬립/웨이크 감지 워치독.
+    time.sleep(30) 후 실제 경과 시간이 90초 이상이면 슬립에서 깨어난 것으로 판단하고
+    스케줄러를 재시작한다.
+    """
+    import threading
+    import time
+
+    def _watchdog():
+        while True:
+            t0 = time.time()
+            time.sleep(30)
+            elapsed = time.time() - t0
+            if elapsed > 90:  # 슬립에서 깨어난 경우
+                _slog(f"[워치독] 슬립 감지 (경과 {elapsed:.0f}s) → 스케줄러 재시작")
+                try:
+                    scheduler = get_scheduler_fn()
+                    if scheduler and scheduler.running:
+                        scheduler.shutdown(wait=False)
+                except Exception as e:
+                    _slog(f"[워치독] 기존 스케줄러 종료 실패: {e}")
+                try:
+                    # DB 커넥션 초기화 (슬립 후 stale 커넥션 방지)
+                    from django.db import connections
+                    for conn in connections.all():
+                        conn.close_if_unusable_or_obsolete()
+                    restart_fn()
+                    _slog("[워치독] 스케줄러 재시작 완료")
+                except Exception as e:
+                    _slog(f"[워치독] 스케줄러 재시작 실패: {e}")
+
+    t = threading.Thread(target=_watchdog, daemon=True, name="scheduler-watchdog")
+    t.start()
+
+
+_current_scheduler = None
+_watchdog_started = False
+
+
+def _run_pipeline_1535():
+    run_data_collection_pipeline("15시")
+
+
+def _run_pipeline_2005():
+    run_data_collection_pipeline("20시")
+
+
 def start():
+    global _current_scheduler, _watchdog_started
     scheduler = BackgroundScheduler(timezone="Asia/Seoul")  # 시간대 설정
     scheduler.add_jobstore(
         DjangoJobStore(), "default"
@@ -207,104 +275,20 @@ def start():
         )
         print(f"Scheduled job '{job_id}' at {hour:02d}:{minute:02d} - {description}")
 
-    # 작업 스케줄 정의 (시간 순서대로 정렬)
-    job_schedule = [
-        # (my_cron_task_getAndSave_index_list, 00, 35, "my_cron_task_getAndSave_index_list", "인덱스 리스트 수집 (약 1분)"),
-        # (my_cron_task_getAndSave_stock_description, 00, 40, "my_cron_task_getAndSave_stock_description", "주식 설명 수집 (약 5분)"),
-        # (my_cron_task_getAndSave_index_data, 00, 45, "my_cron_task_getAndSave_index_data", "인덱스 데이터 수집 (약 10분)"),
-        # (my_cron_task_getAndSave_stock_data, 00, 55, "my_cron_task_getAndSave_stock_data", "주식 OHLCV 데이터 수집 (약 20분)"),
-        # (my_cron_task_calculate_stock_analysis, 1, 15, "my_cron_task_calculate_stock_analysis", "주식 기술적 분석 계산 (약 10분)"),
-        # (my_cron_task_getAndSave_stock_dartData, 1, 30, "my_cron_task_getAndSave_stock_dartData", "DART 데이터 수집 (약 1시간 30분)"),
-        (
-            my_cron_task_getAndSave_index_list,
-            15,
-            35,
-            "my_cron_task_getAndSave_index_list_1",
-            "인덱스 리스트 수집 (약 1분) - 17:05",
-        ),
-        (
-            my_cron_task_getAndSave_stock_description,
-            15,
-            40,
-            "my_cron_task_getAndSave_stock_description_1",
-            "주식 설명 수집 (약 5초) - 17:10",
-        ),
-        (
-            my_cron_task_getAndSave_index_data,
-            15,
-            45,
-            "my_cron_task_getAndSave_index_data_1",
-            "인덱스 데이터 수집 (약 1분) - 17:15",
-        ),
-        (
-            my_cron_task_getAndSave_stock_data,
-            15,
-            50,
-            "my_cron_task_getAndSave_stock_data_1",
-            "주식 OHLCV 데이터 수집 (약 20분) - 17:20",
-        ),
-        (
-            my_cron_task_calculate_stock_analysis,
-            16,
-            20,
-            "my_cron_task_calculate_stock_analysis_1",
-            "주식 기술적 분석 계산 (약 2분) - 17:50",
-        ),
-        (
-            my_cron_task_getAndSave_stock_dartData,
-            16,
-            30,
-            "my_cron_task_getAndSave_stock_dartData_1",
-            "DART 데이터 수집 (약 1시간) - 18:00",
-        ),
-        # NXT마켓 때문에 한번 더 수행
-        (
-            my_cron_task_getAndSave_index_list,
-            20,
-            5,
-            "my_cron_task_getAndSave_index_list_2",
-            "인덱스 리스트 수집 (약 1분) - 20:05",
-        ),
-        (
-            my_cron_task_getAndSave_stock_description,
-            20,
-            10,
-            "my_cron_task_getAndSave_stock_description_2",
-            "주식 설명 수집 (약 5초) - 20:10",
-        ),
-        (
-            my_cron_task_getAndSave_index_data,
-            20,
-            15,
-            "my_cron_task_getAndSave_index_data_2",
-            "인덱스 데이터 수집 (약 1분) - 20:15",
-        ),
-        (
-            my_cron_task_getAndSave_stock_data,
-            20,
-            20,
-            "my_cron_task_getAndSave_stock_data_2",
-            "주식 OHLCV 데이터 수집 (약 20분) - 20:20",
-        ),
-        (
-            my_cron_task_calculate_stock_analysis,
-            20,
-            50,
-            "my_cron_task_calculate_stock_analysis_2",
-            "주식 기술적 분석 계산 (약 2분) - 20:50",
-        ),
-        (
-            my_cron_task_getAndSave_stock_dartData,
-            21,
-            00,
-            "my_cron_task_getAndSave_stock_dartData_2",
-            "DART 데이터 수집 (약 1시간) - 21:00",
-        ),
-    ]
-
-    # 모든 작업을 스케줄에 추가
-    for func, hour, minute, job_id, description in job_schedule:
-        add_cron_job(func, hour, minute, job_id, description)
+    # 파이프라인 1: 장 마감 후 (15:35 시작, 순차 실행)
+    add_cron_job(
+        _run_pipeline_1535,
+        15, 35,
+        "pipeline_1535",
+        "데이터 수집 파이프라인 (장 마감 후)",
+    )
+    # 파이프라인 2: NXT마켓 반영 (20:05 시작, 순차 실행)
+    add_cron_job(
+        _run_pipeline_2005,
+        20, 5,
+        "pipeline_2005",
+        "데이터 수집 파이프라인 (NXT마켓 반영)",
+    )
 
     # ── 상장주식수 주간 갱신 (월요일 08:00) ──────────────────────────
     scheduler.add_job(
@@ -337,4 +321,12 @@ def start():
 
     register_events(scheduler)  # Django 관리자 인터페이스와 통합
     scheduler.start()
+    _current_scheduler = scheduler
     print("Scheduler started!", file=sys.stdout)
+
+    if not _watchdog_started:
+        _watchdog_started = True
+        _start_sleep_watchdog(
+            get_scheduler_fn=lambda: _current_scheduler,
+            restart_fn=start,
+        )
