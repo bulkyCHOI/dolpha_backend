@@ -294,6 +294,7 @@ class TradingConfig(models.Model):
         default=list, blank=True
     )  # 1차, 2차, 3차... 포지션 비율 배열
     is_active = models.BooleanField(default=True)  # 활성화 여부
+    trailing_stop_peak_price = models.FloatField(null=True, blank=True)  # 트레일링 스탑 고점 추적
     # autobot_config_id 제거됨 (autobot 통합, 2026-04-17)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -342,6 +343,9 @@ class TradingDefaults(models.Model):
     manual_use_trailing_stop = models.BooleanField(
         default=True
     )  # Manual 트레일링 스탑 사용
+    manual_trailing_stop_trigger = models.FloatField(
+        default=8.0
+    )  # Manual 트레일링 스탑 시작 조건(%)
     manual_trailing_stop_percent = models.FloatField(
         default=8.0
     )  # Manual 트레일링 스탑 비율(%)
@@ -361,6 +365,9 @@ class TradingDefaults(models.Model):
     turtle_use_trailing_stop = models.BooleanField(
         default=True
     )  # Turtle 트레일링 스탑 사용
+    turtle_trailing_stop_trigger = models.FloatField(
+        default=2.0
+    )  # Turtle 트레일링 스탑 시작 조건(ATR)
     turtle_trailing_stop_percent = models.FloatField(
         default=3.0
     )  # Turtle 트레일링 스탑 비율(ATR)

@@ -335,11 +335,49 @@ class TradingEngine:
     # 청산 조건 체크
     # ──────────────────────────────────────────────
 
+    def _get_trailing_stop_settings(self, config: TradingConfig) -> tuple[bool, float, float]:
+        """
+        user의 TradingDefaults에서 트레일링 스탑 설정을 읽어 반환합니다.
+
+        Returns:
+            (use_trailing_stop, trailing_stop_trigger, trailing_stop_value)
+            trailing_stop_trigger: 트레일링 발동 조건 (manual이면 %, atr이면 ATR 배수)
+            trailing_stop_value:   트레일링 스탑 거리 (manual이면 %, atr이면 ATR 배수)
+        """
+        try:
+            defaults = self.user.tradingdefaults
+            if config.trading_mode == "manual":
+                return (
+                    defaults.manual_use_trailing_stop,
+                    defaults.manual_trailing_stop_trigger,
+                    defaults.manual_trailing_stop_percent,
+                )
+            else:
+                return (
+                    defaults.turtle_use_trailing_stop,
+                    defaults.turtle_trailing_stop_trigger,
+                    defaults.turtle_trailing_stop_percent,
+                )
+        except Exception:
+            return False, 0.0, 0.0
+
+    def _update_peak_price(self, config: TradingConfig, current_price: float):
+        """현재가가 기존 고점보다 높으면 peak_price를 갱신합니다."""
+        if config.trailing_stop_peak_price is None or current_price > config.trailing_stop_peak_price:
+            config.trailing_stop_peak_price = current_price
+            config.save(update_fields=["trailing_stop_peak_price"])
+
     def check_exit_conditions(
         self, config: TradingConfig
     ) -> tuple[bool, str | None]:
         """
-        손절 / 익절 조건을 체크합니다.
+        트레일링 스탑 / 고정 손절 / 익절 조건을 체크합니다.
+
+        트레일링 스탑 동작 방식:
+          - Phase 1 (수익 < stop_loss): 고정 손절만 동작
+          - Phase 2 (수익 >= stop_loss): 트레일링 발동
+              stop_line = max(avg_price, peak * (1 - stop_pct))  # manual
+              stop_line = max(avg_price, peak - atr * stop_mul)  # atr
 
         Returns:
             (should_exit, reason_str)
@@ -363,21 +401,70 @@ class TradingEngine:
                 return False, None
 
             current_price = float(KIS.GetCurrentPrice(stock_code))
-            profit_pct    = (current_price - avg_price) / avg_price * 100.0
 
+            # 트레일링 스탑 설정 조회
+            use_trailing_stop, trailing_stop_trigger, trailing_stop_value = self._get_trailing_stop_settings(config)
+
+            if use_trailing_stop:
+                # 고점 업데이트
+                self._update_peak_price(config, current_price)
+                peak = config.trailing_stop_peak_price
+
+                if mode == "manual":
+                    stop_pct = stop_loss / 100.0
+                    trailing_activated = (peak >= avg_price * (1 + trailing_stop_trigger / 100.0))
+                    if trailing_activated:
+                        stop_line = max(avg_price, peak * (1 - trailing_stop_value / 100.0))
+                        print(
+                            f"[{config.stock_name}] 트레일링 스탑 활성:"
+                            f" peak={peak:,.0f}, stop_line={stop_line:,.0f},"
+                            f" current={current_price:,.0f}"
+                        )
+                        if current_price <= stop_line:
+                            return True, "트레일링스탑"
+                    else:
+                        # 트레일링 미발동 → 고정 손절
+                        if current_price <= avg_price * (1 - stop_pct):
+                            return True, "손절"
+
+                else:  # atr
+                    atr = self.get_atr(stock_code)
+                    if atr is not None:
+                        trailing_activated = (peak >= avg_price + atr * trailing_stop_trigger)
+                        if trailing_activated:
+                            stop_line = max(avg_price, peak - atr * trailing_stop_value)
+                            print(
+                                f"[{config.stock_name}] ATR 트레일링 스탑 활성:"
+                                f" peak={peak:,.0f}, ATR={atr:.1f},"
+                                f" stop_line={stop_line:,.0f}, current={current_price:,.0f}"
+                            )
+                            if current_price <= stop_line:
+                                return True, "트레일링스탑"
+                        else:
+                            if current_price <= avg_price - atr * stop_loss:
+                                return True, "ATR 손절"
+
+            else:
+                # 트레일링 스탑 미사용 → 고정 손절만
+                if mode == "manual":
+                    profit_pct = (current_price - avg_price) / avg_price * 100.0
+                    if profit_pct <= -stop_loss:
+                        return True, "손절"
+                else:
+                    atr = self.get_atr(stock_code)
+                    if atr is not None:
+                        if current_price <= avg_price - atr * stop_loss:
+                            return True, "ATR 손절"
+
+            # 익절 체크 (공통)
             if mode == "manual":
-                if profit_pct <= -stop_loss:
-                    return True, "손절"
+                profit_pct = (current_price - avg_price) / avg_price * 100.0
                 if profit_pct >= take_profit:
                     return True, "익절"
-
-            else:  # atr
+            else:
                 atr = self.get_atr(stock_code)
-                if atr is not None:
-                    if current_price <= avg_price - atr * stop_loss:
-                        return True, "ATR 손절"
-                    if current_price >= avg_price + atr * take_profit:
-                        return True, "ATR 익절"
+                if atr is not None and current_price >= avg_price + atr * take_profit:
+                    return True, "ATR 익절"
 
             return False, None
 
@@ -454,6 +541,11 @@ class TradingEngine:
                 filled_at       = tz.now(),
             )
 
+            # 트레일링 스탑 고점 초기화: 신규 진입이면 세팅, 이미 있으면 유지
+            if config.trailing_stop_peak_price is None:
+                config.trailing_stop_peak_price = current_price
+                config.save(update_fields=["trailing_stop_peak_price"])
+
             print(
                 f"[{stock_name}] 매수 완료: {buy_qty}주 @ {current_price:,.0f}원"
                 f" (유형={entry_type}, 주문번호={result['OrderNum2']})"
@@ -496,7 +588,9 @@ class TradingEngine:
                 return False
 
             # 매도 사유 → entry_type 매핑
-            if "손절" in reason:
+            if reason == "트레일링스탑":
+                entry_type = "TRAILING_STOP"
+            elif "손절" in reason:
                 entry_type = "STOP_LOSS"
             elif "익절" in reason:
                 entry_type = "EXIT_FULL"
@@ -548,6 +642,10 @@ class TradingEngine:
 
             # 기존 BUY/FILLED 엔트리 → 포지션 종료 표시 ('CANCELLED' 재사용)
             self._buy_entries(stock_code).update(status="CANCELLED")
+
+            # 트레일링 스탑 고점 리셋
+            config.trailing_stop_peak_price = None
+            config.save(update_fields=["trailing_stop_peak_price"])
 
             # TradingSummary 업데이트
             self._update_trading_summary(config, stock_code, stock_name)

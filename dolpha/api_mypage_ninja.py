@@ -113,6 +113,7 @@ class TradingDefaultsSchema(Schema):
     manual_positions: List[float] = []
     manual_pyramiding_entries: List[str] = []
     manual_use_trailing_stop: bool = True
+    manual_trailing_stop_trigger: float = 8.0
     manual_trailing_stop_percent: float = 8.0
     # Turtle 모드 설정
     turtle_max_loss: float = 8.0
@@ -123,6 +124,7 @@ class TradingDefaultsSchema(Schema):
     turtle_positions: List[float] = []
     turtle_pyramiding_entries: List[str] = []
     turtle_use_trailing_stop: bool = True
+    turtle_trailing_stop_trigger: float = 2.0
     turtle_trailing_stop_percent: float = 2.0
     # 공통 설정
     default_entry_trigger: float = 1.0
@@ -182,6 +184,7 @@ class TradingDefaultsResponseSchema(Schema):
     manual_positions: List[float] = []
     manual_pyramiding_entries: List[str] = []
     manual_use_trailing_stop: bool
+    manual_trailing_stop_trigger: float
     manual_trailing_stop_percent: float
     # Turtle 모드 설정
     turtle_max_loss: float
@@ -192,6 +195,7 @@ class TradingDefaultsResponseSchema(Schema):
     turtle_positions: List[float] = []
     turtle_pyramiding_entries: List[str] = []
     turtle_use_trailing_stop: bool
+    turtle_trailing_stop_trigger: float
     turtle_trailing_stop_percent: float
     # 공통 설정
     default_entry_trigger: float
@@ -531,6 +535,7 @@ def get_trading_defaults(request):
             'manual_positions': defaults.manual_positions,
             'manual_pyramiding_entries': defaults.manual_pyramiding_entries,
             'manual_use_trailing_stop': defaults.manual_use_trailing_stop,
+            'manual_trailing_stop_trigger': defaults.manual_trailing_stop_trigger,
             'manual_trailing_stop_percent': defaults.manual_trailing_stop_percent,
             # Turtle 모드 설정
             'turtle_max_loss': defaults.turtle_max_loss,
@@ -541,6 +546,7 @@ def get_trading_defaults(request):
             'turtle_positions': defaults.turtle_positions,
             'turtle_pyramiding_entries': defaults.turtle_pyramiding_entries,
             'turtle_use_trailing_stop': defaults.turtle_use_trailing_stop,
+            'turtle_trailing_stop_trigger': defaults.turtle_trailing_stop_trigger,
             'turtle_trailing_stop_percent': defaults.turtle_trailing_stop_percent,
             # 공통 설정
             'default_entry_trigger': defaults.default_entry_trigger,
@@ -578,6 +584,7 @@ def save_trading_defaults(request, data: TradingDefaultsSchema):
         defaults.manual_positions = data.manual_positions
         defaults.manual_pyramiding_entries = data.manual_pyramiding_entries
         defaults.manual_use_trailing_stop = data.manual_use_trailing_stop
+        defaults.manual_trailing_stop_trigger = data.manual_trailing_stop_trigger
         defaults.manual_trailing_stop_percent = data.manual_trailing_stop_percent
         # Turtle 모드 설정
         defaults.turtle_max_loss = data.turtle_max_loss
@@ -588,6 +595,7 @@ def save_trading_defaults(request, data: TradingDefaultsSchema):
         defaults.turtle_positions = data.turtle_positions
         defaults.turtle_pyramiding_entries = data.turtle_pyramiding_entries
         defaults.turtle_use_trailing_stop = data.turtle_use_trailing_stop
+        defaults.turtle_trailing_stop_trigger = data.turtle_trailing_stop_trigger
         defaults.turtle_trailing_stop_percent = data.turtle_trailing_stop_percent
         # 공통 설정
         defaults.default_entry_trigger = data.default_entry_trigger
