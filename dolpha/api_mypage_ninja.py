@@ -129,6 +129,29 @@ class TradingDefaultsSchema(Schema):
     # 공통 설정
     default_entry_trigger: float = 1.0
     default_exit_trigger: float = 2.0
+    # 분할 익절 설정
+    staged_exit_type: str = "none"
+    ma_stage1_period: int = 5
+    ma_stage1_sell_pct: float = 30.0
+    ma_stage2_period: int = 20
+    ma_stage2_sell_pct: float = 50.0
+    ma_stage3_period: int = 60
+    ma_stage3_sell_pct: float = 100.0
+    dc_stage1_short: int = 5
+    dc_stage1_long: int = 10
+    dc_stage1_sell_pct: float = 30.0
+    dc_stage2_short: int = 10
+    dc_stage2_long: int = 30
+    dc_stage2_sell_pct: float = 50.0
+    dc_stage3_short: int = 30
+    dc_stage3_long: int = 60
+    dc_stage3_sell_pct: float = 100.0
+    nl_stage1_days: int = 5
+    nl_stage1_sell_pct: float = 30.0
+    nl_stage2_days: int = 10
+    nl_stage2_sell_pct: float = 50.0
+    nl_stage3_days: int = 20
+    nl_stage3_sell_pct: float = 100.0
 
 # 즐겨찾기 관련 스키마
 class FavoriteStockSchema(Schema):
@@ -200,6 +223,29 @@ class TradingDefaultsResponseSchema(Schema):
     # 공통 설정
     default_entry_trigger: float
     default_exit_trigger: float
+    # 분할 익절 설정
+    staged_exit_type: str
+    ma_stage1_period: int
+    ma_stage1_sell_pct: float
+    ma_stage2_period: int
+    ma_stage2_sell_pct: float
+    ma_stage3_period: int
+    ma_stage3_sell_pct: float
+    dc_stage1_short: int
+    dc_stage1_long: int
+    dc_stage1_sell_pct: float
+    dc_stage2_short: int
+    dc_stage2_long: int
+    dc_stage2_sell_pct: float
+    dc_stage3_short: int
+    dc_stage3_long: int
+    dc_stage3_sell_pct: float
+    nl_stage1_days: int
+    nl_stage1_sell_pct: float
+    nl_stage2_days: int
+    nl_stage2_sell_pct: float
+    nl_stage3_days: int
+    nl_stage3_sell_pct: float
     created_at: str
     updated_at: str
 
@@ -551,6 +597,29 @@ def get_trading_defaults(request):
             # 공통 설정
             'default_entry_trigger': defaults.default_entry_trigger,
             'default_exit_trigger': defaults.default_exit_trigger,
+            # 분할 익절 설정
+            'staged_exit_type': defaults.staged_exit_type,
+            'ma_stage1_period': defaults.ma_stage1_period,
+            'ma_stage1_sell_pct': defaults.ma_stage1_sell_pct,
+            'ma_stage2_period': defaults.ma_stage2_period,
+            'ma_stage2_sell_pct': defaults.ma_stage2_sell_pct,
+            'ma_stage3_period': defaults.ma_stage3_period,
+            'ma_stage3_sell_pct': defaults.ma_stage3_sell_pct,
+            'dc_stage1_short': defaults.dc_stage1_short,
+            'dc_stage1_long': defaults.dc_stage1_long,
+            'dc_stage1_sell_pct': defaults.dc_stage1_sell_pct,
+            'dc_stage2_short': defaults.dc_stage2_short,
+            'dc_stage2_long': defaults.dc_stage2_long,
+            'dc_stage2_sell_pct': defaults.dc_stage2_sell_pct,
+            'dc_stage3_short': defaults.dc_stage3_short,
+            'dc_stage3_long': defaults.dc_stage3_long,
+            'dc_stage3_sell_pct': defaults.dc_stage3_sell_pct,
+            'nl_stage1_days': defaults.nl_stage1_days,
+            'nl_stage1_sell_pct': defaults.nl_stage1_sell_pct,
+            'nl_stage2_days': defaults.nl_stage2_days,
+            'nl_stage2_sell_pct': defaults.nl_stage2_sell_pct,
+            'nl_stage3_days': defaults.nl_stage3_days,
+            'nl_stage3_sell_pct': defaults.nl_stage3_sell_pct,
             'created_at': defaults.created_at.isoformat(),
             'updated_at': defaults.updated_at.isoformat(),
         }
@@ -600,7 +669,30 @@ def save_trading_defaults(request, data: TradingDefaultsSchema):
         # 공통 설정
         defaults.default_entry_trigger = data.default_entry_trigger
         defaults.default_exit_trigger = data.default_exit_trigger
-        
+        # 분할 익절 설정
+        defaults.staged_exit_type = data.staged_exit_type
+        defaults.ma_stage1_period = data.ma_stage1_period
+        defaults.ma_stage1_sell_pct = data.ma_stage1_sell_pct
+        defaults.ma_stage2_period = data.ma_stage2_period
+        defaults.ma_stage2_sell_pct = data.ma_stage2_sell_pct
+        defaults.ma_stage3_period = data.ma_stage3_period
+        defaults.ma_stage3_sell_pct = data.ma_stage3_sell_pct
+        defaults.dc_stage1_short = data.dc_stage1_short
+        defaults.dc_stage1_long = data.dc_stage1_long
+        defaults.dc_stage1_sell_pct = data.dc_stage1_sell_pct
+        defaults.dc_stage2_short = data.dc_stage2_short
+        defaults.dc_stage2_long = data.dc_stage2_long
+        defaults.dc_stage2_sell_pct = data.dc_stage2_sell_pct
+        defaults.dc_stage3_short = data.dc_stage3_short
+        defaults.dc_stage3_long = data.dc_stage3_long
+        defaults.dc_stage3_sell_pct = data.dc_stage3_sell_pct
+        defaults.nl_stage1_days = data.nl_stage1_days
+        defaults.nl_stage1_sell_pct = data.nl_stage1_sell_pct
+        defaults.nl_stage2_days = data.nl_stage2_days
+        defaults.nl_stage2_sell_pct = data.nl_stage2_sell_pct
+        defaults.nl_stage3_days = data.nl_stage3_days
+        defaults.nl_stage3_sell_pct = data.nl_stage3_sell_pct
+
         defaults.save()
         
         action = "생성" if created else "업데이트"

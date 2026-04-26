@@ -295,6 +295,7 @@ class TradingConfig(models.Model):
     )  # 1차, 2차, 3차... 포지션 비율 배열
     is_active = models.BooleanField(default=True)  # 활성화 여부
     trailing_stop_peak_price = models.FloatField(null=True, blank=True)  # 트레일링 스탑 고점 추적
+    staged_exit_completed_stages = models.JSONField(default=list, blank=True)  # 완료된 분할 익절 단계 [1, 2]
     # autobot_config_id 제거됨 (autobot 통합, 2026-04-17)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -377,6 +378,44 @@ class TradingDefaults(models.Model):
         default=1.0
     )  # 기본 진입 트리거 (ATR 배수)
     default_exit_trigger = models.FloatField(default=2.0)  # 기본 청산 트리거 (ATR 배수)
+
+    # 분할 익절 설정
+    STAGED_EXIT_TYPES = [
+        ("none", "미사용"),
+        ("ma", "이동평균선"),
+        ("dead_cross", "데드크로스"),
+        ("new_low", "N일 신저가"),
+    ]
+    staged_exit_type = models.CharField(
+        max_length=20, choices=STAGED_EXIT_TYPES, default="none"
+    )  # 분할 익절 방식
+
+    # 이동평균선 분할 익절
+    ma_stage1_period   = models.IntegerField(default=5)    # 1단계 이동평균 기간
+    ma_stage1_sell_pct = models.FloatField(default=30.0)   # 1단계 매도 비율(%)
+    ma_stage2_period   = models.IntegerField(default=20)   # 2단계 이동평균 기간
+    ma_stage2_sell_pct = models.FloatField(default=50.0)   # 2단계 매도 비율(%)
+    ma_stage3_period   = models.IntegerField(default=60)   # 3단계 이동평균 기간
+    ma_stage3_sell_pct = models.FloatField(default=100.0)  # 3단계 매도 비율(%)
+
+    # 데드크로스 분할 익절
+    dc_stage1_short    = models.IntegerField(default=5)    # 1단계 단기 MA
+    dc_stage1_long     = models.IntegerField(default=10)   # 1단계 장기 MA
+    dc_stage1_sell_pct = models.FloatField(default=30.0)   # 1단계 매도 비율(%)
+    dc_stage2_short    = models.IntegerField(default=10)   # 2단계 단기 MA
+    dc_stage2_long     = models.IntegerField(default=30)   # 2단계 장기 MA
+    dc_stage2_sell_pct = models.FloatField(default=50.0)   # 2단계 매도 비율(%)
+    dc_stage3_short    = models.IntegerField(default=30)   # 3단계 단기 MA
+    dc_stage3_long     = models.IntegerField(default=60)   # 3단계 장기 MA
+    dc_stage3_sell_pct = models.FloatField(default=100.0)  # 3단계 매도 비율(%)
+
+    # N일 신저가 분할 익절
+    nl_stage1_days     = models.IntegerField(default=5)    # 1단계 기간
+    nl_stage1_sell_pct = models.FloatField(default=30.0)   # 1단계 매도 비율(%)
+    nl_stage2_days     = models.IntegerField(default=10)   # 2단계 기간
+    nl_stage2_sell_pct = models.FloatField(default=50.0)   # 2단계 매도 비율(%)
+    nl_stage3_days     = models.IntegerField(default=20)   # 3단계 기간
+    nl_stage3_sell_pct = models.FloatField(default=100.0)  # 3단계 매도 비율(%)
 
     # 메타데이터
     created_at = models.DateTimeField(auto_now_add=True)

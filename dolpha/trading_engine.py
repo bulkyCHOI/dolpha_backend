@@ -473,6 +473,152 @@ class TradingEngine:
             return False, None
 
     # ──────────────────────────────────────────────
+    # 분할 익절 조건 체크
+    # ──────────────────────────────────────────────
+
+    def _get_ohlcv_enough(self, stock_code: str, min_periods: int):
+        """분할 익절 지표 계산에 필요한 OHLCV 데이터를 반환합니다."""
+        calendar_days = min_periods * 3
+        end_date   = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=calendar_days)).strftime("%Y-%m-%d")
+        return GetOhlcv("KRX", stock_code, start_date=start_date, end_date=end_date)
+
+    def _mark_staged_exit_stage(self, config: TradingConfig, stage: int):
+        """해당 단계를 완료 목록에 기록합니다."""
+        completed = list(config.staged_exit_completed_stages or [])
+        if stage not in completed:
+            completed.append(stage)
+            config.staged_exit_completed_stages = completed
+            config.save(update_fields=["staged_exit_completed_stages"])
+
+    def _check_ma_staged_exit(
+        self, config: TradingConfig, defaults, completed: list, max_stage: int
+    ) -> tuple[int | None, float, str]:
+        """이동평균선 하회 분할 익절 체크."""
+        stages = [
+            (1, defaults.ma_stage1_period, defaults.ma_stage1_sell_pct),
+            (2, defaults.ma_stage2_period, defaults.ma_stage2_sell_pct),
+            (3, defaults.ma_stage3_period, defaults.ma_stage3_sell_pct),
+        ]
+        max_period = max(p for _, p, _ in stages)
+        df = self._get_ohlcv_enough(config.stock_code, max_period)
+        if df is None or len(df) < max_period:
+            return None, 0.0, ""
+
+        current_price = float(KIS.GetCurrentPrice(config.stock_code))
+
+        for stage_num, period, sell_pct in stages[:max_stage]:
+            if stage_num in completed:
+                continue
+            ma = df["close"].rolling(window=period).mean().iloc[-1]
+            if current_price < ma:
+                reason = f"MA{period}하회_{stage_num}단계"
+                print(f"[{config.stock_name}] {reason}: 현재={current_price:,.0f}, MA={ma:,.0f}")
+                return stage_num, sell_pct, reason
+
+        return None, 0.0, ""
+
+    def _check_dc_staged_exit(
+        self, config: TradingConfig, defaults, completed: list, max_stage: int
+    ) -> tuple[int | None, float, str]:
+        """데드크로스 분할 익절 체크 (단기 MA가 장기 MA 아래로 돌파)."""
+        stages = [
+            (1, defaults.dc_stage1_short, defaults.dc_stage1_long, defaults.dc_stage1_sell_pct),
+            (2, defaults.dc_stage2_short, defaults.dc_stage2_long, defaults.dc_stage2_sell_pct),
+            (3, defaults.dc_stage3_short, defaults.dc_stage3_long, defaults.dc_stage3_sell_pct),
+        ]
+        max_period = max(max(s, l) for _, s, l, _ in stages)
+        df = self._get_ohlcv_enough(config.stock_code, max_period + 2)
+        if df is None or len(df) < max_period + 2:
+            return None, 0.0, ""
+
+        for stage_num, short, long, sell_pct in stages[:max_stage]:
+            if stage_num in completed:
+                continue
+            short_ma = df["close"].rolling(window=short).mean()
+            long_ma  = df["close"].rolling(window=long).mean()
+            # 데드크로스: 전봉 short >= long, 현재봉 short < long
+            if (short_ma.iloc[-2] >= long_ma.iloc[-2]) and (short_ma.iloc[-1] < long_ma.iloc[-1]):
+                reason = f"데드크로스{short}/{long}_{stage_num}단계"
+                print(
+                    f"[{config.stock_name}] {reason}:"
+                    f" MA{short}={short_ma.iloc[-1]:,.0f}, MA{long}={long_ma.iloc[-1]:,.0f}"
+                )
+                return stage_num, sell_pct, reason
+
+        return None, 0.0, ""
+
+    def _check_nl_staged_exit(
+        self, config: TradingConfig, defaults, completed: list, max_stage: int
+    ) -> tuple[int | None, float, str]:
+        """N일 신저가 분할 익절 체크."""
+        stages = [
+            (1, defaults.nl_stage1_days, defaults.nl_stage1_sell_pct),
+            (2, defaults.nl_stage2_days, defaults.nl_stage2_sell_pct),
+            (3, defaults.nl_stage3_days, defaults.nl_stage3_sell_pct),
+        ]
+        max_days = max(d for _, d, _ in stages)
+        df = self._get_ohlcv_enough(config.stock_code, max_days + 1)
+        if df is None or len(df) < max_days + 1:
+            return None, 0.0, ""
+
+        current_price = float(KIS.GetCurrentPrice(config.stock_code))
+
+        for stage_num, days, sell_pct in stages[:max_stage]:
+            if stage_num in completed:
+                continue
+            # 직전 days 거래일의 저가 최솟값 (오늘 제외)
+            past_low = df["low"].iloc[-(days + 1):-1].min()
+            if current_price < past_low:
+                reason = f"{days}일신저가_{stage_num}단계"
+                print(f"[{config.stock_name}] {reason}: 현재={current_price:,.0f}, {days}일저가={past_low:,.0f}")
+                return stage_num, sell_pct, reason
+
+        return None, 0.0, ""
+
+    def check_staged_exit(
+        self, config: TradingConfig
+    ) -> tuple[int | None, float, str]:
+        """
+        분할 익절 조건을 체크합니다.
+
+        트레일링 스탑이 ON이면 3단계(100% 매도)는 체크하지 않습니다.
+        트레일링 스탑이 최종 청산을 담당합니다.
+
+        Returns:
+            (stage_number, sell_pct, reason) 또는 (None, 0.0, "")
+        """
+        try:
+            defaults = self.user.tradingdefaults
+        except Exception:
+            return None, 0.0, ""
+
+        exit_type = defaults.staged_exit_type
+        if exit_type == "none":
+            return None, 0.0, ""
+
+        completed = list(config.staged_exit_completed_stages or [])
+        use_trailing_stop = self._get_trailing_stop_settings(config)[0]
+        # 트레일링 스탑 ON → 3단계(전량) 스킵, 트레일링 스탑이 최종 청산
+        max_stage = 2 if use_trailing_stop else 3
+
+        # 모든 단계가 이미 완료된 경우
+        if all(s in completed for s in range(1, max_stage + 1)):
+            return None, 0.0, ""
+
+        try:
+            if exit_type == "ma":
+                return self._check_ma_staged_exit(config, defaults, completed, max_stage)
+            elif exit_type == "dead_cross":
+                return self._check_dc_staged_exit(config, defaults, completed, max_stage)
+            elif exit_type == "new_low":
+                return self._check_nl_staged_exit(config, defaults, completed, max_stage)
+        except Exception as e:
+            print(f"[{config.stock_name}] 분할 익절 체크 오류: {e}")
+
+        return None, 0.0, ""
+
+    # ──────────────────────────────────────────────
     # 매수 주문 실행
     # ──────────────────────────────────────────────
 
@@ -643,9 +789,10 @@ class TradingEngine:
             # 기존 BUY/FILLED 엔트리 → 포지션 종료 표시 ('CANCELLED' 재사용)
             self._buy_entries(stock_code).update(status="CANCELLED")
 
-            # 트레일링 스탑 고점 리셋
+            # 트레일링 스탑 고점 리셋 + 분할 익절 단계 리셋
             config.trailing_stop_peak_price = None
-            config.save(update_fields=["trailing_stop_peak_price"])
+            config.staged_exit_completed_stages = []
+            config.save(update_fields=["trailing_stop_peak_price", "staged_exit_completed_stages"])
 
             # TradingSummary 업데이트
             self._update_trading_summary(config, stock_code, stock_name)
@@ -660,6 +807,94 @@ class TradingEngine:
 
         except Exception as e:
             print(f"[{stock_name}] 매도 주문 오류: {e}")
+            traceback.print_exc()
+            return False
+
+    # ──────────────────────────────────────────────
+    # 분할 매도 주문 실행
+    # ──────────────────────────────────────────────
+
+    def execute_partial_sell_order(
+        self, config: TradingConfig, sell_pct: float, reason: str = ""
+    ) -> bool:
+        """
+        보유 수량의 sell_pct%를 시장가로 매도합니다 (분할 익절용).
+        포지션이 완전히 청산되지 않으므로 BUY 엔트리 상태와 트레일링 스탑 고점은 유지됩니다.
+
+        Args:
+            config:   TradingConfig 인스턴스
+            sell_pct: 현재 보유 수량 대비 매도 비율 (0~100)
+            reason:   매도 사유
+        Returns:
+            성공 여부
+        """
+        stock_code = config.stock_code
+        stock_name = config.stock_name
+
+        try:
+            # KIS에서 보유 수량 확인
+            holding_qty = 0
+            for s in KIS.GetMyStockList():
+                if s["StockCode"] == stock_code:
+                    holding_qty = int(s["StockAmt"])
+                    break
+
+            if holding_qty <= 0:
+                print(f"[{stock_name}] 보유 수량 없음 — 분할 매도 스킵")
+                return False
+
+            sell_qty = max(1, int(holding_qty * sell_pct / 100.0))
+
+            current_price = float(KIS.GetCurrentPrice(stock_code))
+            sell_amount   = current_price * sell_qty
+            avg_price     = self.get_average_price(stock_code)
+
+            profit_loss = None
+            profit_loss_pct = None
+            if avg_price:
+                cost            = avg_price * sell_qty
+                profit_loss     = sell_amount - cost
+                profit_loss_pct = profit_loss / cost * 100.0 if cost > 0 else 0.0
+
+            result = KIS.MakeSellMarketOrder(stock_code, sell_qty)
+            if result is None:
+                print(f"[{stock_name}] 분할 매도 주문 실패")
+                return False
+
+            now = tz.now()
+            TradeEntry.objects.create(
+                user                = self.user,
+                trading_config      = config,
+                stock_code          = stock_code,
+                stock_name          = stock_name,
+                trade_type          = "SELL",
+                entry_type          = "EXIT_PARTIAL",
+                order_no            = result["OrderNum2"],
+                order_quantity      = sell_qty,
+                order_price         = Decimal(str(current_price)),
+                filled_quantity     = sell_qty,
+                filled_price        = Decimal(str(current_price)),
+                filled_amount       = Decimal(str(sell_amount)),
+                profit_loss         = Decimal(str(profit_loss)) if profit_loss is not None else None,
+                profit_loss_percent = profit_loss_pct,
+                status              = "FILLED",
+                note                = reason,
+                ordered_at          = now,
+                filled_at           = now,
+            )
+
+            print(
+                f"[{stock_name}] 분할 매도 완료: {sell_qty}주({sell_pct:.0f}%) @ {current_price:,.0f}원"
+                + (
+                    f" | 손익={profit_loss:+,.0f}원 ({profit_loss_pct:+.2f}%)"
+                    if profit_loss is not None
+                    else ""
+                )
+            )
+            return True
+
+        except Exception as e:
+            print(f"[{stock_name}] 분할 매도 주문 오류: {e}")
             traceback.print_exc()
             return False
 
@@ -714,25 +949,36 @@ class TradingEngine:
             )
             win_rate = profitable / exit_count * 100.0 if exit_count else 0.0
 
+            # 최대 낙폭 / 최고 수익률 (매도 건의 profit_loss_percent 기준)
+            sell_pcts = [
+                float(e.profit_loss_percent)
+                for e in sell_entries
+                if e.profit_loss_percent is not None
+            ]
+            max_drawdown      = min(sell_pcts) if sell_pcts else None
+            max_profit_percent = max(sell_pcts) if sell_pcts else None
+
             # get_or_create: first_entry_date 기준
             summary, _ = TradingSummary.objects.update_or_create(
                 user             = self.user,
                 stock_code       = stock_code,
                 first_entry_date = first_entry_date,
                 defaults=dict(
-                    stock_name        = stock_name,
-                    last_exit_date    = last_exit_date,
-                    total_buy_amount  = total_buy_amount,
-                    total_sell_amount = total_sell_amount,
-                    total_profit_loss = total_pl,
+                    stock_name         = stock_name,
+                    last_exit_date     = last_exit_date,
+                    total_buy_amount   = total_buy_amount,
+                    total_sell_amount  = total_sell_amount,
+                    total_profit_loss  = total_pl,
                     profit_loss_percent = pl_pct,
-                    holding_days      = holding_days,
-                    entry_count       = entry_count,
-                    exit_count        = exit_count,
-                    trading_mode      = "manual" if config.trading_mode == "manual" else "turtle",
-                    win_rate          = win_rate,
-                    avg_holding_days  = holding_days,
-                    final_status      = final_status,
+                    holding_days       = holding_days,
+                    entry_count        = entry_count,
+                    exit_count         = exit_count,
+                    trading_mode       = "manual" if config.trading_mode == "manual" else "turtle",
+                    win_rate           = win_rate,
+                    avg_holding_days   = holding_days,
+                    final_status       = final_status,
+                    max_drawdown       = max_drawdown,
+                    max_profit_percent = max_profit_percent,
                 ),
             )
             print(f"[{stock_name}] TradingSummary 업데이트 완료 (status={final_status})")
@@ -792,10 +1038,20 @@ class TradingEngine:
             try:
                 print(f"\n[{config.stock_name}] 매매 체크 시작")
 
-                # 1. 청산 조건 체크 (우선)
+                # 1. 청산 조건 체크 (우선 — 손절/트레일링스탑/전량 익절)
                 should_exit, exit_reason = self.check_exit_conditions(config)
                 if should_exit:
                     self.execute_sell_order(config, exit_reason)
+                    continue
+
+                # 1-b. 분할 익절 체크
+                stage, sell_pct, stage_reason = self.check_staged_exit(config)
+                if stage is not None:
+                    self._mark_staged_exit_stage(config, stage)
+                    if sell_pct >= 100:
+                        self.execute_sell_order(config, stage_reason)
+                    else:
+                        self.execute_partial_sell_order(config, sell_pct, stage_reason)
                     continue
 
                 # 2. 진입 조건 체크
