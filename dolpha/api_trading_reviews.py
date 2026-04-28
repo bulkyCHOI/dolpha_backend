@@ -13,7 +13,7 @@ from django.http import JsonResponse
 from django.db.models import Q
 from django.core.paginator import Paginator
 
-from myweb.models import TradingSummary
+from myweb.models import TradingSummary, TradeEntry
 from .api_mypage_ninja import get_authenticated_user
 
 # 라우터 생성
@@ -345,3 +345,57 @@ def get_trading_summary_data(request):
     except Exception as e:
         return JsonResponse({"success": False, "error": "INTERNAL_ERROR", "message": str(e)}, status=500)
 
+
+@trading_reviews_router.get("/autobot/trading-summary/{trading_summary_id}/entries")
+def get_trade_entries(request, trading_summary_id: int):
+    """
+    특정 매매복기의 개별 거래 내역 조회 (시간순)
+    """
+    try:
+        user = get_authenticated_user(request)
+        if not user:
+            return JsonResponse({"error": "인증이 필요합니다."}, status=401)
+
+        trading_summary = get_object_or_404(TradingSummary, id=trading_summary_id, user=user)
+
+        entries = TradeEntry.objects.filter(
+            trading_summary=trading_summary
+        ).order_by("ordered_at", "created_at")
+
+        # trading_summary FK가 연결되지 않은 기존 데이터 fallback: stock_code + user 기준
+        if not entries.exists():
+            entries = TradeEntry.objects.filter(
+                user=user,
+                stock_code=trading_summary.stock_code,
+            ).order_by("ordered_at", "created_at")
+            # 조회된 orphan 엔트리를 summary에 연결해 다음 조회부터는 정확히 반환
+            if entries.exists():
+                entries.update(trading_summary=trading_summary)
+
+        data = [
+            {
+                "id": e.id,
+                "trade_type": e.trade_type,
+                "entry_type": e.entry_type,
+                "order_quantity": e.order_quantity,
+                "order_price": float(e.order_price),
+                "filled_quantity": e.filled_quantity,
+                "filled_price": float(e.filled_price),
+                "filled_amount": float(e.filled_amount),
+                "profit_loss": float(e.profit_loss) if e.profit_loss is not None else None,
+                "profit_loss_percent": e.profit_loss_percent,
+                "status": e.status,
+                "atr_value": e.atr_value,
+                "stop_price": float(e.stop_price) if e.stop_price is not None else None,
+                "note": e.note,
+                "ordered_at": e.ordered_at.isoformat() if e.ordered_at else None,
+                "filled_at": e.filled_at.isoformat() if e.filled_at else None,
+                "created_at": e.created_at.isoformat(),
+            }
+            for e in entries
+        ]
+
+        return JsonResponse({"success": True, "data": data, "total": len(data)})
+
+    except Exception as e:
+        return JsonResponse({"success": False, "error": "INTERNAL_ERROR", "message": str(e)}, status=500)

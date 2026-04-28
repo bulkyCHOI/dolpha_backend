@@ -119,20 +119,26 @@ def GetBalance() -> dict:
         stock_money  = float(result["scts_evlu_amt"])
         stock_rev    = float(result["evlu_pfls_smtl_amt"])
         total_money  = float(result["tot_evlu_amt"])
+        cash         = float(result["dnca_tot_amt"])
+        stock_cost   = float(result.get("pchs_amt_smtl_amt", 0))
 
         # 예수금이 0이거나 전일 기준 총평가금액이 더 정확한 경우 교체
-        if float(result["dnca_tot_amt"]) == 0 or total_money == stock_money:
+        if cash == 0 or total_money == stock_money:
             total_money = float(result["bfdy_tot_asst_evlu_amt"])
 
         remain_money = total_money - stock_money
         if remain_money == 0:
-            remain_money = float(result["dnca_tot_amt"])
+            remain_money = cash
+
+        # 확정원금 = 예수금 + 보유주식 매수원가 합계 (미실현 손익 제외)
+        confirmed_capital = cash + stock_cost
 
         return {
-            "TotalMoney":   total_money,
-            "RemainMoney":  remain_money,
-            "StockMoney":   stock_money,
-            "StockRevenue": stock_rev,
+            "TotalMoney":       total_money,
+            "RemainMoney":      remain_money,
+            "StockMoney":       stock_money,
+            "StockRevenue":     stock_rev,
+            "ConfirmedCapital": confirmed_capital,
         }
     else:
         err = res.json().get("msg_cd", res.text)

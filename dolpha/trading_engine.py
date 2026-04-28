@@ -134,21 +134,22 @@ class TradingEngine:
     def calculate_position_size(self, config: TradingConfig) -> float:
         """
         매매모드에 따른 총 포지션 크기(원)를 계산합니다.
-          - manual : 계좌잔고 × max_loss% ÷ stop_loss%
-          - atr    : (계좌잔고 × max_loss%) ÷ (ATR × stop_loss배수 / 현재가)
+          - manual : 가용현금 × max_loss% ÷ stop_loss%
+          - atr    : (가용현금 × max_loss%) ÷ (ATR × stop_loss배수 / 현재가)
+        기준: RemainMoney(가용현금)만 사용 — 보유주식 평가금액 제외
         """
         try:
-            balance     = KIS.GetBalance()
-            total_money = float(balance["TotalMoney"])
-            mode        = config.trading_mode
-            max_loss_pct = (config.max_loss or 2.0) / 100.0  # 기본 2%
+            balance           = KIS.GetBalance()
+            confirmed_capital = float(balance["ConfirmedCapital"])
+            mode              = config.trading_mode
+            max_loss_pct      = (config.max_loss or 2.0) / 100.0  # 기본 2%
 
             if mode == "manual":
-                stop_pct     = (config.stop_loss or 8.0) / 100.0
-                pos_amount   = total_money * max_loss_pct / stop_pct
+                stop_pct   = (config.stop_loss or 8.0) / 100.0
+                pos_amount = confirmed_capital * max_loss_pct / stop_pct
                 print(
                     f"[{config.stock_name}] Manual 포지션:"
-                    f" 잔고={total_money:,.0f}, 위험={max_loss_pct*100:.1f}%,"
+                    f" 확정원금={confirmed_capital:,.0f}, 위험={max_loss_pct*100:.1f}%,"
                     f" 손절={stop_pct*100:.1f}%, 포지션={pos_amount:,.0f}원"
                 )
                 return pos_amount
@@ -156,15 +157,15 @@ class TradingEngine:
             elif mode == "atr":
                 atr = self.get_atr(config.stock_code)
                 if atr:
-                    current_price     = float(KIS.GetCurrentPrice(config.stock_code))
-                    stop_multiplier   = config.stop_loss or 2.0
-                    risk_amount       = total_money * max_loss_pct
-                    stop_loss_price   = atr * stop_multiplier
-                    stop_loss_ratio   = stop_loss_price / current_price
-                    pos_amount        = risk_amount / stop_loss_ratio
+                    current_price   = float(KIS.GetCurrentPrice(config.stock_code))
+                    stop_multiplier = config.stop_loss or 2.0
+                    risk_amount     = confirmed_capital * max_loss_pct
+                    stop_loss_price = atr * stop_multiplier
+                    stop_loss_ratio = stop_loss_price / current_price
+                    pos_amount      = risk_amount / stop_loss_ratio
                     print(
                         f"[{config.stock_name}] ATR 포지션:"
-                        f" 잔고={total_money:,.0f}, ATR={atr:.1f}원,"
+                        f" 확정원금={confirmed_capital:,.0f}, ATR={atr:.1f}원,"
                         f" 손절폭={stop_loss_price:,.0f}원({stop_loss_ratio*100:.1f}%),"
                         f" 포지션={pos_amount:,.0f}원"
                     )
@@ -173,13 +174,13 @@ class TradingEngine:
                     # ATR 실패 → manual 방식으로 fallback
                     print(f"[{config.stock_name}] ATR 실패 → Manual fallback")
                     stop_pct   = (config.stop_loss or 2.0) / 100.0
-                    pos_amount = total_money * max_loss_pct / stop_pct
+                    pos_amount = confirmed_capital * max_loss_pct / stop_pct
                     return pos_amount
 
             else:
                 # 알 수 없는 모드 → manual 방식
                 stop_pct   = (config.stop_loss or 8.0) / 100.0
-                pos_amount = total_money * max_loss_pct / stop_pct
+                pos_amount = confirmed_capital * max_loss_pct / stop_pct
                 return pos_amount
 
         except Exception as e:
@@ -949,43 +950,93 @@ class TradingEngine:
             )
             win_rate = profitable / exit_count * 100.0 if exit_count else 0.0
 
-            # 최대 낙폭 / 최고 수익률 (매도 건의 profit_loss_percent 기준)
-            sell_pcts = [
-                float(e.profit_loss_percent)
-                for e in sell_entries
-                if e.profit_loss_percent is not None
-            ]
-            max_drawdown      = min(sell_pcts) if sell_pcts else None
-            max_profit_percent = max(sell_pcts) if sell_pcts else None
-
             # get_or_create: first_entry_date 기준
+            # max_profit_percent / max_drawdown은 _update_peak_stats()가 실시간 관리하므로 여기서 덮어쓰지 않음
             summary, _ = TradingSummary.objects.update_or_create(
                 user             = self.user,
                 stock_code       = stock_code,
                 first_entry_date = first_entry_date,
                 defaults=dict(
-                    stock_name         = stock_name,
-                    last_exit_date     = last_exit_date,
-                    total_buy_amount   = total_buy_amount,
-                    total_sell_amount  = total_sell_amount,
-                    total_profit_loss  = total_pl,
+                    stock_name          = stock_name,
+                    last_exit_date      = last_exit_date,
+                    total_buy_amount    = total_buy_amount,
+                    total_sell_amount   = total_sell_amount,
+                    total_profit_loss   = total_pl,
                     profit_loss_percent = pl_pct,
-                    holding_days       = holding_days,
-                    entry_count        = entry_count,
-                    exit_count         = exit_count,
-                    trading_mode       = "manual" if config.trading_mode == "manual" else "turtle",
-                    win_rate           = win_rate,
-                    avg_holding_days   = holding_days,
-                    final_status       = final_status,
-                    max_drawdown       = max_drawdown,
-                    max_profit_percent = max_profit_percent,
+                    holding_days        = holding_days,
+                    entry_count         = entry_count,
+                    exit_count          = exit_count,
+                    trading_mode        = "manual" if config.trading_mode == "manual" else "turtle",
+                    win_rate            = win_rate,
+                    avg_holding_days    = holding_days,
+                    final_status        = final_status,
                 ),
             )
+
+            # TradeEntry → TradingSummary FK 연결
+            all_entries.update(trading_summary=summary)
+
             print(f"[{stock_name}] TradingSummary 업데이트 완료 (status={final_status})")
 
         except Exception as e:
             print(f"[{stock_name}] TradingSummary 업데이트 오류: {e}")
             traceback.print_exc()
+
+    def _update_peak_stats(self, config: TradingConfig):
+        """
+        보유 중인 포지션의 현재가 기반으로 TradingSummary의
+        max_profit_percent와 max_drawdown을 실시간 업데이트합니다.
+
+        - max_profit_percent : 매매 중 달성한 최고 평가수익률
+        - max_drawdown       : 고점 대비 최대 낙폭 (음수 저장, 예: -8.0 = -8%p)
+          낙폭 = 최고수익률 - 현재수익률 (수익률 포인트 기준)
+        """
+        try:
+            stock_code = config.stock_code
+
+            holding_qty = 0
+            avg_price   = 0.0
+            for s in KIS.GetMyStockList():
+                if s["StockCode"] == stock_code:
+                    holding_qty = int(s["StockAmt"])
+                    avg_price   = float(s["StockAvgPrice"])
+                    break
+
+            if holding_qty <= 0 or avg_price <= 0:
+                return
+
+            current_price      = float(KIS.GetCurrentPrice(stock_code))
+            current_profit_pct = (current_price - avg_price) / avg_price * 100.0
+
+            summary = TradingSummary.objects.filter(
+                user        = self.user,
+                stock_code  = stock_code,
+                final_status = "HOLDING",
+            ).order_by("-created_at").first()
+
+            if summary is None:
+                return
+
+            update_fields = []
+
+            # 최고 수익률 갱신
+            if summary.max_profit_percent is None or current_profit_pct > summary.max_profit_percent:
+                summary.max_profit_percent = current_profit_pct
+                update_fields.append("max_profit_percent")
+
+            # 고점 대비 낙폭 갱신 (낙폭 = -(고점 - 현재), 음수값이 클수록 낙폭이 큼)
+            if summary.max_profit_percent is not None:
+                drawdown = current_profit_pct - summary.max_profit_percent  # 음수
+                if summary.max_drawdown is None or drawdown < summary.max_drawdown:
+                    summary.max_drawdown = drawdown
+                    if "max_drawdown" not in update_fields:
+                        update_fields.append("max_drawdown")
+
+            if update_fields:
+                summary.save(update_fields=update_fields)
+
+        except Exception as e:
+            print(f"[{config.stock_name}] 피크 통계 업데이트 오류: {e}")
 
     # ──────────────────────────────────────────────
     # 시장 운영 시간 체크
@@ -1037,6 +1088,9 @@ class TradingEngine:
         for config in self.trading_configs:
             try:
                 print(f"\n[{config.stock_name}] 매매 체크 시작")
+
+                # 0. 보유 중인 포지션의 최고수익률 / 최대낙폭 실시간 업데이트
+                self._update_peak_stats(config)
 
                 # 1. 청산 조건 체크 (우선 — 손절/트레일링스탑/전량 익절)
                 should_exit, exit_reason = self.check_exit_conditions(config)
