@@ -111,6 +111,7 @@ class FinancialDataSchema(Schema):
     전전기영업이익: int
     전기영업이익: int
     당기영업이익: int
+    영업이익율: float = 0.0
 
 
 class CombinedStockAnalysisSchema(
@@ -125,6 +126,8 @@ class CombinedStockAnalysisSchema(
     min_50d_gain_percent: Optional[float] = None
     # MTT 지속일수
     mtt_duration_days: Optional[int] = 0
+    # 시가총액
+    market_cap: Optional[int] = None
 
 
 class SuccessResponseStockAnalysis(Schema):
@@ -197,6 +200,10 @@ class HTFStockSchema(Schema):
     htf_current_status: str
     rs_rank: float
     is_minervini_trend: bool
+    market_cap: Optional[int] = None
+    당기매출: Optional[float] = None
+    당기영업이익: Optional[float] = None
+    영업이익율: Optional[float] = None
 
 
 class HTFAnalysisDetailSchema(Schema):

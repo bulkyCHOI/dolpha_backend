@@ -183,6 +183,7 @@ PIPELINE_STEPS = [
     my_cron_task_getAndSave_stock_description,
     my_cron_task_getAndSave_index_data,
     my_cron_task_getAndSave_stock_data,
+    my_cron_task_getAndSave_shares_outstanding,
     my_cron_task_calculate_stock_analysis,
     my_cron_task_getAndSave_stock_dartData,
 ]

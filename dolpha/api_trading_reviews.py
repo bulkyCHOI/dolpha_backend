@@ -69,6 +69,10 @@ class TradingSummaryUpdate(Schema):
     memo: Optional[str] = None
 
 
+class TradeEntryNoteUpdate(Schema):
+    note: str
+
+
 class TradingSummaryFilter(Schema):
     stock_name: Optional[str] = None
     trading_mode: Optional[str] = None
@@ -344,6 +348,25 @@ def get_trading_summary_data(request):
 
     except Exception as e:
         return JsonResponse({"success": False, "error": "INTERNAL_ERROR", "message": str(e)}, status=500)
+
+
+@trading_reviews_router.patch("/autobot/trade-entry/{entry_id}/note")
+def update_trade_entry_note(request, entry_id: int, payload: TradeEntryNoteUpdate):
+    """
+    개별 거래 내역의 매매사유(note) 수정
+    """
+    try:
+        user = get_authenticated_user(request)
+        if not user:
+            return JsonResponse({"error": "인증이 필요합니다."}, status=401)
+
+        entry = get_object_or_404(TradeEntry, id=entry_id, user=user)
+        entry.note = payload.note
+        entry.save(update_fields=["note"])
+        return JsonResponse({"success": True, "note": entry.note})
+
+    except Exception as e:
+        return JsonResponse({"success": False, "error": str(e)}, status=500)
 
 
 @trading_reviews_router.get("/autobot/trading-summary/{trading_summary_id}/entries")

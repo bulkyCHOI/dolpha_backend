@@ -236,6 +236,7 @@ def find_stock_top_rising(
                     "close": ohlcv.close,
                     "change": ohlcv.change,  # 상승률
                     # 재무 데이터
+                    "market_cap": analysis.market_cap,
                     "당기매출": 매출[0] if len(매출) > 0 else 0,
                     "전기매출": 매출[1] if len(매출) > 1 else 0,
                     "전전기매출": 매출[2] if len(매출) > 2 else 0,
@@ -244,6 +245,11 @@ def find_stock_top_rising(
                     "전전기영업이익": 영업이익[2] if len(영업이익) > 2 else 0,
                     "매출증가율": 매출증가율,
                     "영업이익증가율": 영업이익증가율,
+                    "영업이익율": (
+                        round(영업이익[0] / 매출[0] * 100, 2)
+                        if (len(매출) > 0 and 매출[0] and len(영업이익) > 0)
+                        else 0.0
+                    ),
                 }
                 results.append(combined_data)
 
@@ -572,6 +578,7 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 # MTT duration data
                 "mtt_duration_days": mtt_duration_days,
                 # Financial data
+                "market_cap": analysis.market_cap,
                 "매출증가율": 매출증가율,
                 "영업이익증가율": 영업이익증가율,
                 "전전기매출": 매출[2] if len(매출) > 2 else 0,
@@ -580,7 +587,11 @@ def find_stock_inMTT(request, date: str = None, format: str = "json"):
                 "전전기영업이익": 영업이익[2] if len(영업이익) > 2 else 0,
                 "전기영업이익": 영업이익[1] if len(영업이익) > 1 else 0,
                 "당기영업이익": 영업이익[0] if 영업이익 else 0,
-                # StockFinancialStatement fields
+                "영업이익율": (
+                    round(영업이익[0] / 매출[0] * 100, 2)
+                    if (매출 and 매출[0] and 영업이익)
+                    else 0.0
+                ),
             }
             results.append(combined_data)
 
@@ -758,6 +769,7 @@ def find_stock_52w_high(request, date: str = None, format: str = "json"):
                 "atr": analysis.atr,
                 "is_minervini_trend": analysis.is_minervini_trend,
                 # Financial data
+                "market_cap": analysis.market_cap,
                 "매출증가율": 매출증가율,
                 "영업이익증가율": 영업이익증가율,
                 "전전기매출": 매출[2] if len(매출) > 2 else 0,
@@ -766,6 +778,11 @@ def find_stock_52w_high(request, date: str = None, format: str = "json"):
                 "전전기영업이익": 영업이익[2] if len(영업이익) > 2 else 0,
                 "전기영업이익": 영업이익[1] if len(영업이익) > 1 else 0,
                 "당기영업이익": 영업이익[0] if 영업이익 else 0,
+                "영업이익율": (
+                    round(영업이익[0] / 매출[0] * 100, 2)
+                    if (매출 and 매출[0] and 영업이익)
+                    else 0.0
+                ),
             }
             results.append(combined_data)
 
@@ -1403,6 +1420,7 @@ def find_stock_50d_high(request, date: str = None, format: str = "json"):
                 ),
                 "min_50d_gain_percent": min_50d_gain_percent,
                 # Financial data
+                "market_cap": analysis.market_cap,
                 "매출증가율": 매출증가율,
                 "영업이익증가율": 영업이익증가율,
                 "전전기매출": 매출[2] if len(매출) > 2 else 0,
@@ -1411,6 +1429,11 @@ def find_stock_50d_high(request, date: str = None, format: str = "json"):
                 "전전기영업이익": 영업이익[2] if len(영업이익) > 2 else 0,
                 "전기영업이익": 영업이익[1] if len(영업이익) > 1 else 0,
                 "당기영업이익": 영업이익[0] if 영업이익 else 0,
+                "영업이익율": (
+                    round(영업이익[0] / 매출[0] * 100, 2)
+                    if (매출 and 매출[0] and 영업이익)
+                    else 0.0
+                ),
             }
             results.append(combined_data)
 

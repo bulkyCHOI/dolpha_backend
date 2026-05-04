@@ -2513,7 +2513,7 @@ def get_htf_stocks_from_analysis(
         if not latest_date_subquery:
             return []
 
-        htf_stocks = (
+        htf_stocks = list(
             StockAnalysis.objects.filter(
                 date=latest_date_subquery,
                 code__market__in=markets,
@@ -2525,8 +2525,32 @@ def get_htf_stocks_from_analysis(
             .order_by("-htf_8week_gain")[:limit]
         )
 
+        # 재무 데이터 벌크 조회 (N+1 방지)
+        company_ids = [a.code_id for a in htf_stocks]
+        finance_qs = (
+            StockFinancialStatement.objects.filter(
+                code_id__in=company_ids,
+                account_name__in=["매출액", "영업이익"],
+            )
+            .order_by("code_id", "account_name", "-year", "-quarter")
+            .values("code_id", "account_name", "amount")
+        )
+        finance_dict: dict = {}
+        for item in finance_qs:
+            cid = item["code_id"]
+            acct = item["account_name"]
+            finance_dict.setdefault(cid, {}).setdefault(acct, []).append(item["amount"])
+
         result = []
         for analysis in htf_stocks:
+            cid = analysis.code_id
+            매출 = finance_dict.get(cid, {}).get("매출액", [])
+            영업이익 = finance_dict.get(cid, {}).get("영업이익", [])
+            영업이익율 = (
+                round(영업이익[0] / 매출[0] * 100, 2)
+                if (매출 and 매출[0] and 영업이익)
+                else 0.0
+            )
             result.append(
                 {
                     "code": analysis.code.code,
@@ -2552,6 +2576,10 @@ def get_htf_stocks_from_analysis(
                     "htf_current_status": analysis.htf_current_status,
                     "rs_rank": analysis.rsRank,
                     "is_minervini_trend": analysis.is_minervini_trend,
+                    "market_cap": analysis.market_cap,
+                    "당기매출": 매출[0] if 매출 else 0,
+                    "당기영업이익": 영업이익[0] if 영업이익 else 0,
+                    "영업이익율": 영업이익율,
                 }
             )
 
@@ -2807,24 +2835,37 @@ def getAndSave_shares_outstanding(request, area: str = "KR"):
     path = "uapi/domestic-stock/v1/quotations/inquire-price"
     url = f"{get_url_base()}/{path}"
 
+    def _fetch_lstn_stcn(code: str, market_div: str) -> int:
+        """단일 종목 상장주식수 조회. 성공 시 양수 반환, 실패 시 0 반환."""
+        headers = GetHeaders(tr_id="FHKST01010100", custtype="P")
+        params = {"FID_COND_MRKT_DIV_CODE": market_div, "FID_INPUT_ISCD": code}
+        res = _req.get(url, headers=headers, params=params, timeout=10, verify=False)
+        if res.status_code == 200 and res.json().get("rt_cd") == "0":
+            lstn_stcn = res.json().get("output", {}).get("lstn_stcn")
+            return int(lstn_stcn) if lstn_stcn else 0
+        return 0
+
     update_list = []
     for i, company in enumerate(companies):
         try:
-            headers = GetHeaders(tr_id="FHKST01010100", custtype="P")
-            params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": company.code}
-            res = _req.get(url, headers=headers, params=params, timeout=10, verify=False)
-            if res.status_code == 200 and res.json().get("rt_cd") == "0":
-                lstn_stcn = res.json().get("output", {}).get("lstn_stcn")
-                if lstn_stcn:
-                    company.shares_outstanding = int(lstn_stcn)
-                    update_list.append(company)
-                    updated += 1
+            primary_div = "Q" if company.market == "KOSDAQ" else "J"
+            parsed = _fetch_lstn_stcn(company.code, primary_div)
+
+            # KOSDAQ 코드 오류 시 "J"로 폴백
+            if parsed == 0 and primary_div == "Q":
+                _time.sleep(0.25)
+                parsed = _fetch_lstn_stcn(company.code, "J")
+
+            if parsed > 0:
+                company.shares_outstanding = parsed
+                update_list.append(company)
+                updated += 1
             else:
                 failed += 1
         except Exception:
             failed += 1
 
-        _time.sleep(0.15)
+        _time.sleep(0.25)
 
         if (i + 1) % 100 == 0:
             # 중간 bulk_update
