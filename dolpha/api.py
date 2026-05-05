@@ -241,10 +241,20 @@ def get_stock_price(request, stock_code: str):
     def try_kis(stock_code):
         """KIS API 시도 (가장 정확한 실시간 데이터)"""
         try:
-            from dolpha.kis.trade import GetCurrentPrice
-            price = GetCurrentPrice(stock_code)
-            if price:
-                return {"price": float(price), "change": 0, "source": "kis"}
+            import requests as _req
+            from dolpha.kis.trade import GetHeaders, get_url_base, _sleep
+            _sleep()
+            path = "uapi/domestic-stock/v1/quotations/inquire-price"
+            url = f"{get_url_base()}/{path}"
+            headers = GetHeaders(tr_id="FHKST01010100")
+            params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": stock_code}
+            res = _req.get(url, headers=headers, params=params, timeout=10, verify=False)
+            if res.status_code == 200 and res.json().get("rt_cd") == "0":
+                output = res.json()["output"]
+                price = float(output["stck_prpr"])
+                # prdy_vrss는 이미 부호 포함된 값 (하락이면 음수 문자열)
+                change = float(output.get("prdy_vrss", 0))
+                return {"price": price, "change": change, "source": "kis"}
         except Exception:
             pass
         return None

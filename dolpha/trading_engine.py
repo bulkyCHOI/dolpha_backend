@@ -154,7 +154,7 @@ class TradingEngine:
                 )
                 return pos_amount
 
-            elif mode == "atr":
+            elif mode in ("atr", "turtle"):
                 atr = self.get_atr(config.stock_code)
                 if atr:
                     current_price   = float(KIS.GetCurrentPrice(config.stock_code))
@@ -296,7 +296,7 @@ class TradingEngine:
             if not base_price:
                 return False
 
-            next_idx = current_count  # 0-based: 현재 체결 수 = 다음 인덱스
+            next_idx = current_count - 1  # INITIAL을 제외한 피라미딩 인덱스 (0-based)
             if next_idx >= len(pyramid_entries):
                 return False
 
