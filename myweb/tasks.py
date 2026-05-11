@@ -170,6 +170,51 @@ def my_cron_task_getAndSave_index_data():
     )
 
 
+def save_daily_account_snapshots():
+    """모든 활성 유저의 계좌 잔고 스냅샷을 저장합니다 (장 마감 후 호출)."""
+    kis_mode = os.environ.get("KIS_MODE", "VIRTUAL")
+    key_var = "KIS_REAL_APP_KEY" if kis_mode == "REAL" else "KIS_VIRTUAL_APP_KEY"
+    if not os.environ.get(key_var, ""):
+        return
+
+    try:
+        from datetime import date
+        from dolpha.kis.trade import GetBalance
+        from myweb.models import User, DailyAccountSnapshot, TradingConfig
+
+        user_ids = (
+            TradingConfig.objects
+            .filter(is_active=True)
+            .values_list("user", flat=True)
+            .distinct()
+        )
+
+        balance = GetBalance()
+        today = date.today()
+
+        for user_id in user_ids:
+            try:
+                user = User.objects.get(pk=user_id)
+                DailyAccountSnapshot.objects.update_or_create(
+                    user=user,
+                    date=today,
+                    defaults={
+                        "total_money": int(balance.get("TotalMoney", 0)),
+                        "stock_money": int(balance.get("StockMoney", 0)),
+                        "remain_money": int(balance.get("RemainMoney", 0)),
+                        "stock_revenue": int(balance.get("StockRevenue", 0)),
+                        "confirmed_capital": int(balance.get("ConfirmedCapital", 0)),
+                    },
+                )
+                _slog(f"[계좌스냅샷] 유저 {user.email} {today} 저장 완료")
+            except Exception as e:
+                _slog(f"[계좌스냅샷] 유저 {user_id} 저장 오류: {e}")
+
+    except Exception as e:
+        _slog(f"[계좌스냅샷] save_daily_account_snapshots 오류: {e}")
+        traceback.print_exc()
+
+
 def my_cron_task_getAndSave_shares_outstanding():
     execute_api_task(
         getAndSave_shares_outstanding,
@@ -289,6 +334,13 @@ def start():
         20, 5,
         "pipeline_2005",
         "데이터 수집 파이프라인 (NXT마켓 반영)",
+    )
+    # 계좌 잔고 스냅샷 (15:40, KIS 설정 시에만 의미 있음)
+    add_cron_job(
+        save_daily_account_snapshots,
+        15, 40,
+        "save_daily_account_snapshots",
+        "일별 계좌 잔고 스냅샷 저장",
     )
 
     # ── 상장주식수 주간 갱신 (월요일 08:00) ──────────────────────────

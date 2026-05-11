@@ -625,3 +625,27 @@ class TradeEntry(models.Model):
             f"{self.user.username} - {self.stock_name} "
             f"{self.trade_type} {self.filled_quantity}주 ({self.status})"
         )
+
+
+class DailyAccountSnapshot(models.Model):
+    """일별 계좌 잔고 스냅샷 (차트용)"""
+
+    user = models.ForeignKey(
+        "myweb.User", on_delete=models.CASCADE, related_name="account_snapshots"
+    )
+    date = models.DateField()
+    total_money = models.BigIntegerField(default=0)       # 총 평가금액
+    stock_money = models.BigIntegerField(default=0)       # 주식 평가금액
+    remain_money = models.BigIntegerField(default=0)      # 예수금
+    stock_revenue = models.BigIntegerField(default=0)     # 순이익
+    confirmed_capital = models.BigIntegerField(default=0) # 납입원금
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "daily_account_snapshot"
+        unique_together = [("user", "date")]
+        ordering = ["date"]
+
+    def __str__(self):
+        return f"{self.user.username} - {self.date} 총잔고:{self.total_money:,}"
