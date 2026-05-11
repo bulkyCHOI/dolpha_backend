@@ -94,37 +94,22 @@ class TradingEngine:
 
     def get_atr(self, stock_code: str, period: int = 14) -> float | None:
         """
-        ATR(Average True Range) 계산.
-
-        Args:
-            stock_code: 종목코드
-            period: ATR 기간 (기본 14일)
-        Returns:
-            ATR 값(원) 또는 None
+        DB에 사전 계산된 20일 ATR(StockAnalysis.atr)을 조회합니다.
+        period 파라미터는 하위 호환을 위해 유지하나 DB 값 사용으로 무시됩니다.
         """
         try:
-            # period + 10 거래일 ≈ (period + 10) * 7 / 5 달력일 → 여유 있게 2배
-            calendar_days = (period + 10) * 2
-            end_date   = datetime.now().strftime("%Y-%m-%d")
-            start_date = (datetime.now() - timedelta(days=calendar_days)).strftime("%Y-%m-%d")
-
-            df = GetOhlcv("KRX", stock_code, start_date=start_date, end_date=end_date)
-            if df is None or len(df) < period:
-                print(f"[{stock_code}] ATR: 데이터 부족 ({len(df) if df is not None else 0}행)")
+            from myweb.models import StockAnalysis, Company
+            company = Company.objects.filter(code=stock_code).first()
+            if not company:
+                print(f"[{stock_code}] ATR 조회: Company 없음")
                 return None
-
-            # True Range 계산
-            df = df.copy()
-            df["h_l"]  = df["high"] - df["low"]
-            df["h_pc"] = (df["high"] - df["close"].shift(1)).abs()
-            df["l_pc"] = (df["low"]  - df["close"].shift(1)).abs()
-            df["tr"]   = df[["h_l", "h_pc", "l_pc"]].max(axis=1)
-
-            atr = df["tr"].rolling(window=period).mean().iloc[-1]
-            return float(atr)
-
+            analysis = StockAnalysis.objects.filter(code=company).order_by("-date").first()
+            if not analysis or analysis.atr <= 0:
+                print(f"[{stock_code}] ATR 조회: StockAnalysis 없음 또는 ATR=0")
+                return None
+            return float(analysis.atr)
         except Exception as e:
-            print(f"[{stock_code}] ATR 계산 오류: {e}")
+            print(f"[{stock_code}] ATR 조회 오류: {e}")
             return None
 
     # ──────────────────────────────────────────────
@@ -346,7 +331,7 @@ class TradingEngine:
             trailing_stop_value:   트레일링 스탑 거리 (manual이면 %, atr이면 ATR 배수)
         """
         try:
-            defaults = self.user.tradingdefaults
+            defaults = self.user.trading_defaults
             if config.trading_mode == "manual":
                 return (
                     defaults.manual_use_trailing_stop,
@@ -590,7 +575,7 @@ class TradingEngine:
             (stage_number, sell_pct, reason) 또는 (None, 0.0, "")
         """
         try:
-            defaults = self.user.tradingdefaults
+            defaults = self.user.trading_defaults
         except Exception:
             return None, 0.0, ""
 

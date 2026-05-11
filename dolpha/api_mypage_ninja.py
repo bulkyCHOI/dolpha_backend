@@ -93,6 +93,7 @@ class TradingConfigResponseSchema(Schema):
     pyramiding_entries: List[str] = []  # 피라미딩 진입시점 배열
     positions: List[float] = []  # 포지션 배열
     is_active: bool = True
+    trailing_stop_peak_price: Optional[float] = None
     created_at: str
     updated_at: str
 
@@ -353,6 +354,7 @@ def get_trading_configs(request, strategy_type: str = None):
                 'pyramiding_entries': config.pyramiding_entries,  # Django DB에서 직접 가져옴
                 'positions': config.positions,  # Django DB에서 직접 가져옴
                 'is_active': config.is_active,
+                'trailing_stop_peak_price': config.trailing_stop_peak_price,
                 'created_at': config.created_at.isoformat(),
                 'updated_at': config.updated_at.isoformat(),
             })
@@ -494,6 +496,7 @@ def get_trading_config_by_stock(request, stock_code: str, strategy_type: str = '
                 'pyramiding_entries': config.pyramiding_entries,  # Django DB에서 직접 가져옴
                 'positions': config.positions,  # Django DB에서 직접 가져옴
                 'is_active': config.is_active,
+                'trailing_stop_peak_price': config.trailing_stop_peak_price,
                 'created_at': config.created_at.isoformat(),
                 'updated_at': config.updated_at.isoformat(),
             }
