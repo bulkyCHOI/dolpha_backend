@@ -23,7 +23,7 @@ from django.utils import timezone
 from django.db import transaction
 import json
 
-from myweb.models import User, UserProfile, TradingConfig
+from myweb.models import User, UserProfile, TradingConfig, Company
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -136,13 +136,20 @@ class TradingConfigView(View):
         """사용자의 자동매매 설정 목록 조회"""
         try:
             configs = TradingConfig.objects.filter(user=request.user)
-            
+
+            stock_codes = [c.stock_code for c in configs]
+            market_map = {
+                c.code: c.market
+                for c in Company.objects.filter(code__in=stock_codes).only('code', 'market')
+            }
+
             data = []
             for config in configs:
                 data.append({
                     'id': config.id,
                     'stock_code': config.stock_code,
                     'stock_name': config.stock_name,
+                    'market': market_map.get(config.stock_code),
                     'trading_mode': config.trading_mode,
                     'max_loss': config.max_loss,
                     'stop_loss': config.stop_loss,

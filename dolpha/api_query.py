@@ -851,9 +851,9 @@ def find_stock_ohlcv(request, code: str = "005930", limit: int = 63):
         if not code or not code.strip():
             return 400, ErrorResponse(status="error", message="종목코드가 필요합니다.")
 
-        if limit <= 0 or limit > 1000:  # 최대 1000개까지 제한
+        if limit <= 0 or limit > 20000:
             return 400, ErrorResponse(
-                status="error", message="limit은 1-1000 사이의 값이어야 합니다."
+                status="error", message="limit은 1-20000 사이의 값이어야 합니다."
             )
 
         # Company 객체 조회 및 캐싱 (한 번만 조회)
@@ -933,9 +933,9 @@ def find_stock_analysis(request, code: str = "005930", limit: int = 63):
         if not code or not code.strip():
             return 400, ErrorResponse(status="error", message="종목코드가 필요합니다.")
 
-        if limit <= 0 or limit > 1000:  # 최대 1000개까지 제한
+        if limit <= 0 or limit > 20000:
             return 400, ErrorResponse(
-                status="error", message="limit은 1-1000 사이의 값이어야 합니다."
+                status="error", message="limit은 1-20000 사이의 값이어야 합니다."
             )
 
         # Company 객체 조회 (존재 여부 확인)
@@ -1214,9 +1214,9 @@ def find_stock_index(request, code: str = "005930", limit: int = 10):
         if not code or not code.strip():
             return 400, ErrorResponse(status="error", message="종목코드가 필요합니다.")
 
-        if limit <= 0 or limit > 1000:  # 최대 1000개까지 제한
+        if limit <= 0 or limit > 20000:
             return 400, ErrorResponse(
-                status="error", message="limit은 1-1000 사이의 값이어야 합니다."
+                status="error", message="limit은 1-20000 사이의 값이어야 합니다."
             )
 
         # Company 객체 존재 여부 확인 (가장 빠른 존재 체크)
@@ -1504,9 +1504,9 @@ def find_index_ohlcv(request, code: str = "1011", limit: int = 63):
                 status="error", message="인덱스 코드가 필요합니다."
             )
 
-        if limit <= 0 or limit > 1000:  # 최대 1000개까지 제한
+        if limit <= 0 or limit > 20000:
             return 400, ErrorResponse(
-                status="error", message="limit은 1-1000 사이의 값이어야 합니다."
+                status="error", message="limit은 1-20000 사이의 값이어야 합니다."
             )
 
         # 코드 정규화 (문자열로 변환 후 공백 제거)
@@ -1565,3 +1565,41 @@ def find_index_ohlcv(request, code: str = "1011", limit: int = 63):
         return 500, ErrorResponse(
             status="error", message=f"서버 오류가 발생했습니다: {str(e)}"
         )
+
+
+# ─────────────────────────────────────────────────────────────
+# 주식 분봉 + 현재가 (실시간 차트용)
+# ─────────────────────────────────────────────────────────────
+
+@query_router.get("/find_stock_minute")
+def find_stock_minute(request, code: str):
+    """당일 1분봉 OHLCV 조회 (KIS API 실시간 호출)."""
+    from django.http import JsonResponse
+    try:
+        if not code or not code.strip():
+            return JsonResponse({"status": "error", "message": "종목코드가 필요합니다."}, status=400)
+
+        from .kis import GetMinuteOhlcvKR
+        bars = GetMinuteOhlcvKR(code.strip())
+        return JsonResponse({"status": "OK", "data": bars})
+
+    except Exception as e:
+        traceback.print_exc()
+        return JsonResponse({"status": "error", "message": str(e)}, status=500)
+
+
+@query_router.get("/find_stock_current_price")
+def find_stock_current_price(request, code: str):
+    """종목 현재가 조회 (KIS API)."""
+    from django.http import JsonResponse
+    try:
+        if not code or not code.strip():
+            return JsonResponse({"status": "error", "message": "종목코드가 필요합니다."}, status=400)
+
+        from .kis import GetCurrentPrice
+        price = GetCurrentPrice(code.strip())
+        return JsonResponse({"status": "OK", "price": price})
+
+    except Exception as e:
+        traceback.print_exc()
+        return JsonResponse({"status": "error", "message": str(e)}, status=500)

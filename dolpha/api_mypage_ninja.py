@@ -94,6 +94,7 @@ class TradingConfigResponseSchema(Schema):
     positions: List[float] = []  # 포지션 배열
     is_active: bool = True
     trailing_stop_peak_price: Optional[float] = None
+    market: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -333,11 +334,17 @@ def get_trading_configs(request, strategy_type: str = None):
             return JsonResponse({'error': '인증이 필요합니다.'}, status=401)
             
         configs = TradingConfig.objects.filter(user=user)
-        
+
         # strategy_type 필터링
         if strategy_type:
             configs = configs.filter(strategy_type=strategy_type)
-        
+
+        stock_codes = list(configs.values_list('stock_code', flat=True))
+        market_map = {
+            c.code: c.market
+            for c in Company.objects.filter(code__in=stock_codes).only('code', 'market')
+        }
+
         result = []
         for config in configs:
             result.append({
@@ -355,6 +362,7 @@ def get_trading_configs(request, strategy_type: str = None):
                 'positions': config.positions,  # Django DB에서 직접 가져옴
                 'is_active': config.is_active,
                 'trailing_stop_peak_price': config.trailing_stop_peak_price,
+                'market': market_map.get(config.stock_code),
                 'created_at': config.created_at.isoformat(),
                 'updated_at': config.updated_at.isoformat(),
             })
