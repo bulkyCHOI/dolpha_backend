@@ -315,7 +315,7 @@ def get_trading_summary_data(request):
         if not user:
             return JsonResponse({"error": "인증이 필요합니다."}, status=401)
 
-        queryset = TradingSummary.objects.filter(user=user).order_by("-updated_at")
+        queryset = TradingSummary.objects.filter(user=user, final_status="CLOSED").order_by("-last_exit_date")
 
         data = [
             {

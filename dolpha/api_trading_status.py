@@ -334,6 +334,48 @@ def get_account_snapshots(request, days: int = 90):
         return JsonResponse({"success": False, "error": str(e)}, status=500)
 
 
+@trading_status_router.get("/daily-realized-pnl")
+def get_daily_realized_pnl(request, days: int = 90):
+    """일자별 확정 손익 집계 (매도 체결 기준)"""
+    try:
+        user = get_authenticated_user(request)
+        if not user:
+            return JsonResponse({"error": "인증이 필요합니다."}, status=401)
+
+        from datetime import timedelta, timezone, datetime
+        from django.db.models import Sum, DateField
+        from django.db.models.functions import Cast
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+        rows = (
+            TradeEntry.objects
+            .filter(
+                user=user,
+                trade_type="SELL",
+                status="FILLED",
+                profit_loss__isnull=False,
+                filled_at__gte=cutoff,
+            )
+            .annotate(trade_date=Cast("filled_at", output_field=DateField()))
+            .values("trade_date")
+            .annotate(daily_pnl=Sum("profit_loss"))
+            .order_by("trade_date")
+        )
+
+        data = [
+            {
+                "date": row["trade_date"].isoformat(),
+                "daily_pnl": int(row["daily_pnl"]),
+            }
+            for row in rows
+        ]
+        return JsonResponse({"success": True, "data": data})
+
+    except Exception as e:
+        return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+
 @trading_status_router.post("/account-snapshots/save-today")
 def save_today_snapshot(request):
     """오늘 계좌 잔고 스냅샷 저장 (스케줄러 또는 수동 호출)"""
