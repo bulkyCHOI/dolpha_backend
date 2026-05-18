@@ -887,6 +887,19 @@ class TradingEngine:
                     else ""
                 )
             )
+
+            # 분할 매도로 잔여 수량이 0이 되는 경우 → 전량 청산 처리
+            if sell_qty >= holding_qty:
+                self._buy_entries(stock_code).update(status="CANCELLED")
+                config.trailing_stop_peak_price = None
+                config.staged_exit_completed_stages = []
+                config.is_active = False
+                config.save(update_fields=["trailing_stop_peak_price", "staged_exit_completed_stages", "is_active"])
+                print(f"[{stock_name}] 분할 매도로 전량 청산 — 자동매매 비활성화")
+
+            # 항상 TradingSummary 업데이트
+            self._update_trading_summary(config, stock_code, stock_name)
+
             return True
 
         except Exception as e:
