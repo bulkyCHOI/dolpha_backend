@@ -116,7 +116,7 @@ class TradingEngine:
     # 포지션 크기 계산
     # ──────────────────────────────────────────────
 
-    def calculate_position_size(self, config: TradingConfig) -> float:
+    def calculate_position_size(self, config: TradingConfig, balance: dict, current_price: float = 0.0) -> float:
         """
         매매모드에 따른 총 포지션 크기(원)를 계산합니다.
           - manual : 가용현금 × max_loss% ÷ stop_loss%
@@ -124,7 +124,6 @@ class TradingEngine:
         기준: RemainMoney(가용현금)만 사용 — 보유주식 평가금액 제외
         """
         try:
-            balance           = KIS.GetBalance()
             confirmed_capital = float(balance["ConfirmedCapital"])
             mode              = config.trading_mode
             max_loss_pct      = (config.max_loss or 2.0) / 100.0  # 기본 2%
@@ -142,7 +141,8 @@ class TradingEngine:
             elif mode in ("atr", "turtle"):
                 atr = self.get_atr(config.stock_code)
                 if atr:
-                    current_price   = float(KIS.GetCurrentPrice(config.stock_code))
+                    if not current_price:
+                        current_price = float(KIS.GetCurrentPrice(config.stock_code))
                     stop_multiplier = config.stop_loss or 2.0
                     risk_amount     = confirmed_capital * max_loss_pct
                     stop_loss_price = atr * stop_multiplier
@@ -214,21 +214,18 @@ class TradingEngine:
     # 진입 조건 체크
     # ──────────────────────────────────────────────
 
-    def check_entry_conditions(self, config: TradingConfig) -> bool:
+    def check_entry_conditions(
+        self,
+        config: TradingConfig,
+        current_price: float,
+        holding_info: dict,
+    ) -> bool:
         """
         신규 진입 또는 피라미딩 조건을 체크합니다.
         이미 보유 중이면 피라미딩 조건을 확인합니다.
         """
         try:
-            stock_code    = config.stock_code
-            current_price = float(KIS.GetCurrentPrice(stock_code))
-
-            # 실제 보유 수량 확인
-            holding_qty = 0
-            for s in KIS.GetMyStockList():
-                if s["StockCode"] == stock_code:
-                    holding_qty = int(s["StockAmt"])
-                    break
+            holding_qty = holding_info["qty"]
 
             if holding_qty > 0:
                 print(
@@ -354,7 +351,10 @@ class TradingEngine:
             config.save(update_fields=["trailing_stop_peak_price"])
 
     def check_exit_conditions(
-        self, config: TradingConfig
+        self,
+        config: TradingConfig,
+        current_price: float,
+        holding_info: dict,
     ) -> tuple[bool, str | None]:
         """
         트레일링 스탑 / 고정 손절 / 익절 조건을 체크합니다.
@@ -369,31 +369,23 @@ class TradingEngine:
             (should_exit, reason_str)
         """
         try:
-            stock_code  = config.stock_code
             mode        = config.trading_mode
             stop_loss   = config.stop_loss  or 8.0
             take_profit = config.take_profit or 24.0
 
-            # KIS에서 실제 보유 확인
-            holding_qty = 0
-            avg_price   = 0.0
-            for s in KIS.GetMyStockList():
-                if s["StockCode"] == stock_code:
-                    holding_qty = int(s["StockAmt"])
-                    avg_price   = float(s["StockAvgPrice"])
-                    break
+            holding_qty = holding_info["qty"]
+            avg_price   = holding_info["avg_price"]
 
             if holding_qty <= 0:
                 return False, None
 
-            current_price = float(KIS.GetCurrentPrice(stock_code))
+            # 보유 중이면 트레일링 스탑 여부와 무관하게 항상 고점 갱신
+            self._update_peak_price(config, current_price)
 
             # 트레일링 스탑 설정 조회
             use_trailing_stop, trailing_stop_trigger, trailing_stop_value = self._get_trailing_stop_settings(config)
 
             if use_trailing_stop:
-                # 고점 업데이트
-                self._update_peak_price(config, current_price)
                 peak = config.trailing_stop_peak_price
 
                 if mode == "manual":
@@ -478,7 +470,7 @@ class TradingEngine:
             config.save(update_fields=["staged_exit_completed_stages"])
 
     def _check_ma_staged_exit(
-        self, config: TradingConfig, defaults, completed: list, max_stage: int
+        self, config: TradingConfig, defaults, completed: list, max_stage: int, current_price: float = 0.0
     ) -> tuple[int | None, float, str]:
         """이동평균선 하회 분할 익절 체크."""
         stages = [
@@ -491,7 +483,8 @@ class TradingEngine:
         if df is None or len(df) < max_period:
             return None, 0.0, ""
 
-        current_price = float(KIS.GetCurrentPrice(config.stock_code))
+        if not current_price:
+            current_price = float(KIS.GetCurrentPrice(config.stock_code))
 
         for stage_num, period, sell_pct in stages[:max_stage]:
             if stage_num in completed:
@@ -535,7 +528,7 @@ class TradingEngine:
         return None, 0.0, ""
 
     def _check_nl_staged_exit(
-        self, config: TradingConfig, defaults, completed: list, max_stage: int
+        self, config: TradingConfig, defaults, completed: list, max_stage: int, current_price: float = 0.0
     ) -> tuple[int | None, float, str]:
         """N일 신저가 분할 익절 체크."""
         stages = [
@@ -548,7 +541,8 @@ class TradingEngine:
         if df is None or len(df) < max_days + 1:
             return None, 0.0, ""
 
-        current_price = float(KIS.GetCurrentPrice(config.stock_code))
+        if not current_price:
+            current_price = float(KIS.GetCurrentPrice(config.stock_code))
 
         for stage_num, days, sell_pct in stages[:max_stage]:
             if stage_num in completed:
@@ -563,7 +557,7 @@ class TradingEngine:
         return None, 0.0, ""
 
     def check_staged_exit(
-        self, config: TradingConfig
+        self, config: TradingConfig, current_price: float = 0.0
     ) -> tuple[int | None, float, str]:
         """
         분할 익절 조건을 체크합니다.
@@ -594,11 +588,11 @@ class TradingEngine:
 
         try:
             if exit_type == "ma":
-                return self._check_ma_staged_exit(config, defaults, completed, max_stage)
+                return self._check_ma_staged_exit(config, defaults, completed, max_stage, current_price)
             elif exit_type == "dead_cross":
                 return self._check_dc_staged_exit(config, defaults, completed, max_stage)
             elif exit_type == "new_low":
-                return self._check_nl_staged_exit(config, defaults, completed, max_stage)
+                return self._check_nl_staged_exit(config, defaults, completed, max_stage, current_price)
         except Exception as e:
             print(f"[{config.stock_name}] 분할 익절 체크 오류: {e}")
 
@@ -608,13 +602,16 @@ class TradingEngine:
     # 매수 주문 실행
     # ──────────────────────────────────────────────
 
-    def execute_buy_order(self, config: TradingConfig, amount: float) -> bool:
+    def execute_buy_order(
+        self, config: TradingConfig, amount: float, current_price: float
+    ) -> bool:
         """
         시장가 매수를 실행하고 TradeEntry를 DB에 저장합니다.
 
         Args:
             config: TradingConfig 인스턴스
             amount: 매수 금액(원)
+            current_price: 사이클에서 미리 조회한 현재가
         Returns:
             성공 여부
         """
@@ -622,8 +619,7 @@ class TradingEngine:
         stock_name = config.stock_name
 
         try:
-            current_price = float(KIS.GetCurrentPrice(stock_code))
-            buy_qty       = int(amount / current_price)
+            buy_qty = int(amount / current_price)
 
             if buy_qty <= 0:
                 print(f"[{stock_name}] 매수 수량 0 — 투자금액 부족: {amount:,.0f}원")
@@ -678,6 +674,9 @@ class TradingEngine:
                 config.trailing_stop_peak_price = current_price
                 config.save(update_fields=["trailing_stop_peak_price"])
 
+            # TradingSummary HOLDING 레코드 생성/갱신 (매수 시점에도 호출해야 _update_peak_stats가 동작함)
+            self._update_trading_summary(config, stock_code, stock_name)
+
             print(
                 f"[{stock_name}] 매수 완료: {buy_qty}주 @ {current_price:,.0f}원"
                 f" (유형={entry_type}, 주문번호={result['OrderNum2']})"
@@ -693,7 +692,13 @@ class TradingEngine:
     # 매도 주문 실행
     # ──────────────────────────────────────────────
 
-    def execute_sell_order(self, config: TradingConfig, reason: str = "") -> bool:
+    def execute_sell_order(
+        self,
+        config: TradingConfig,
+        reason: str = "",
+        current_price: float = 0.0,
+        holding_info: dict | None = None,
+    ) -> bool:
         """
         보유 전량을 시장가로 매도하고 TradeEntry를 DB에 저장합니다.
         BUY 체결 기록을 'CANCELLED' 상태로 변경하여 포지션 종료를 표시합니다.
@@ -701,6 +706,8 @@ class TradingEngine:
         Args:
             config: TradingConfig 인스턴스
             reason: 매도 사유 (예: "손절", "익절")
+            current_price: 사이클에서 미리 조회한 현재가
+            holding_info: 사이클에서 캐싱한 보유 정보 {"qty": int, "avg_price": float}
         Returns:
             성공 여부
         """
@@ -708,12 +715,7 @@ class TradingEngine:
         stock_name = config.stock_name
 
         try:
-            # KIS에서 보유 수량 확인
-            holding_qty = 0
-            for s in KIS.GetMyStockList():
-                if s["StockCode"] == stock_code:
-                    holding_qty = int(s["StockAmt"])
-                    break
+            holding_qty = holding_info["qty"] if holding_info else 0
 
             if holding_qty <= 0:
                 print(f"[{stock_name}] 보유 수량 없음 — 매도 스킵")
@@ -729,11 +731,14 @@ class TradingEngine:
             else:
                 entry_type = "EXIT_FULL"
 
-            current_price = float(KIS.GetCurrentPrice(stock_code))
-            sell_amount   = current_price * holding_qty
+            sell_amount = current_price * holding_qty
 
-            # DB 평균가 조회 (손익 계산)
-            avg_price = self.get_average_price(stock_code)
+            # 평균가 조회 (holding_info 우선, 없으면 DB fallback)
+            avg_price = (
+                holding_info["avg_price"]
+                if holding_info and holding_info["avg_price"] > 0
+                else self.get_average_price(stock_code)
+            )
 
             profit_loss = None
             profit_loss_pct = None
@@ -775,10 +780,11 @@ class TradingEngine:
             # 기존 BUY/FILLED 엔트리 → 포지션 종료 표시 ('CANCELLED' 재사용)
             self._buy_entries(stock_code).update(status="CANCELLED")
 
-            # 트레일링 스탑 고점 리셋 + 분할 익절 단계 리셋
+            # 트레일링 스탑 고점 리셋 + 분할 익절 단계 리셋 + 자동매매 비활성화
             config.trailing_stop_peak_price = None
             config.staged_exit_completed_stages = []
-            config.save(update_fields=["trailing_stop_peak_price", "staged_exit_completed_stages"])
+            config.is_active = False
+            config.save(update_fields=["trailing_stop_peak_price", "staged_exit_completed_stages", "is_active"])
 
             # TradingSummary 업데이트
             self._update_trading_summary(config, stock_code, stock_name)
@@ -801,16 +807,23 @@ class TradingEngine:
     # ──────────────────────────────────────────────
 
     def execute_partial_sell_order(
-        self, config: TradingConfig, sell_pct: float, reason: str = ""
+        self,
+        config: TradingConfig,
+        sell_pct: float,
+        reason: str = "",
+        current_price: float = 0.0,
+        holding_info: dict | None = None,
     ) -> bool:
         """
         보유 수량의 sell_pct%를 시장가로 매도합니다 (분할 익절용).
         포지션이 완전히 청산되지 않으므로 BUY 엔트리 상태와 트레일링 스탑 고점은 유지됩니다.
 
         Args:
-            config:   TradingConfig 인스턴스
-            sell_pct: 현재 보유 수량 대비 매도 비율 (0~100)
-            reason:   매도 사유
+            config:       TradingConfig 인스턴스
+            sell_pct:     현재 보유 수량 대비 매도 비율 (0~100)
+            reason:       매도 사유
+            current_price: 사이클에서 미리 조회한 현재가
+            holding_info: 사이클에서 캐싱한 보유 정보 {"qty": int, "avg_price": float}
         Returns:
             성공 여부
         """
@@ -818,22 +831,19 @@ class TradingEngine:
         stock_name = config.stock_name
 
         try:
-            # KIS에서 보유 수량 확인
-            holding_qty = 0
-            for s in KIS.GetMyStockList():
-                if s["StockCode"] == stock_code:
-                    holding_qty = int(s["StockAmt"])
-                    break
+            holding_qty = holding_info["qty"] if holding_info else 0
 
             if holding_qty <= 0:
                 print(f"[{stock_name}] 보유 수량 없음 — 분할 매도 스킵")
                 return False
 
-            sell_qty = max(1, int(holding_qty * sell_pct / 100.0))
-
-            current_price = float(KIS.GetCurrentPrice(stock_code))
-            sell_amount   = current_price * sell_qty
-            avg_price     = self.get_average_price(stock_code)
+            sell_qty    = max(1, int(holding_qty * sell_pct / 100.0))
+            sell_amount = current_price * sell_qty
+            avg_price   = (
+                holding_info["avg_price"]
+                if holding_info and holding_info["avg_price"] > 0
+                else self.get_average_price(stock_code)
+            )
 
             profit_loss = None
             profit_loss_pct = None
@@ -967,7 +977,12 @@ class TradingEngine:
             print(f"[{stock_name}] TradingSummary 업데이트 오류: {e}")
             traceback.print_exc()
 
-    def _update_peak_stats(self, config: TradingConfig):
+    def _update_peak_stats(
+        self,
+        config: TradingConfig,
+        current_price: float,
+        holding_info: dict,
+    ):
         """
         보유 중인 포지션의 현재가 기반으로 TradingSummary의
         max_profit_percent와 max_drawdown을 실시간 업데이트합니다.
@@ -977,20 +992,12 @@ class TradingEngine:
           낙폭 = 최고수익률 - 현재수익률 (수익률 포인트 기준)
         """
         try:
-            stock_code = config.stock_code
-
-            holding_qty = 0
-            avg_price   = 0.0
-            for s in KIS.GetMyStockList():
-                if s["StockCode"] == stock_code:
-                    holding_qty = int(s["StockAmt"])
-                    avg_price   = float(s["StockAvgPrice"])
-                    break
+            holding_qty = holding_info["qty"]
+            avg_price   = holding_info["avg_price"]
 
             if holding_qty <= 0 or avg_price <= 0:
                 return
 
-            current_price      = float(KIS.GetCurrentPrice(stock_code))
             current_profit_pct = (current_price - avg_price) / avg_price * 100.0
 
             summary = TradingSummary.objects.filter(
@@ -1041,6 +1048,13 @@ class TradingEngine:
     # 트레이딩 사이클 메인
     # ──────────────────────────────────────────────
 
+    def _extract_holding_info(self, stock_code: str, my_stocks: list[dict]) -> dict:
+        """my_stocks 캐시에서 특정 종목의 보유 정보를 추출합니다."""
+        for s in my_stocks:
+            if s["StockCode"] == stock_code:
+                return {"qty": int(s["StockAmt"]), "avg_price": float(s["StockAvgPrice"])}
+        return {"qty": 0, "avg_price": 0.0}
+
     def run_trading_cycle(self):
         """
         1회 트레이딩 사이클을 실행합니다.
@@ -1052,6 +1066,7 @@ class TradingEngine:
             print("[TradingEngine] 장 시간 아님 — 종료")
             return
 
+        # 사이클 레벨 캐시: GetBalance, GetMyStockList 각 1회만 호출
         try:
             balance = KIS.GetBalance()
             if float(balance["TotalMoney"]) <= 0:
@@ -1065,6 +1080,12 @@ class TradingEngine:
             print(f"[TradingEngine] 잔고 조회 실패: {e}")
             return
 
+        try:
+            my_stocks: list[dict] = KIS.GetMyStockList()
+        except Exception as e:
+            print(f"[TradingEngine] 보유 종목 조회 실패: {e}")
+            my_stocks = []
+
         # 설정 다시 로드 (사이클 시작 시 최신 상태 반영)
         self._load_configs()
 
@@ -1074,33 +1095,43 @@ class TradingEngine:
             try:
                 print(f"\n[{config.stock_name}] 매매 체크 시작")
 
+                # 종목 레벨 캐시: GetCurrentPrice 1회 호출 후 재사용
+                current_price = float(KIS.GetCurrentPrice(config.stock_code))
+                holding_info = self._extract_holding_info(config.stock_code, my_stocks)
+
                 # 0. 보유 중인 포지션의 최고수익률 / 최대낙폭 실시간 업데이트
-                self._update_peak_stats(config)
+                self._update_peak_stats(config, current_price, holding_info)
 
                 # 1. 청산 조건 체크 (우선 — 손절/트레일링스탑/전량 익절)
-                should_exit, exit_reason = self.check_exit_conditions(config)
+                should_exit, exit_reason = self.check_exit_conditions(
+                    config, current_price, holding_info
+                )
                 if should_exit:
-                    self.execute_sell_order(config, exit_reason)
+                    self.execute_sell_order(config, exit_reason, current_price, holding_info)
                     continue
 
                 # 1-b. 분할 익절 체크
-                stage, sell_pct, stage_reason = self.check_staged_exit(config)
+                stage, sell_pct, stage_reason = self.check_staged_exit(config, current_price)
                 if stage is not None:
                     self._mark_staged_exit_stage(config, stage)
                     if sell_pct >= 100:
-                        self.execute_sell_order(config, stage_reason)
+                        self.execute_sell_order(
+                            config, stage_reason, current_price, holding_info
+                        )
                     else:
-                        self.execute_partial_sell_order(config, sell_pct, stage_reason)
+                        self.execute_partial_sell_order(
+                            config, sell_pct, stage_reason, current_price, holding_info
+                        )
                     continue
 
                 # 2. 진입 조건 체크
-                should_enter = self.check_entry_conditions(config)
+                should_enter = self.check_entry_conditions(config, current_price, holding_info)
                 if should_enter:
-                    position_amount = self.calculate_position_size(config)
+                    position_amount = self.calculate_position_size(config, balance, current_price)
                     if position_amount > 0:
                         entry_amount = self.get_current_entry_amount(config, position_amount)
                         if entry_amount > 0:
-                            self.execute_buy_order(config, entry_amount)
+                            self.execute_buy_order(config, entry_amount, current_price)
                         else:
                             print(f"[{config.stock_name}] 피라미딩 한도 초과")
 

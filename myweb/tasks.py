@@ -1,7 +1,7 @@
 import os
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from django_apscheduler.jobstores import DjangoJobStore, register_events
@@ -272,6 +272,7 @@ def _start_sleep_watchdog(get_scheduler_fn, restart_fn):
                         conn.close_if_unusable_or_obsolete()
                     restart_fn()
                     _slog("[워치독] 스케줄러 재시작 완료")
+                    run_catchup_pipeline_if_needed()
                 except Exception as e:
                     _slog(f"[워치독] 스케줄러 재시작 실패: {e}")
 
@@ -281,6 +282,77 @@ def _start_sleep_watchdog(get_scheduler_fn, restart_fn):
 
 _current_scheduler = None
 _watchdog_started = False
+
+
+def find_missing_date_range() -> tuple | None:
+    """
+    DB의 마지막 수집일과 어제 사이에 누락된 거래일 범위를 반환한다.
+    누락이 없으면 None을 반환한다.
+
+    Returns:
+        (start_date_str, end_date_str) | None
+    """
+    try:
+        from django.db.models import Max
+        from myweb.models import StockOHLCV
+
+        result = StockOHLCV.objects.aggregate(last=Max("date"))
+        last_date = result["last"]
+
+        if last_date is None:
+            return None
+
+        yesterday = date.today() - timedelta(days=1)
+
+        if last_date >= yesterday:
+            return None
+
+        start = last_date + timedelta(days=1)
+        end = yesterday
+
+        # 범위 내 평일(월~금)이 하나도 없으면 실제 거래일 없음
+        has_weekday = any(
+            (start + timedelta(days=i)).weekday() < 5
+            for i in range((end - start).days + 1)
+        )
+        if not has_weekday:
+            return None
+
+        return start.isoformat(), end.isoformat()
+
+    except Exception as e:
+        _slog(f"[캐치업] 누락 날짜 탐지 오류: {e}")
+        return None
+
+
+def run_catchup_pipeline_if_needed():
+    """
+    누락된 날짜 범위가 있으면 단일 파이프라인 실행으로 일괄 수집한다.
+    별도 스레드에서 실행하여 스케줄러 시작을 블로킹하지 않는다.
+    """
+    missing = find_missing_date_range()
+    if missing is None:
+        return
+
+    start_date, end_date = missing
+    _slog(f"[캐치업] 누락 구간 감지: {start_date} ~ {end_date} → 파이프라인 1회 실행")
+
+    import threading
+
+    def _run():
+        try:
+            from django.test.client import RequestFactory
+            from dolpha.api_data import run_daily_pipeline
+
+            request = RequestFactory().post("/run_daily_pipeline")
+            run_daily_pipeline(request, start_date=start_date, end_date=end_date)
+            _slog(f"[캐치업] 완료: {start_date} ~ {end_date}")
+        except Exception as e:
+            _slog(f"[캐치업] 파이프라인 오류: {e}")
+            traceback.print_exc()
+
+    t = threading.Thread(target=_run, daemon=True, name="catchup-pipeline")
+    t.start()
 
 
 def _run_pipeline_1535():
@@ -317,7 +389,7 @@ def start():
             id=job_id,
             max_instances=1,
             replace_existing=True,
-            misfire_grace_time=3600,  # 서버 재시작 시 1시간 이내 missed job 즉시 실행
+            misfire_grace_time=60,  # 잠깐의 재시작만 커버 — 슬립 누락은 캐치업 로직이 처리
         )
         print(f"Scheduled job '{job_id}' at {hour:02d}:{minute:02d} - {description}")
 
@@ -376,6 +448,8 @@ def start():
     scheduler.start()
     _current_scheduler = scheduler
     print("Scheduler started!", file=sys.stdout)
+
+    run_catchup_pipeline_if_needed()  # 콜드 스타트 시 누락 데이터 보정
 
     if not _watchdog_started:
         _watchdog_started = True

@@ -16,6 +16,7 @@ KIS inquire-time-itemchartprice 엔드포인트 사용.
   }, ...]  # 시간 오름차순 정렬
 """
 
+import time
 import warnings
 from datetime import datetime
 from typing import Optional
@@ -35,7 +36,7 @@ def GetMinuteOhlcvKR(stock_code: str, end_hhmmss: Optional[str] = None) -> list[
     KIS API로 국내 주식 당일 분봉 OHLCV 조회.
 
     KIS는 한 번 호출에 종료 시각 기준 과거 30건만 반환.
-    당일 정규장(09:00~15:30, 390분) 전체를 받기 위해 페이지네이션.
+    pre-market(08:00~09:00) + 정규장(09:00~15:30) + after-market(15:30~20:00) 전체를 받기 위해 페이지네이션.
 
     Args:
         stock_code  : 종목코드 (6자리)
@@ -52,8 +53,8 @@ def GetMinuteOhlcvKR(stock_code: str, end_hhmmss: Optional[str] = None) -> list[
     all_rows: dict[str, dict] = {}
     current_end = end_hhmmss
 
-    # 최대 20페이지 (600분, 정규장 충분히 커버) 안전장치
-    for _ in range(20):
+    # 최대 25페이지 (750분, pre/after market 포함) 안전장치
+    for _ in range(25):
         params = {
             "FID_ETC_CLS_CODE": "",
             "FID_COND_MRKT_DIV_CODE": "J",
@@ -106,15 +107,18 @@ def GetMinuteOhlcvKR(stock_code: str, end_hhmmss: Optional[str] = None) -> list[
         if new_count == 0:
             break
 
-        # 09:00 이전이면 종료
-        if earliest_hhmmss <= "090000":
+        # 08:00 이전이면 종료 (pre-market 포함)
+        if earliest_hhmmss <= "080000":
             break
+
+        # KIS API 레이트 리밋 방지 (초당 ~5회 제한)
+        time.sleep(0.22)
 
         # 다음 페이지는 가장 이른 시각 1초 전부터 조회
         try:
             h, m, s = int(earliest_hhmmss[:2]), int(earliest_hhmmss[2:4]), int(earliest_hhmmss[4:6])
             total_sec = h * 3600 + m * 60 + s - 1
-            if total_sec < 9 * 3600:
+            if total_sec < 8 * 3600:
                 break
             current_end = f"{total_sec // 3600:02d}{(total_sec % 3600) // 60:02d}{total_sec % 60:02d}"
         except (ValueError, TypeError):
