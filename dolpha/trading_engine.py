@@ -70,6 +70,26 @@ class TradingEngine:
             status="FILLED",
         ).order_by("filled_at")
 
+    def _deactivate_config(self, config: TradingConfig) -> None:
+        """
+        포지션 전량 청산 시 TradingConfig의 모든 포지션 추적 상태를 초기화합니다.
+        - BUY/FILLED 엔트리 → CANCELLED
+        - trailing_stop_peak_price → None
+        - staged_exit_completed_stages → []
+        - is_active → False
+        """
+        stock_code = config.stock_code
+        self._buy_entries(stock_code).update(status="CANCELLED")
+        config.trailing_stop_peak_price = None
+        config.staged_exit_completed_stages = []
+        config.is_active = False
+        config.save(update_fields=[
+            "trailing_stop_peak_price",
+            "staged_exit_completed_stages",
+            "is_active",
+        ])
+        print(f"[{config.stock_name}] 포지션 청산 완료 — 자동매매 비활성화")
+
     def get_entry_count(self, stock_code: str) -> int:
         """현재 보유 매수 횟수 (BUY/FILLED 체결 건수)."""
         return self._buy_entries(stock_code).count()
@@ -369,6 +389,7 @@ class TradingEngine:
             (should_exit, reason_str)
         """
         try:
+            stock_code  = config.stock_code
             mode        = config.trading_mode
             stop_loss   = config.stop_loss  or 8.0
             take_profit = config.take_profit or 24.0
@@ -777,14 +798,8 @@ class TradingEngine:
                 filled_at       = now,
             )
 
-            # 기존 BUY/FILLED 엔트리 → 포지션 종료 표시 ('CANCELLED' 재사용)
-            self._buy_entries(stock_code).update(status="CANCELLED")
-
-            # 트레일링 스탑 고점 리셋 + 분할 익절 단계 리셋 + 자동매매 비활성화
-            config.trailing_stop_peak_price = None
-            config.staged_exit_completed_stages = []
-            config.is_active = False
-            config.save(update_fields=["trailing_stop_peak_price", "staged_exit_completed_stages", "is_active"])
+            # 포지션 청산 — BUY 엔트리 CANCELLED, 상태 리셋, 비활성화
+            self._deactivate_config(config)
 
             # TradingSummary 업데이트
             self._update_trading_summary(config, stock_code, stock_name)
@@ -890,12 +905,7 @@ class TradingEngine:
 
             # 분할 매도로 잔여 수량이 0이 되는 경우 → 전량 청산 처리
             if sell_qty >= holding_qty:
-                self._buy_entries(stock_code).update(status="CANCELLED")
-                config.trailing_stop_peak_price = None
-                config.staged_exit_completed_stages = []
-                config.is_active = False
-                config.save(update_fields=["trailing_stop_peak_price", "staged_exit_completed_stages", "is_active"])
-                print(f"[{stock_name}] 분할 매도로 전량 청산 — 자동매매 비활성화")
+                self._deactivate_config(config)
 
             # 항상 TradingSummary 업데이트
             self._update_trading_summary(config, stock_code, stock_name)
@@ -1005,6 +1015,7 @@ class TradingEngine:
           낙폭 = 최고수익률 - 현재수익률 (수익률 포인트 기준)
         """
         try:
+            stock_code  = config.stock_code
             holding_qty = holding_info["qty"]
             avg_price   = holding_info["avg_price"]
 
@@ -1126,15 +1137,17 @@ class TradingEngine:
                 # 1-b. 분할 익절 체크
                 stage, sell_pct, stage_reason = self.check_staged_exit(config, current_price)
                 if stage is not None:
-                    self._mark_staged_exit_stage(config, stage)
                     if sell_pct >= 100:
-                        self.execute_sell_order(
+                        sell_ok = self.execute_sell_order(
                             config, stage_reason, current_price, holding_info
                         )
                     else:
-                        self.execute_partial_sell_order(
+                        sell_ok = self.execute_partial_sell_order(
                             config, sell_pct, stage_reason, current_price, holding_info
                         )
+                    # 매도가 성공한 경우에만 단계 완료 기록 (순서 주의: sell 후 mark)
+                    if sell_ok:
+                        self._mark_staged_exit_stage(config, stage)
                     continue
 
                 # 2. 진입 조건 체크
