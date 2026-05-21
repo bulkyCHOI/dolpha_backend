@@ -315,7 +315,7 @@ def get_trading_summary_data(request):
         if not user:
             return JsonResponse({"error": "인증이 필요합니다."}, status=401)
 
-        queryset = TradingSummary.objects.filter(user=user, final_status="CLOSED").order_by("-last_exit_date")
+        queryset = TradingSummary.objects.filter(user=user).exclude(final_status="PARTIAL").order_by("-last_exit_date")
 
         data = [
             {
@@ -385,12 +385,14 @@ def get_trade_entries(request, trading_summary_id: int):
             trading_summary=trading_summary
         ).order_by("ordered_at", "created_at")
 
-        # trading_summary FK가 연결되지 않은 기존 데이터 fallback: stock_code + user 기준
+        # trading_summary FK가 연결되지 않은 기존 데이터 fallback: stock_code + user + 날짜 범위 기준
         if not entries.exists():
-            entries = TradeEntry.objects.filter(
-                user=user,
-                stock_code=trading_summary.stock_code,
-            ).order_by("ordered_at", "created_at")
+            fallback_filter = dict(user=user, stock_code=trading_summary.stock_code)
+            if trading_summary.first_entry_date:
+                fallback_filter["ordered_at__date__gte"] = trading_summary.first_entry_date
+            if trading_summary.last_exit_date:
+                fallback_filter["ordered_at__date__lte"] = trading_summary.last_exit_date
+            entries = TradeEntry.objects.filter(**fallback_filter).order_by("ordered_at", "created_at")
             # 조회된 orphan 엔트리를 summary에 연결해 다음 조회부터는 정확히 반환
             if entries.exists():
                 entries.update(trading_summary=trading_summary)

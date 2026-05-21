@@ -1588,6 +1588,92 @@ def find_stock_minute(request, code: str):
         return JsonResponse({"status": "error", "message": str(e)}, status=500)
 
 
+@query_router.get("/find_stock_minute_stream")
+def find_stock_minute_stream(request, code: str):
+    """
+    1분봉 OHLCV SSE 스트리밍.
+    DB(stock_minute_ohlcv)에 당일 데이터가 있으면 DB에서 즉시 반환,
+    없으면 KIS API 실시간 조회로 fallback (장 중 첫 조회 등).
+    """
+    import json
+    from datetime import date, datetime as dt_cls
+    from django.http import JsonResponse, StreamingHttpResponse
+    from myweb.models import StockMinuteOhlcv
+    from pytz import timezone as pytz_tz
+
+    if not code or not code.strip():
+        return JsonResponse({"status": "error", "message": "종목코드가 필요합니다."}, status=400)
+
+    stock_code = code.strip()
+    _KST = pytz_tz("Asia/Seoul")
+
+    def _bars_from_db(target_date: date) -> list[dict]:
+        # __date 필터가 환경에 따라 동작 안 할 수 있으므로 range로 직접 필터
+        start = _KST.localize(dt_cls(target_date.year, target_date.month, target_date.day, 0, 0, 0))
+        end   = _KST.localize(dt_cls(target_date.year, target_date.month, target_date.day, 23, 59, 59))
+        qs = StockMinuteOhlcv.objects.filter(
+            stock_code=stock_code,
+            bar_datetime__range=(start, end),
+            volume__gt=0,
+        ).order_by("bar_datetime")
+        result = []
+        for r in qs:
+            # DB는 UTC로 저장 → KST로 변환 후 문자열 반환 (09:00~15:30 표시용)
+            kst_dt = r.bar_datetime.astimezone(_KST)
+            result.append({
+                "datetime": kst_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "time": kst_dt.strftime("%H:%M"),
+                "open": r.open,
+                "high": r.high,
+                "low": r.low,
+                "close": r.close,
+                "volume": r.volume,
+            })
+        return result
+
+    def _latest_trade_date() -> date:
+        """DB에 저장된 가장 최근 거래일(KST 기준) 반환. 없으면 오늘."""
+        latest = StockMinuteOhlcv.objects.filter(
+            stock_code=stock_code
+        ).order_by("-bar_datetime").first()
+        if latest:
+            return latest.bar_datetime.astimezone(_KST).date()
+        return dt_cls.now(_KST).date()
+
+    def event_stream():
+        try:
+            today = dt_cls.now(_KST).date()  # KST 기준 오늘 날짜
+            db_bars = _bars_from_db(today)
+
+            if db_bars:
+                # DB에 당일 데이터 있음 → 일괄 전송
+                yield f"data: {json.dumps({'status': 'ok', 'data': db_bars})}\n\n"
+            else:
+                # 당일 데이터 없음 → 가장 최근 거래일 DB 데이터 확인
+                latest_date = _latest_trade_date()
+                if latest_date != today:
+                    prev_bars = _bars_from_db(latest_date)
+                    if prev_bars:
+                        yield f"data: {json.dumps({'status': 'ok', 'data': prev_bars})}\n\n"
+                        yield f"data: {json.dumps({'status': 'done'})}\n\n"
+                        return
+
+                # DB 데이터 없음 → KIS API fallback
+                from .kis import _iter_minute_pages
+                for batch in _iter_minute_pages(stock_code):
+                    yield f"data: {json.dumps({'status': 'ok', 'data': batch})}\n\n"
+
+        except Exception as e:
+            traceback.print_exc()
+            yield f"data: {json.dumps({'status': 'error', 'message': str(e)})}\n\n"
+        yield f"data: {json.dumps({'status': 'done'})}\n\n"
+
+    response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response
+
+
 @query_router.get("/find_stock_current_price")
 def find_stock_current_price(request, code: str):
     """종목 현재가 조회 (KIS API)."""

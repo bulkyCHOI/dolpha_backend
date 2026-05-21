@@ -19,7 +19,7 @@ KIS inquire-time-itemchartprice 엔드포인트 사용.
 import time
 import warnings
 from datetime import datetime
-from typing import Optional
+from typing import Generator, Iterator, Optional
 
 import requests
 
@@ -48,13 +48,17 @@ def GetMinuteOhlcvKR(stock_code: str, end_hhmmss: Optional[str] = None) -> list[
     headers = GetHeaders(tr_id=_TR_ID, mode="REAL")
 
     if end_hhmmss is None:
-        end_hhmmss = datetime.now().strftime("%H%M%S")
+        now_hhmmss = datetime.now().strftime("%H%M%S")
+        # 장 마감(15:30) 이후에 호출 시 현재 시각을 그대로 쓰면
+        # 역방향 페이징 범위가 오후/야간으로 편향되어 09:00 이전 구간이 잘린다.
+        # after-market 최대치(20:00)를 상한으로 두어 항상 정규장 전체를 포함.
+        end_hhmmss = min(now_hhmmss, "200000")
 
     all_rows: dict[str, dict] = {}
     current_end = end_hhmmss
 
-    # 최대 25페이지 (750분, pre/after market 포함) 안전장치
-    for _ in range(25):
+    # 최대 40페이지 (1200분, pre/after market 포함) 안전장치
+    for _ in range(40):
         params = {
             "FID_ETC_CLS_CODE": "",
             "FID_COND_MRKT_DIV_CODE": "J",
@@ -125,3 +129,105 @@ def GetMinuteOhlcvKR(stock_code: str, end_hhmmss: Optional[str] = None) -> list[
             break
 
     return sorted(all_rows.values(), key=lambda x: x["datetime"])
+
+
+_REGULAR_START = "090000"
+_REGULAR_END   = "153000"
+
+
+def _iter_minute_pages(stock_code: str, end_hhmmss: Optional[str] = None) -> Iterator[list[dict]]:
+    """KIS 분봉(정규장 09:00~15:30, 가장 최근 거래일)을 페이지 단위로 yield.
+
+    장 시작 전(09:00 이전)이라도 전 거래일 데이터를 반환.
+    FID_PW_DATA_INCU_YN=Y(전일 포함)로 조회 후 가장 최근 영업일 날짜만 필터.
+    """
+    url = f"{get_url_base('REAL')}/{_PATH}"
+    headers = GetHeaders(tr_id=_TR_ID, mode="REAL")
+
+    seen_keys: set[str] = set()
+    current_end = _REGULAR_END  # 항상 15:30 기준으로 역방향 페이지네이션
+    target_ymd: Optional[str] = None  # 첫 응답에서 확정되는 최근 거래일
+
+    for _ in range(25):
+        params = {
+            "FID_ETC_CLS_CODE": "",
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_INPUT_ISCD": stock_code,
+            "FID_INPUT_HOUR_1": current_end,
+            "FID_PW_DATA_INCU_YN": "Y",  # 전일 포함 → 장 전에도 전 거래일 데이터 조회 가능
+        }
+
+        res = requests.get(url, headers=headers, params=params, timeout=15, verify=False)
+        if res.status_code != 200:
+            break
+
+        body = res.json()
+        if body.get("rt_cd") != "0":
+            break
+
+        rows = body.get("output2", [])
+        if not rows:
+            break
+
+        # 첫 페이지에서 가장 최근 거래일을 확정
+        if target_ymd is None:
+            dates = [r.get("stck_bsop_date") for r in rows if r.get("stck_bsop_date")]
+            if not dates:
+                break
+            target_ymd = max(dates)
+
+        batch: list[dict] = []
+        new_count = 0
+        earliest_hhmmss = current_end
+
+        for r in rows:
+            hhmmss = r.get("stck_cntg_hour")
+            ymd = r.get("stck_bsop_date")
+            if not hhmmss or not ymd:
+                continue
+            # 확정된 거래일 + 정규장 시간 범위만 허용
+            if ymd != target_ymd or hhmmss < _REGULAR_START or hhmmss > _REGULAR_END:
+                continue
+            key = f"{ymd}{hhmmss}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            try:
+                volume = float(r.get("cntg_vol", 0) or 0)
+                # volume=0인 봉은 거래 미발생 phantom 봉 → 제외
+                if volume <= 0:
+                    continue
+                batch.append({
+                    "datetime": f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]} {hhmmss[:2]}:{hhmmss[2:4]}:00",
+                    "time": f"{hhmmss[:2]}:{hhmmss[2:4]}",
+                    "open": float(r.get("stck_oprc", 0) or 0),
+                    "high": float(r.get("stck_hgpr", 0) or 0),
+                    "low": float(r.get("stck_lwpr", 0) or 0),
+                    "close": float(r.get("stck_prpr", 0) or 0),
+                    "volume": volume,
+                })
+                new_count += 1
+                if hhmmss < earliest_hhmmss:
+                    earliest_hhmmss = hhmmss
+            except (ValueError, TypeError):
+                continue
+
+        if batch:
+            yield batch
+
+        if new_count == 0:
+            break
+
+        if earliest_hhmmss <= _REGULAR_START:
+            break
+
+        time.sleep(0.22)
+
+        try:
+            h, m, s = int(earliest_hhmmss[:2]), int(earliest_hhmmss[2:4]), int(earliest_hhmmss[4:6])
+            total_sec = h * 3600 + m * 60 + s - 1
+            if total_sec < 9 * 3600:
+                break
+            current_end = f"{total_sec // 3600:02d}{(total_sec % 3600) // 60:02d}{total_sec % 60:02d}"
+        except (ValueError, TypeError):
+            break

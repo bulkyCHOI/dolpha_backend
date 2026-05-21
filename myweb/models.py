@@ -627,6 +627,30 @@ class TradeEntry(models.Model):
         )
 
 
+class StockMinuteOhlcv(models.Model):
+    """자동매매 대상 종목의 분봉 OHLCV (트레이딩 사이클에서 D-1분 단위 수집)."""
+
+    stock_code = models.CharField(max_length=10, db_index=True)
+    bar_datetime = models.DateTimeField()  # KST 기준 분봉 시작 시각 (초=0)
+    open = models.FloatField(default=0.0)
+    high = models.FloatField(default=0.0)
+    low = models.FloatField(default=0.0)
+    close = models.FloatField(default=0.0)
+    volume = models.FloatField(default=0.0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "stock_minute_ohlcv"
+        unique_together = [("stock_code", "bar_datetime")]
+        ordering = ["stock_code", "bar_datetime"]
+        indexes = [
+            models.Index(fields=["stock_code", "bar_datetime"], name="idx_smo_code_dt"),
+        ]
+
+    def __str__(self):
+        return f"{self.stock_code} {self.bar_datetime}"
+
+
 class DailyAccountSnapshot(models.Model):
     """일별 계좌 잔고 스냅샷 (차트용)"""
 

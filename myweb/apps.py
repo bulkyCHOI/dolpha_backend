@@ -7,6 +7,7 @@ class MywebConfig(AppConfig):
 
     def ready(self):
         import os
+        from . import signals  # noqa: F401
         # runserver의 auto-reloader가 띄우는 두 번째 프로세스에서는 실행하지 않음
         if settings.SCHEDULER_DEFAULT and os.environ.get("RUN_MAIN") == "true":
             from .tasks import start

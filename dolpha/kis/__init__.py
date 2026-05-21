@@ -14,7 +14,7 @@ dolpha.kis — KIS(한국투자증권) API 통합 패키지
 """
 from .auth import GetToken, MakeToken, GetHeaders
 from .ohlcv import GetOhlcvKR
-from .minute import GetMinuteOhlcvKR
+from .minute import GetMinuteOhlcvKR, _iter_minute_pages
 from .trade import (
     GetHashKey,
     GetBalance,
@@ -27,7 +27,7 @@ from .trade import (
 __all__ = [
     "GetToken", "MakeToken", "GetHeaders",
     "GetOhlcvKR",
-    "GetMinuteOhlcvKR",
+    "GetMinuteOhlcvKR", "_iter_minute_pages",
     "GetHashKey",
     "GetBalance", "GetMyStockList", "GetCurrentPrice",
     "MakeBuyMarketOrder", "MakeSellMarketOrder",

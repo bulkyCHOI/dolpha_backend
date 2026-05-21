@@ -23,7 +23,7 @@ from decimal import Decimal
 
 from django.utils import timezone as tz
 
-from myweb.models import TradingConfig, TradeEntry, TradingSummary
+from myweb.models import TradingConfig, TradeEntry, TradingSummary, StockMinuteOhlcv
 from dolpha.kis import trade as KIS
 from dolpha.stockCommon import GetOhlcv
 
@@ -88,6 +88,7 @@ class TradingEngine:
             "staged_exit_completed_stages",
             "is_active",
         ])
+        StockMinuteOhlcv.objects.filter(stock_code=stock_code).delete()
         print(f"[{config.stock_name}] 포지션 청산 완료 — 자동매매 비활성화")
 
     def get_entry_count(self, stock_code: str) -> int:
@@ -176,9 +177,10 @@ class TradingEngine:
                     )
                     return pos_amount
                 else:
-                    # ATR 실패 → manual 방식으로 fallback
+                    # ATR 실패 → manual 방식으로 fallback (8% 고정 손절 사용)
+                    # config.stop_loss는 ATR 배수이므로 퍼센트로 사용하면 단위 오류 발생
                     print(f"[{config.stock_name}] ATR 실패 → Manual fallback")
-                    stop_pct   = (config.stop_loss or 2.0) / 100.0
+                    stop_pct   = 0.08
                     pos_amount = confirmed_capital * max_loss_pct / stop_pct
                     return pos_amount
 
@@ -391,7 +393,8 @@ class TradingEngine:
         try:
             stock_code  = config.stock_code
             mode        = config.trading_mode
-            stop_loss   = config.stop_loss  or 8.0
+            # manual 모드: stop_loss는 퍼센트(기본 8%), atr 모드: ATR 배수(기본 2.0)
+            stop_loss   = config.stop_loss or (8.0 if mode == "manual" else 2.0)
             take_profit = config.take_profit or 24.0
 
             holding_qty = holding_info["qty"]
@@ -646,57 +649,75 @@ class TradingEngine:
                 print(f"[{stock_name}] 매수 수량 0 — 투자금액 부족: {amount:,.0f}원")
                 return False
 
-            # 현재 진입 차수 결정
-            entry_count = self.get_entry_count(stock_code)
-            entry_type  = "INITIAL" if entry_count == 0 else "PYRAMIDING"
+            # select_for_update로 config 행 잠금 — 동시 사이클에서 동일 종목 중복 매수 방지
+            # 잠금 후 entry_count를 재조회하여 race condition으로 인한 중복 진입을 방지
+            # 주의: KIS API 호출을 트랜잭션 내에 포함하므로 DB 커넥션이 API 응답 시까지 유지됨
+            #       (백그라운드 스케줄러 전용이므로 짧은 대기 허용)
+            with transaction.atomic():
+                config = TradingConfig.objects.select_for_update().get(pk=config.pk)
 
-            # KIS 시장가 매수 주문
-            result = KIS.MakeBuyMarketOrder(stock_code, buy_qty)
-            if result is None:
-                print(f"[{stock_name}] 매수 주문 실패")
-                return False
+                # 잠금 후 진입 차수 재확인
+                entry_count = self.get_entry_count(stock_code)
+                entry_type  = "INITIAL" if entry_count == 0 else "PYRAMIDING"
 
-            # DB에 TradeEntry 저장
-            atr_val    = self.get_atr(stock_code)
-            avg_price  = self.get_average_price(stock_code)  # 이전 평균가
+                # KIS 시장가 매수 주문
+                result = KIS.MakeBuyMarketOrder(stock_code, buy_qty)
+                if result is None:
+                    print(f"[{stock_name}] 매수 주문 실패")
+                    TradeEntry.objects.create(
+                        user=self.user, trading_config=config,
+                        stock_code=stock_code, stock_name=stock_name,
+                        trade_type="BUY", entry_type=entry_type,
+                        order_quantity=buy_qty, order_price=Decimal(str(current_price)),
+                        filled_quantity=0, filled_price=Decimal("0"),
+                        filled_amount=Decimal("0"), status="FAILED",
+                        note="KIS 매수 주문 실패", ordered_at=tz.now(),
+                    )
+                    return False
 
-            # 손절 참고가 계산
-            if config.trading_mode == "manual":
-                stop_pct   = (config.stop_loss or 8.0) / 100.0
-                stop_price = Decimal(str(current_price * (1 - stop_pct)))
-            elif atr_val:
-                stop_mul   = config.stop_loss or 2.0
-                stop_price = Decimal(str(current_price - atr_val * stop_mul))
-            else:
-                stop_price = None
+                # DB에 TradeEntry 저장
+                atr_val   = self.get_atr(stock_code)
 
-            TradeEntry.objects.create(
-                user            = self.user,
-                trading_config  = config,
-                stock_code      = stock_code,
-                stock_name      = stock_name,
-                trade_type      = "BUY",
-                entry_type      = entry_type,
-                order_no        = result["OrderNum2"],
-                order_quantity  = buy_qty,
-                order_price     = Decimal(str(current_price)),
-                filled_quantity = buy_qty,
-                filled_price    = Decimal(str(current_price)),
-                filled_amount   = Decimal(str(current_price * buy_qty)),
-                status          = "FILLED",
-                atr_value       = atr_val,
-                stop_price      = stop_price,
-                ordered_at      = tz.now(),
-                filled_at       = tz.now(),
-            )
+                # 손절 참고가 계산
+                if config.trading_mode == "manual":
+                    stop_pct   = (config.stop_loss or 8.0) / 100.0
+                    stop_price = Decimal(str(current_price * (1 - stop_pct)))
+                elif atr_val:
+                    stop_mul   = config.stop_loss or 2.0
+                    stop_price = Decimal(str(current_price - atr_val * stop_mul))
+                else:
+                    stop_price = None
 
-            # 트레일링 스탑 고점 초기화: 신규 진입이면 세팅, 이미 있으면 유지
-            if config.trailing_stop_peak_price is None:
-                config.trailing_stop_peak_price = current_price
-                config.save(update_fields=["trailing_stop_peak_price"])
+                TradeEntry.objects.create(
+                    user            = self.user,
+                    trading_config  = config,
+                    stock_code      = stock_code,
+                    stock_name      = stock_name,
+                    trade_type      = "BUY",
+                    entry_type      = entry_type,
+                    order_no        = result["OrderNum2"],
+                    order_quantity  = buy_qty,
+                    order_price     = Decimal(str(current_price)),
+                    filled_quantity = buy_qty,
+                    filled_price    = Decimal(str(current_price)),
+                    filled_amount   = Decimal(str(current_price * buy_qty)),
+                    status          = "FILLED",
+                    atr_value       = atr_val,
+                    stop_price      = stop_price,
+                    ordered_at      = tz.now(),
+                    filled_at       = tz.now(),
+                )
 
-            # TradingSummary HOLDING 레코드 생성/갱신 (매수 시점에도 호출해야 _update_peak_stats가 동작함)
-            self._update_trading_summary(config, stock_code, stock_name)
+                # 트레일링 스탑 고점: 신규 진입이면 초기화, 피라미딩이면 현재가로 갱신
+                # (피라미딩으로 평균가가 올라가므로 고점도 최신 진입가 기준으로 유지)
+                if config.trailing_stop_peak_price is None or (
+                    entry_type == "PYRAMIDING" and current_price > config.trailing_stop_peak_price
+                ):
+                    config.trailing_stop_peak_price = current_price
+                    config.save(update_fields=["trailing_stop_peak_price"])
+
+                # TradingSummary HOLDING 레코드 생성/갱신 (매수 시점에도 호출해야 _update_peak_stats가 동작함)
+                self._update_trading_summary(config, stock_code, stock_name)
 
             print(
                 f"[{stock_name}] 매수 완료: {buy_qty}주 @ {current_price:,.0f}원"
@@ -772,37 +793,47 @@ class TradingEngine:
             result = KIS.MakeSellMarketOrder(stock_code, holding_qty)
             if result is None:
                 print(f"[{stock_name}] 매도 주문 실패")
+                TradeEntry.objects.create(
+                    user=self.user, trading_config=config,
+                    stock_code=stock_code, stock_name=stock_name,
+                    trade_type="SELL", entry_type=entry_type,
+                    order_quantity=holding_qty, order_price=Decimal(str(current_price)),
+                    filled_quantity=0, filled_price=Decimal("0"),
+                    filled_amount=Decimal("0"), status="FAILED",
+                    note=f"KIS 매도 주문 실패 ({reason})", ordered_at=tz.now(),
+                )
                 return False
 
             now = tz.now()
 
-            # SELL TradeEntry 생성
-            TradeEntry.objects.create(
-                user            = self.user,
-                trading_config  = config,
-                stock_code      = stock_code,
-                stock_name      = stock_name,
-                trade_type      = "SELL",
-                entry_type      = entry_type,
-                order_no        = result["OrderNum2"],
-                order_quantity  = holding_qty,
-                order_price     = Decimal(str(current_price)),
-                filled_quantity = holding_qty,
-                filled_price    = Decimal(str(current_price)),
-                filled_amount   = Decimal(str(sell_amount)),
-                profit_loss     = Decimal(str(profit_loss)) if profit_loss is not None else None,
-                profit_loss_percent = profit_loss_pct,
-                status          = "FILLED",
-                note            = reason,
-                ordered_at      = now,
-                filled_at       = now,
-            )
+            with transaction.atomic():
+                # SELL TradeEntry 생성
+                TradeEntry.objects.create(
+                    user            = self.user,
+                    trading_config  = config,
+                    stock_code      = stock_code,
+                    stock_name      = stock_name,
+                    trade_type      = "SELL",
+                    entry_type      = entry_type,
+                    order_no        = result["OrderNum2"],
+                    order_quantity  = holding_qty,
+                    order_price     = Decimal(str(current_price)),
+                    filled_quantity = holding_qty,
+                    filled_price    = Decimal(str(current_price)),
+                    filled_amount   = Decimal(str(sell_amount)),
+                    profit_loss     = Decimal(str(profit_loss)) if profit_loss is not None else None,
+                    profit_loss_percent = profit_loss_pct,
+                    status          = "FILLED",
+                    note            = reason,
+                    ordered_at      = now,
+                    filled_at       = now,
+                )
 
-            # 포지션 청산 — BUY 엔트리 CANCELLED, 상태 리셋, 비활성화
-            self._deactivate_config(config)
+                # 포지션 청산 — BUY 엔트리 CANCELLED, 상태 리셋, 비활성화
+                self._deactivate_config(config)
 
-            # TradingSummary 업데이트
-            self._update_trading_summary(config, stock_code, stock_name)
+                # TradingSummary 업데이트
+                self._update_trading_summary(config, stock_code, stock_name)
 
             print(
                 f"[{stock_name}] 매도 완료: {holding_qty}주 @ {current_price:,.0f}원"
@@ -852,7 +883,10 @@ class TradingEngine:
                 print(f"[{stock_name}] 보유 수량 없음 — 분할 매도 스킵")
                 return False
 
-            sell_qty    = max(1, int(holding_qty * sell_pct / 100.0))
+            sell_qty = int(holding_qty * sell_pct / 100.0)
+            if sell_qty <= 0:
+                print(f"[{stock_name}] 분할 매도 수량 0 — 스킵 (보유={holding_qty}주, 비율={sell_pct:.0f}%)")
+                return False
             sell_amount = current_price * sell_qty
             avg_price   = (
                 holding_info["avg_price"]
@@ -870,6 +904,15 @@ class TradingEngine:
             result = KIS.MakeSellMarketOrder(stock_code, sell_qty)
             if result is None:
                 print(f"[{stock_name}] 분할 매도 주문 실패")
+                TradeEntry.objects.create(
+                    user=self.user, trading_config=config,
+                    stock_code=stock_code, stock_name=stock_name,
+                    trade_type="SELL", entry_type="EXIT_PARTIAL",
+                    order_quantity=sell_qty, order_price=Decimal(str(current_price)),
+                    filled_quantity=0, filled_price=Decimal("0"),
+                    filled_amount=Decimal("0"), status="FAILED",
+                    note=f"KIS 분할매도 주문 실패 ({reason})", ordered_at=tz.now(),
+                )
                 return False
 
             now = tz.now()
@@ -929,72 +972,74 @@ class TradingEngine:
     ):
         """TradeEntry 집계를 기반으로 TradingSummary를 생성/갱신합니다."""
         try:
-            all_entries = TradeEntry.objects.filter(
-                user=self.user, stock_code=stock_code
-            )
-            buy_entries  = all_entries.filter(trade_type="BUY",  status__in=["FILLED", "CANCELLED"])
-            sell_entries = all_entries.filter(trade_type="SELL", status="FILLED")
+            with transaction.atomic():
+                all_entries = TradeEntry.objects.filter(
+                    user=self.user, trading_config=config, stock_code=stock_code
+                )
+                buy_entries  = all_entries.filter(trade_type="BUY",  status__in=["FILLED", "CANCELLED"])
+                sell_entries = all_entries.filter(trade_type="SELL", status="FILLED")
 
-            if not buy_entries.exists():
-                return
+                if not buy_entries.exists():
+                    return
 
-            total_buy_amount  = int(sum(float(e.filled_amount) for e in buy_entries))
-            total_sell_amount = int(sum(float(e.filled_amount) for e in sell_entries))
-            total_pl          = total_sell_amount - total_buy_amount
-            pl_pct            = total_pl / total_buy_amount * 100.0 if total_buy_amount else 0.0
+                total_buy_amount  = int(sum(float(e.filled_amount) for e in buy_entries))
+                total_sell_amount = int(sum(float(e.filled_amount) for e in sell_entries))
+                total_pl          = total_sell_amount - total_buy_amount
+                pl_pct            = total_pl / total_buy_amount * 100.0 if total_buy_amount else 0.0
 
-            entry_count = buy_entries.count()
-            exit_count  = sell_entries.count()
+                entry_count = buy_entries.count()
+                exit_count  = sell_entries.count()
 
-            first_entry_date = buy_entries.order_by("filled_at").first()
-            first_entry_date = first_entry_date.filled_at if first_entry_date else None
+                first_entry_date = buy_entries.order_by("filled_at").first()
+                first_entry_date = first_entry_date.filled_at if first_entry_date else None
 
-            last_exit_date = sell_entries.order_by("-filled_at").first()
-            last_exit_date = last_exit_date.filled_at if last_exit_date else None
+                last_exit_date = sell_entries.order_by("-filled_at").first()
+                last_exit_date = last_exit_date.filled_at if last_exit_date else None
 
-            # 보유 일수
-            holding_days = 0.0
-            if first_entry_date and last_exit_date:
-                holding_days = (last_exit_date - first_entry_date).total_seconds() / 86400.0
+                # 보유 일수
+                holding_days = 0.0
+                if first_entry_date and last_exit_date:
+                    holding_days = (last_exit_date - first_entry_date).total_seconds() / 86400.0
 
-            # 현재 보유 여부
-            active_buys = all_entries.filter(trade_type="BUY", status="FILLED").exists()
-            final_status = "HOLDING" if active_buys else "CLOSED"
+                # 현재 보유 여부
+                active_buys = all_entries.filter(trade_type="BUY", status="FILLED").exists()
+                final_status = "HOLDING" if active_buys else "CLOSED"
 
-            # 승률 (수익 매도 건 / 전체 매도 건)
-            profitable = sum(
-                1 for e in sell_entries
-                if e.profit_loss is not None and float(e.profit_loss) > 0
-            )
-            win_rate = profitable / exit_count * 100.0 if exit_count else 0.0
+                # 승률: 이 포지션의 최종 손익 기준 (분할 매도 건 단위가 아닌 포지션 전체)
+                win_rate = 100.0 if total_pl > 0 else 0.0
 
-            # get_or_create: first_entry_date 기준
-            # max_profit_percent / max_drawdown은 _update_peak_stats()가 실시간 관리하므로 여기서 덮어쓰지 않음
-            summary, _ = TradingSummary.objects.update_or_create(
-                user             = self.user,
-                stock_code       = stock_code,
-                first_entry_date = first_entry_date,
-                defaults=dict(
-                    stock_name          = stock_name,
-                    last_exit_date      = last_exit_date,
-                    total_buy_amount    = total_buy_amount,
-                    total_sell_amount   = total_sell_amount,
-                    total_profit_loss   = total_pl,
-                    profit_loss_percent = pl_pct,
-                    holding_days        = holding_days,
-                    entry_count         = entry_count,
-                    exit_count          = exit_count,
-                    trading_mode        = "manual" if config.trading_mode == "manual" else "turtle",
-                    win_rate            = win_rate,
-                    avg_holding_days    = holding_days,
-                    final_status        = final_status,
-                ),
-            )
+                # max_profit_percent / max_drawdown은 _update_peak_stats()가 실시간 관리하므로 덮어쓰지 않음
+                # final_status는 defaults에서 제외 — CLOSED 이후 HOLDING 역전 방지를 위해 별도 처리
+                summary, created = TradingSummary.objects.update_or_create(
+                    user             = self.user,
+                    stock_code       = stock_code,
+                    first_entry_date = first_entry_date,
+                    defaults=dict(
+                        stock_name          = stock_name,
+                        last_exit_date      = last_exit_date,
+                        total_buy_amount    = total_buy_amount,
+                        total_sell_amount   = total_sell_amount,
+                        total_profit_loss   = total_pl,
+                        profit_loss_percent = pl_pct,
+                        holding_days        = holding_days,
+                        entry_count         = entry_count,
+                        exit_count          = exit_count,
+                        trading_mode        = "manual" if config.trading_mode == "manual" else "turtle",
+                        win_rate            = win_rate,
+                        avg_holding_days    = holding_days,
+                    ),
+                )
 
-            # TradeEntry → TradingSummary FK 연결
-            all_entries.update(trading_summary=summary)
+                # final_status 갱신: CLOSED는 한 번 확정되면 HOLDING으로 되돌리지 않음
+                if created or summary.final_status != "CLOSED" or final_status == "CLOSED":
+                    if summary.final_status != final_status:
+                        summary.final_status = final_status
+                        summary.save(update_fields=["final_status"])
 
-            print(f"[{stock_name}] TradingSummary 업데이트 완료 (status={final_status})")
+                # TradeEntry → TradingSummary FK 연결
+                all_entries.update(trading_summary=summary)
+
+                print(f"[{stock_name}] TradingSummary 업데이트 완료 (status={final_status})")
 
         except Exception as e:
             print(f"[{stock_name}] TradingSummary 업데이트 오류: {e}")
@@ -1072,6 +1117,46 @@ class TradingEngine:
     # 트레이딩 사이클 메인
     # ──────────────────────────────────────────────
 
+    def _collect_prev_minute_bar(self, stock_code: str) -> None:
+        """
+        현재 시각 기준 1분 전 완성된 분봉을 KIS API에서 조회해 DB에 upsert.
+        예: 09:04:31 실행 → 09:03봉(09:03:00~09:03:59) 저장.
+        """
+        from pytz import timezone as pytz_tz
+        from dolpha.kis.minute import GetMinuteOhlcvKR
+
+        try:
+            now_kst = datetime.now(pytz_tz("Asia/Seoul"))
+            # 1분 전 봉의 HHMMSS (초는 00으로 정규화)
+            prev_dt = now_kst.replace(second=0, microsecond=0) - timedelta(minutes=1)
+            prev_hhmmss = prev_dt.strftime("%H%M%S")
+
+            # 정규장(09:00~15:30) 범위만 저장
+            if not ("090000" <= prev_hhmmss <= "153000"):
+                return
+
+            # end_hhmmss = prev_hhmmss 기준으로 단 1페이지만 조회 (30봉 중 해당 봉 추출)
+            bars = GetMinuteOhlcvKR(stock_code, end_hhmmss=prev_hhmmss)
+            target_time_str = prev_dt.strftime("%H:%M")
+            bar = next((b for b in bars if b.get("time") == target_time_str), None)
+            if not bar or bar.get("volume", 0) <= 0:
+                return
+
+            bar_datetime_naive = prev_dt.replace(tzinfo=None)
+            StockMinuteOhlcv.objects.update_or_create(
+                stock_code=stock_code,
+                bar_datetime=bar_datetime_naive,
+                defaults={
+                    "open": bar["open"],
+                    "high": bar["high"],
+                    "low": bar["low"],
+                    "close": bar["close"],
+                    "volume": bar["volume"],
+                },
+            )
+        except Exception as e:
+            print(f"[{stock_code}] 분봉 수집 오류: {e}")
+
     def _extract_holding_info(self, stock_code: str, my_stocks: list[dict]) -> dict:
         """my_stocks 캐시에서 특정 종목의 보유 정보를 추출합니다."""
         for s in my_stocks:
@@ -1122,6 +1207,9 @@ class TradingEngine:
                 # 종목 레벨 캐시: GetCurrentPrice 1회 호출 후 재사용
                 current_price = float(KIS.GetCurrentPrice(config.stock_code))
                 holding_info = self._extract_holding_info(config.stock_code, my_stocks)
+
+                # D-1 완성 분봉 수집 (현재 분은 미완성이므로 1분 전 봉 저장)
+                self._collect_prev_minute_bar(config.stock_code)
 
                 # 0. 보유 중인 포지션의 최고수익률 / 최대낙폭 실시간 업데이트
                 self._update_peak_stats(config, current_price, holding_info)
