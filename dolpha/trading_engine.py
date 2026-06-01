@@ -1164,6 +1164,27 @@ class TradingEngine:
                 return {"qty": int(s["StockAmt"]), "avg_price": float(s["StockAvgPrice"])}
         return {"qty": 0, "avg_price": 0.0}
 
+    def _reconcile_positions(self, my_stocks: list[dict]) -> None:
+        """
+        실제 계좌 보유 종목과 DB 포지션을 대조하여 불일치 설정을 비활성화합니다.
+
+        엔진 밖에서 매도가 이루어진 경우(수동 매도, 장애 후 복구 등)
+        DB의 is_active 가 True 로 남아 있어도 이 메서드가 정리합니다.
+
+        대상: FILLED BUY 기록이 있으나 실제 계좌에 해당 종목이 없는 설정.
+        """
+        held_codes = {s["StockCode"] for s in my_stocks}
+
+        for config in list(TradingConfig.objects.filter(user=self.user, is_active=True)):
+            if not self._buy_entries(config.stock_code).exists():
+                continue
+            if config.stock_code not in held_codes:
+                print(
+                    f"[{config.stock_name}] 계좌에 없는 포지션 감지"
+                    f" — DB 정리 후 비활성화"
+                )
+                self._deactivate_config(config)
+
     def run_trading_cycle(self):
         """
         1회 트레이딩 사이클을 실행합니다.
@@ -1195,7 +1216,14 @@ class TradingEngine:
             print(f"[TradingEngine] 보유 종목 조회 실패: {e}")
             my_stocks = []
 
-        # 설정 다시 로드 (사이클 시작 시 최신 상태 반영)
+        # 실제 계좌 vs DB 포지션 대조 — 엔진 밖 매도 등으로 생긴 불일치 정리
+        if my_stocks is not None:
+            try:
+                self._reconcile_positions(my_stocks)
+            except Exception as e:
+                print(f"[TradingEngine] 포지션 재조정 실패 (무시): {e}")
+
+        # 설정 다시 로드 (재조정 이후 최신 상태 반영)
         self._load_configs()
 
         print(f"[TradingEngine] 대상 종목 수: {len(self.trading_configs)}")
