@@ -140,12 +140,19 @@ def _iter_minute_pages(stock_code: str, end_hhmmss: Optional[str] = None) -> Ite
 
     장 시작 전(09:00 이전)이라도 전 거래일 데이터를 반환.
     FID_PW_DATA_INCU_YN=Y(전일 포함)로 조회 후 가장 최근 영업일 날짜만 필터.
+
+    Args:
+        stock_code  : 종목코드 (6자리)
+        end_hhmmss  : 페이지네이션 시작점 "HHMMSS" (None이면 현재 시각과 15:30 중 이른 시각)
     """
     url = f"{get_url_base('REAL')}/{_PATH}"
     headers = GetHeaders(tr_id=_TR_ID, mode="REAL")
 
     seen_keys: set[str] = set()
-    current_end = _REGULAR_END  # 항상 15:30 기준으로 역방향 페이지네이션
+    # 장 중(15:30 이전) 호출 시 아직 존재하지 않는 15:30 시각을 참조하면
+    # KIS API가 빈 결과를 반환할 수 있음 → 현재 시각과 15:30 중 이른 시각 사용
+    _now_hhmmss = datetime.now().strftime("%H%M%S")
+    current_end = end_hhmmss or min(_now_hhmmss, _REGULAR_END)
     target_ymd: Optional[str] = None  # 첫 응답에서 확정되는 최근 거래일
 
     for _ in range(25):

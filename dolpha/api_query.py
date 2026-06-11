@@ -1674,6 +1674,33 @@ def find_stock_minute_stream(request, code: str):
     return response
 
 
+@query_router.get("/backfill_minute_ohlcv")
+def backfill_minute_ohlcv(request, code: str):
+    """
+    누락된 분봉 데이터 백필 (KIS API → DB upsert).
+
+    당일 정규장(09:00~현재 시각) 범위 전체를 KIS API로 조회해
+    DB에 없는 봉을 채웁니다.
+
+    Returns:
+        { "status": "ok", "upserted": <봉 수>, "code": <종목코드> }
+    """
+    from django.http import JsonResponse
+
+    try:
+        if not code or not code.strip():
+            return JsonResponse({"status": "error", "message": "종목코드가 필요합니다."}, status=400)
+
+        from dolpha.data_quality import backfill_minute_bars
+
+        count = backfill_minute_bars(code.strip())
+        return JsonResponse({"status": "ok", "upserted": count, "code": code.strip()})
+
+    except Exception as e:
+        traceback.print_exc()
+        return JsonResponse({"status": "error", "message": str(e)}, status=500)
+
+
 @query_router.get("/find_stock_current_price")
 def find_stock_current_price(request, code: str):
     """종목 현재가 조회 (KIS API)."""

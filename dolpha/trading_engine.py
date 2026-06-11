@@ -42,6 +42,8 @@ class TradingEngine:
         """
         self.user = user
         self.trading_configs: list[TradingConfig] = []
+        # 당일 분봉 백필 실행 여부 추적 (날짜가 바뀌면 재실행)
+        self._backfill_done_date: str = ""
         self._load_configs()
 
     # ──────────────────────────────────────────────
@@ -1153,10 +1155,12 @@ class TradingEngine:
             if not bar or bar.get("volume", 0) <= 0:
                 return
 
-            bar_datetime_naive = prev_dt.replace(tzinfo=None)
+            # naive datetime 사용: Django USE_TZ=True 환경에서
+            # settings.TIME_ZONE(=Asia/Seoul)으로 자동 해석되어 UTC로 저장됨
+            bar_dt_naive = prev_dt.replace(tzinfo=None)
             StockMinuteOhlcv.objects.update_or_create(
                 stock_code=stock_code,
-                bar_datetime=bar_datetime_naive,
+                bar_datetime=bar_dt_naive,
                 defaults={
                     "open": bar["open"],
                     "high": bar["high"],
@@ -1167,6 +1171,19 @@ class TradingEngine:
             )
         except Exception as e:
             print(f"[{stock_code}] 분봉 수집 오류: {e}")
+
+    def _backfill_today_bars(self, stock_code: str) -> None:
+        """
+        당일 누락된 분봉을 KIS API로 일괄 채웁니다.
+        엔진 재시작 또는 장 시작 직후 호출해 네트워크 장애로 빠진 봉을 복구합니다.
+        """
+        try:
+            from dolpha.data_quality import backfill_minute_bars
+            count = backfill_minute_bars(stock_code)
+            if count > 0:
+                print(f"[{stock_code}] 분봉 백필 완료: {count}봉 upsert")
+        except Exception as e:
+            print(f"[{stock_code}] 분봉 백필 오류: {e}")
 
     def _extract_holding_info(self, stock_code: str, my_stocks: list[dict]) -> dict:
         """my_stocks 캐시에서 특정 종목의 보유 정보를 추출합니다."""
@@ -1238,6 +1255,14 @@ class TradingEngine:
         self._load_configs()
 
         print(f"[TradingEngine] 대상 종목 수: {len(self.trading_configs)}")
+
+        # 하루 첫 사이클(또는 날짜가 바뀐 첫 사이클)에 당일 분봉 백필 실행
+        # 네트워크 장애로 누락된 봉을 복구하고, 엔진 재시작 시 이전 데이터를 채움
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if self._backfill_done_date != today_str and self.trading_configs:
+            self._backfill_done_date = today_str
+            for config in self.trading_configs:
+                self._backfill_today_bars(config.stock_code)
 
         for config in self.trading_configs:
             try:
