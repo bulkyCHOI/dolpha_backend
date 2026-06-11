@@ -541,8 +541,37 @@ def delete_trading_config_by_stock_code(request, stock_code: str, strategy_type:
         sell_message = ""
         try:
             from dolpha.trading_engine import TradingEngine
+            from dolpha.kis.trade import GetMyStockList, GetCurrentPrice
+
+            # KIS에서 실제 보유 수량을 조회하여 holding_info 구성
+            # holding_info를 넘기지 않으면 execute_sell_order가 수량을 0으로 처리해
+            # 매도를 스킵한 채 config만 삭제되는 버그가 있음
+            holding_info = None
+            try:
+                kis_stocks = GetMyStockList()
+                matched = next((s for s in kis_stocks if s["StockCode"] == stock_code), None)
+                if matched:
+                    holding_info = {
+                        "qty": int(matched["StockAmt"]),
+                        "avg_price": float(matched["StockAvgPrice"]),
+                    }
+            except Exception as kis_err:
+                print(f"[{config.stock_name}] KIS 잔고 조회 실패: {kis_err}")
+
             engine = TradingEngine(user=user)
-            sold = engine.execute_sell_order(config, reason="설정 삭제로 인한 전량 청산")
+            current_price = 0.0
+            if holding_info:
+                try:
+                    current_price = float(GetCurrentPrice(stock_code))
+                except Exception:
+                    pass
+
+            sold = engine.execute_sell_order(
+                config,
+                reason="설정 삭제로 인한 전량 청산",
+                current_price=current_price,
+                holding_info=holding_info,
+            )
             if sold:
                 sell_message = f" ({config.stock_name} 전량 매도 및 매매복기 기록 완료)"
             else:

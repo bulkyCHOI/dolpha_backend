@@ -938,6 +938,15 @@ def getAndSave_stock_data(request, code: str = None, area: str = "KR", start_dat
     for company in tqdm(companies, desc="Processing companies..."):
         # print(company.code, company.name)
 
+        # Layer 1 (KR): 거래정지 이력 종목만 DART 체크 → 기업이벤트 확인 시 수정주가 전체 재수집
+        if company.market in ["KOSDAQ", "KONEX", "KOSPI"]:
+            from dolpha.data_quality import is_in_halt_cooldown, check_dart_corporate_action, refetch_adjusted_history
+            _ohlcv_qs = StockOHLCV.objects.filter(code=company)
+            if is_in_halt_cooldown(_ohlcv_qs, _date.today()):
+                if check_dart_corporate_action(company.code):
+                    refetch_adjusted_history(company, area="KR")
+                    continue
+
         if company.market in ["KOSDAQ", "KONEX", "KOSPI"]:
             df = Common.GetOhlcv("KR", company.code, start_date=start_date, end_date=end_date, adj_ok="1")
         elif company.market in ["NASDAQ", "NYSE", "S&P500"]:
@@ -1050,6 +1059,12 @@ def getAndSave_stock_data(request, code: str = None, area: str = "KR", start_dat
                     ).delete()
                     # 새 데이터 삽입
                     StockOHLCV.objects.bulk_create(stock_ohlcv_list)
+
+                    # Layer 1 폴백 (US): change 임계값 기반 기업이벤트 감지 → 수정주가 재수집
+                    if area == "US":
+                        from dolpha.data_quality import detect_corporate_action_from_saved, refetch_adjusted_history
+                        if detect_corporate_action_from_saved(stock_ohlcv_list):
+                            refetch_adjusted_history(company, area="US")
         except Exception as e:
             traceback.print_exc()
             # return 500, {"error": f"Failed to save stock data: {str(e)}"}
@@ -1243,6 +1258,11 @@ def calculate_rs_score(data, target_date, period_days):
     period_days: 기간(거래일 수, 예: 252일).
     """
     try:
+        # Layer 3: RS 윈도우 내 기업이벤트(무상감자/분할) 감지 → 오염된 RS 무효 처리
+        from dolpha.data_quality import has_corporate_action_in_rs_window
+        if has_corporate_action_in_rs_window(data, target_date, period_days):
+            return -1, [-1, -1, -1, -1]
+
         # Queryset을 리스트로 변환하여 인덱싱
         data = list(data.order_by("date"))
 
@@ -2074,6 +2094,13 @@ def calculate_stock_analysis(
             # 거래정지 / 비정상 데이터 스킵 (high=0 또는 volume=0)
             if not latest_ohlcv or latest_ohlcv.high == 0 or latest_ohlcv.volume == 0:
                 print(f"{company.code} ({company.name}): {target_date} 거래정지 또는 데이터 없음 → 스킵")
+                continue
+
+            # Layer 2: 연속 거래정지 또는 재상장 직후 냉각 기간 → RS 계산 제외
+            from dolpha.data_quality import should_skip_rs
+            skip, skip_reason = should_skip_rs(ohlcv_data, target_date)
+            if skip:
+                print(f"{company.code} ({company.name}): {target_date} {skip_reason} → RS 스킵")
                 continue
 
             latest_close = latest_ohlcv.close

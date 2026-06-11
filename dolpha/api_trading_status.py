@@ -402,6 +402,7 @@ def save_today_snapshot(request):
             "success": True,
             "created": created,
             "date": snapshot.date.isoformat(),
+            "balance": balance,
         })
 
     except Exception as e:
