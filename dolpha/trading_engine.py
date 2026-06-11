@@ -21,6 +21,7 @@ import traceback
 from datetime import datetime, timedelta
 from decimal import Decimal
 
+from django.db import transaction
 from django.utils import timezone as tz
 
 from myweb.models import TradingConfig, TradeEntry, TradingSummary, StockMinuteOhlcv
@@ -164,6 +165,9 @@ class TradingEngine:
                 if atr:
                     if not current_price:
                         current_price = float(KIS.GetCurrentPrice(config.stock_code))
+                    if not current_price or current_price <= 0:
+                        print(f"[{config.stock_name}] 현재가 조회 실패 — 포지션 계산 불가")
+                        return 0.0
                     stop_multiplier = config.stop_loss or 2.0
                     risk_amount     = confirmed_capital * max_loss_pct
                     stop_loss_price = atr * stop_multiplier
@@ -322,7 +326,7 @@ class TradingEngine:
 
             else:  # atr
                 atr = self.get_atr(config.stock_code)
-                if atr is None:
+                if atr is None or atr <= 0:
                     return False
                 multiplier     = float(entry_str)
                 threshold_price = base_price + atr * multiplier
@@ -656,9 +660,16 @@ class TradingEngine:
             with transaction.atomic():
                 config = TradingConfig.objects.select_for_update().get(pk=config.pk)
 
-                # 잠금 후 진입 차수 재확인
+                # 잠금 후 진입 차수 재확인 — 동시 사이클이 먼저 매수했을 경우를 방어
                 entry_count = self.get_entry_count(stock_code)
-                entry_type  = "INITIAL" if entry_count == 0 else "PYRAMIDING"
+                max_entries = (config.pyramiding_count or 0) + 1
+                if entry_count >= max_entries:
+                    print(
+                        f"[{stock_name}] 락 획득 후 재검증: 피라미딩 한도 초과"
+                        f" ({entry_count}/{max_entries}) — 매수 취소"
+                    )
+                    return False
+                entry_type = "INITIAL" if entry_count == 0 else "PYRAMIDING"
 
                 # KIS 시장가 매수 주문
                 result = KIS.MakeBuyMarketOrder(stock_code, buy_qty)
@@ -1111,7 +1122,7 @@ class TradingEngine:
         if now.weekday() >= 5:   # 토/일
             return False
         t = now.strftime("%H%M")
-        return "0900" <= t <= "1530"
+        return "0900" <= t < "1530"
 
     # ──────────────────────────────────────────────
     # 트레이딩 사이클 메인

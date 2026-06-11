@@ -139,7 +139,7 @@ def run_all_trading_cycles():
         users = (
             TradingConfig.objects
             .filter(is_active=True)
-            .select_related("user")
+            .order_by("user")
             .values_list("user", flat=True)
             .distinct()
         )
