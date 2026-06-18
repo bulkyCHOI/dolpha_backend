@@ -73,6 +73,8 @@ ALLOWED_FRONTEND_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://218.152.32.218:3000",  # 실제 서버 도메인
     "http://dolpha.iptime.org:3000",  # 실제 서버 도메인
+    "http://dolpha.ddns.net:3000",  # KT DDNS 도메인
+    "http://dolpha.ddns.net",  # KT DDNS 도메인 (포트 없음)
 ]
 
 # CORS 설정 - credentials를 지원하기 위해 구체적인 도메인 허용
