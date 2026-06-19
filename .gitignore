@@ -77,4 +77,4 @@ Pipfile.lock
 # mypy
 .mypy_cache/
 .dmypy.json
-dmypy.json
+dmypy.jsonnohup.out
