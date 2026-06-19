@@ -94,7 +94,7 @@ def get_trading_status(request):
 
         configs = {
             c.stock_code: c
-            for c in TradingConfig.objects.filter(user=user, is_active=True)
+            for c in TradingConfig.objects.filter(user=user)
         }
 
         # DB 기록이 있는 종목 + KIS에 실제 보유 중인 종목 모두 포함
@@ -403,6 +403,145 @@ def save_today_snapshot(request):
             "created": created,
             "date": snapshot.date.isoformat(),
             "balance": balance,
+        })
+
+    except Exception as e:
+        return JsonResponse({"success": False, "error": str(e)}, status=500)
+
+
+@trading_status_router.post("/reconcile-positions")
+def reconcile_positions(request):
+    """
+    KIS 실계좌와 DB 포지션을 대조하여 잘못 비활성화된 종목을 복구합니다.
+
+    [복구 로직]
+    - KIS 실계좌에 보유 중인 종목 중 is_active=False인 TradingConfig를 재활성화
+    - CANCELLED 상태인 BUY TradeEntry를 FILLED로 복구
+    - trailing_stop_peak_price가 None이면 매수 이후 OHLCV 고점으로 초기화
+    """
+    try:
+        user = get_authenticated_user(request)
+        if not user:
+            return JsonResponse({"error": "인증이 필요합니다."}, status=401)
+
+        from dolpha.kis.trade import GetMyStockList, GetCurrentPrice
+        from dolpha.stockCommon import GetOhlcv, GetNowDateStr
+
+        try:
+            my_stocks = GetMyStockList()
+        except Exception as e:
+            return JsonResponse({"success": False, "error": f"KIS 잔고 조회 실패: {e}"}, status=500)
+
+        if not my_stocks:
+            return JsonResponse({"success": True, "message": "KIS 보유 종목 없음 — 복구 불필요", "recovered": []})
+
+        held_map = {s["StockCode"]: s for s in my_stocks}
+        recovered = []
+        peak_fixed = []
+
+        def _resolve_peak_price(stock_code: str, config: TradingConfig) -> float | None:
+            """
+            매수 첫 체결일 이후 OHLCV High 최대값을 peak로 반환합니다.
+            OHLCV 조회 실패 시 현재가 → KIS 평균단가 순으로 fallback합니다.
+            """
+            # 1순위: 매수 이후 OHLCV 고점 (가장 정확한 값)
+            try:
+                first_entry = (
+                    TradeEntry.objects.filter(
+                        trading_config=config,
+                        trade_type="BUY",
+                        status__in=["FILLED", "CANCELLED"],
+                    )
+                    .order_by("filled_at")
+                    .first()
+                )
+                entry_date = first_entry.filled_at or first_entry.created_at
+                if first_entry and entry_date:
+                    start_date = entry_date.strftime("%Y%m%d")
+                    end_date = GetNowDateStr("KRX", "BAR")
+                    area = "KRX" if len(stock_code) == 6 and stock_code.isdigit() else "NYSE"
+                    df = GetOhlcv(area, stock_code, start_date=start_date, end_date=end_date)
+                    if df is not None and not df.empty and "high" in df.columns:
+                        peak = float(df["high"].max())
+                        if peak > 0:
+                            return peak
+            except Exception as e:
+                print(f"[복구] OHLCV 고점 계산 실패 ({stock_code}): {e}")
+
+            # 2순위: 현재가 (장 중이면 사용 가능)
+            try:
+                price = float(GetCurrentPrice(stock_code))
+                if price > 0:
+                    return price
+            except Exception:
+                pass
+
+            # 3순위: KIS 평균단가
+            try:
+                avg = float(held_map[stock_code].get("StockAvgPrice", 0))
+                if avg > 0:
+                    return avg
+            except Exception:
+                pass
+
+            return None
+
+        # ── Case 1: KIS에 보유 중이지만 DB에서 비활성화된 종목 복구
+        inactive_configs = TradingConfig.objects.filter(user=user, is_active=False)
+        for config in inactive_configs:
+            if config.stock_code not in held_map:
+                continue  # KIS에 없으면 정상 비활성화 — 건너뜀
+
+            # 1) is_active 복구
+            config.is_active = True
+
+            # 2) trailing_stop_peak_price 복구
+            if config.trailing_stop_peak_price is None:
+                config.trailing_stop_peak_price = _resolve_peak_price(config.stock_code, config)
+
+            config.save(update_fields=["is_active", "trailing_stop_peak_price"])
+
+            # 3) CANCELLED BUY 엔트리 FILLED로 복구
+            cancelled_count = TradeEntry.objects.filter(
+                user=user,
+                trading_config=config,
+                trade_type="BUY",
+                status="CANCELLED",
+            ).update(status="FILLED")
+
+            recovered.append({
+                "stock_code": config.stock_code,
+                "stock_name": config.stock_name,
+                "trailing_stop_peak_price": config.trailing_stop_peak_price,
+                "cancelled_entries_restored": cancelled_count,
+            })
+            print(f"[복구] {config.stock_name} — is_active 복구, peak={config.trailing_stop_peak_price}, BUY 엔트리 {cancelled_count}건 FILLED 복구")
+
+        # ── Case 2: is_active=True이지만 고점이 None인 종목도 보정 (장 외 시간 등으로 미설정)
+        active_no_peak = TradingConfig.objects.filter(
+            user=user,
+            is_active=True,
+            trailing_stop_peak_price__isnull=True,
+        )
+        for config in active_no_peak:
+            if config.stock_code not in held_map:
+                continue  # KIS에 없으면 건너뜀
+            price = _resolve_peak_price(config.stock_code, config)
+            if price is not None:
+                config.trailing_stop_peak_price = price
+                config.save(update_fields=["trailing_stop_peak_price"])
+                peak_fixed.append({
+                    "stock_code": config.stock_code,
+                    "stock_name": config.stock_name,
+                    "trailing_stop_peak_price": price,
+                })
+                print(f"[고점보정] {config.stock_name} — peak={price}")
+
+        return JsonResponse({
+            "success": True,
+            "message": f"{len(recovered)}개 종목 복구, {len(peak_fixed)}개 고점 보정 완료",
+            "recovered": recovered,
+            "peak_fixed": peak_fixed,
         })
 
     except Exception as e:

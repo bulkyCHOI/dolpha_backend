@@ -26,7 +26,7 @@ from django.utils import timezone as tz
 
 from myweb.models import TradingConfig, TradeEntry, TradingSummary, StockMinuteOhlcv
 from dolpha.kis import trade as KIS
-from dolpha.stockCommon import GetOhlcv
+from dolpha.stockCommon import GetOhlcv, GetNowDateStr
 
 
 class TradingEngine:
@@ -372,9 +372,51 @@ class TradingEngine:
         except Exception:
             return False, 0.0, 0.0
 
+    def _calc_peak_from_ohlcv(self, config: TradingConfig) -> float | None:
+        """
+        매수 첫 체결일 이후의 OHLCV High 최대값을 반환합니다.
+        엔진 중단 기간의 고점 누락을 보정하기 위해 사용합니다.
+        """
+        try:
+            first_entry = (
+                TradeEntry.objects.filter(
+                    trading_config=config,
+                    trade_type="BUY",
+                    status="FILLED",
+                )
+                .order_by("filled_at")
+                .first()
+            )
+            if first_entry is None or first_entry.filled_at is None:
+                return None
+
+            start_date = first_entry.filled_at.strftime("%Y%m%d")
+            end_date = GetNowDateStr("KRX", "BAR")
+
+            area = "KRX" if len(config.stock_code) == 6 and config.stock_code.isdigit() else "NYSE"
+            df = GetOhlcv(area, config.stock_code, start_date=start_date, end_date=end_date)
+            if df is None or df.empty or "high" not in df.columns:
+                return None
+
+            peak = float(df["high"].max())
+            return peak if peak > 0 else None
+        except Exception as e:
+            print(f"[TradingEngine] OHLCV 고점 계산 실패 ({config.stock_code}): {e}")
+            return None
+
     def _update_peak_price(self, config: TradingConfig, current_price: float):
-        """현재가가 기존 고점보다 높으면 peak_price를 갱신합니다."""
-        if config.trailing_stop_peak_price is None or current_price > config.trailing_stop_peak_price:
+        """
+        현재가가 기존 고점보다 높으면 peak_price를 갱신합니다.
+        peak_price가 None(미초기화)이면 OHLCV 고점으로 초기화하고,
+        그래도 None이면 현재가를 초기값으로 사용합니다.
+        """
+        if config.trailing_stop_peak_price is None:
+            # OHLCV로 매수 이후 실제 고점 계산
+            ohlcv_peak = self._calc_peak_from_ohlcv(config)
+            new_peak = max(ohlcv_peak, current_price) if ohlcv_peak else current_price
+            config.trailing_stop_peak_price = new_peak
+            config.save(update_fields=["trailing_stop_peak_price"])
+        elif current_price > config.trailing_stop_peak_price:
             config.trailing_stop_peak_price = current_price
             config.save(update_fields=["trailing_stop_peak_price"])
 
@@ -986,9 +1028,10 @@ class TradingEngine:
         """TradeEntry 집계를 기반으로 TradingSummary를 생성/갱신합니다."""
         try:
             with transaction.atomic():
+                # CLOSED된 과거 TradingSummary에 연결된 entries는 제외 — 재진입 시 별개 포지션으로 취급
                 all_entries = TradeEntry.objects.filter(
                     user=self.user, trading_config=config, stock_code=stock_code
-                )
+                ).exclude(trading_summary__final_status="CLOSED")
                 buy_entries  = all_entries.filter(trade_type="BUY",  status__in=["FILLED", "CANCELLED"])
                 sell_entries = all_entries.filter(trade_type="SELL", status="FILLED")
 
@@ -1241,11 +1284,13 @@ class TradingEngine:
         try:
             my_stocks: list[dict] = KIS.GetMyStockList()
         except Exception as e:
-            print(f"[TradingEngine] 보유 종목 조회 실패: {e}")
-            my_stocks = []
+            print(f"[TradingEngine] 보유 종목 조회 실패: {e} — 포지션 재조정 건너뜀")
+            my_stocks = None  # 조회 실패 시 None으로 설정하여 재조정 방지
 
         # 실제 계좌 vs DB 포지션 대조 — 엔진 밖 매도 등으로 생긴 불일치 정리
-        if my_stocks is not None:
+        # my_stocks가 None(조회 실패)이거나 빈 리스트이면 재조정을 건너뜀
+        # 빈 리스트로 재조정하면 모든 보유 종목을 잘못 비활성화할 위험이 있음
+        if my_stocks:
             try:
                 self._reconcile_positions(my_stocks)
             except Exception as e:
