@@ -79,15 +79,6 @@ def growth_rate(current, previous):
     return ((current - previous) / abs(previous)) * 100
 
 
-# 상승률 TOP 50 종목을 조회합니다. (MTT 페이지용)
-@query_router.get(
-    "/find_stock_top_rising",
-    response={
-        200: SuccessResponseStockAnalysis,
-        404: ErrorResponse,
-        500: ErrorResponse,
-    },
-)
 PERIOD_TRADING_DAYS = {
     "daily": 1,
     "weekly": 5,
@@ -98,6 +89,15 @@ PERIOD_TRADING_DAYS = {
 }
 
 
+# 상승률 TOP 50 종목을 조회합니다. (MTT 페이지용)
+@query_router.get(
+    "/find_stock_top_rising",
+    response={
+        200: SuccessResponseStockAnalysis,
+        404: ErrorResponse,
+        500: ErrorResponse,
+    },
+)
 def find_stock_top_rising(
     request, area: str = "KR", date: str = None, period: str = "daily", format: str = "json"
 ):
