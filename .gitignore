@@ -79,3 +79,4 @@ Pipfile.lock
 .dmypy.json
 dmypy.json
 nohup.out
+client_secret.json

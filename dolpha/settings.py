@@ -27,7 +27,7 @@ load_dotenv(BASE_DIR / ".env")
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-ophb6jnq-m0ahk(8z&dw9#k1q52gaar8(s16+9-x&t)72*f27='
+SECRET_KEY = os.environ['DJANGO_SECRET_KEY']
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
@@ -247,8 +247,8 @@ SIMPLE_JWT = {
 }
 
 # Google OAuth 설정
-GOOGLE_OAUTH2_CLIENT_ID = '117169175456-hvvdlf539dva9fp2tmbacs4kphnnv1mf.apps.googleusercontent.com'
-GOOGLE_OAUTH2_CLIENT_SECRET = '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'
+GOOGLE_OAUTH2_CLIENT_ID = os.environ['GOOGLE_OAUTH2_CLIENT_ID']
+GOOGLE_OAUTH2_CLIENT_SECRET = os.environ['GOOGLE_OAUTH2_CLIENT_SECRET']
 
 # ─────────────────────────────────────────────────────────────
 # KIS(한국투자증권) API 설정
