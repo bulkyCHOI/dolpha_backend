@@ -88,8 +88,18 @@ def growth_rate(current, previous):
         500: ErrorResponse,
     },
 )
+PERIOD_TRADING_DAYS = {
+    "daily": 1,
+    "weekly": 5,
+    "monthly": 22,
+    "quarterly": 66,
+    "semiannual": 132,
+    "annual": 252,
+}
+
+
 def find_stock_top_rising(
-    request, area: str = "KR", date: str = None, format: str = "json"
+    request, area: str = "KR", date: str = None, period: str = "daily", format: str = "json"
 ):
     """
     최근 거래일 기준 상승률 TOP 50 종목을 조회합니다.\n
@@ -111,32 +121,11 @@ def find_stock_top_rising(
                 status="error", message="Invalid format. Use 'json' or 'excel'"
             )
 
-        # Convert date string to date object if provided
-        query_date = None
-        if date:
-            try:
-                query_date = datetime.strptime(date, "%Y-%m-%d").date()
-            except ValueError:
-                return 400, ErrorResponse(
-                    status="error", message="Invalid date format. Use YYYY-MM-DD"
-                )
-        else:
-            # If no date is provided, find the latest date with rising stocks
-            latest_date_with_data = (
-                StockOHLCV.objects.filter(change__gt=0)
-                .order_by("-date")
-                .values_list("date", flat=True)
-                .first()
+        if period not in PERIOD_TRADING_DAYS:
+            return 400, ErrorResponse(
+                status="error",
+                message="Invalid period. Use: daily, weekly, monthly, quarterly, semiannual, annual",
             )
-
-            if not latest_date_with_data:
-                return 404, ErrorResponse(
-                    status="error",
-                    message="No rising stocks data found in database",
-                )
-
-            query_date = latest_date_with_data
-        print(query_date)
 
         if area == "KR":
             markets = ["KOSPI", "KOSDAQ"]
@@ -147,33 +136,111 @@ def find_stock_top_rising(
                 status="error", message="Invalid area. Use 'KR' or 'US'"
             )
 
-        # 해당 날짜의 상승률 TOP 50 종목 조회 (change 필드 기준 내림차순 정렬)
-        ohlcv_queryset = StockOHLCV.objects.filter(
-            code__market__in=markets, date=query_date, change__gt=0  # 상승한 종목만
-        ).order_by("-change")[:50]
-
-        # Check if any records exist
-        if not ohlcv_queryset.exists():
-            return 404, ErrorResponse(
-                status="error",
-                message=f"No rising stocks found on date {query_date}",
+        # Convert date string to date object if provided
+        query_date = None
+        if date:
+            try:
+                query_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except ValueError:
+                return 400, ErrorResponse(
+                    status="error", message="Invalid date format. Use YYYY-MM-DD"
+                )
+        else:
+            latest_date_with_data = (
+                StockOHLCV.objects.filter(code__market__in=markets)
+                .order_by("-date")
+                .values_list("date", flat=True)
+                .first()
             )
 
-        # 해당 종목들의 분석 데이터 조회
-        stock_codes = [ohlcv.code for ohlcv in ohlcv_queryset]
-        print(stock_codes)
+            if not latest_date_with_data:
+                return 404, ErrorResponse(
+                    status="error",
+                    message="No stock data found in database",
+                )
+
+            query_date = latest_date_with_data
+
+        if period == "daily":
+            # 일간: 당일 change 필드 기준 TOP 50
+            ohlcv_queryset = list(
+                StockOHLCV.objects.filter(
+                    code__market__in=markets, date=query_date, change__gt=0
+                )
+                .select_related("code")
+                .order_by("-change")[:50]
+            )
+
+            if not ohlcv_queryset:
+                return 404, ErrorResponse(
+                    status="error",
+                    message=f"No rising stocks found on date {query_date}",
+                )
+
+            ohlcv_with_change = [(ohlcv.change, ohlcv) for ohlcv in ohlcv_queryset]
+        else:
+            # 기간별: 최근 N 거래일 전 종가 대비 현재 종가 상승률 TOP 50
+            n_days = PERIOD_TRADING_DAYS[period]
+
+            recent_dates = list(
+                StockOHLCV.objects.filter(code__market__in=markets)
+                .values_list("date", flat=True)
+                .distinct()
+                .order_by("-date")[: n_days + 5]
+            )
+
+            if len(recent_dates) < n_days + 1:
+                return 404, ErrorResponse(
+                    status="error",
+                    message=f"Not enough historical data for period '{period}'",
+                )
+
+            end_date = recent_dates[0]
+            start_date = recent_dates[n_days]
+
+            end_map = {
+                o.code_id: o
+                for o in StockOHLCV.objects.filter(
+                    code__market__in=markets, date=end_date
+                ).select_related("code")
+            }
+            start_map = {
+                o.code_id: o.close
+                for o in StockOHLCV.objects.filter(
+                    code__market__in=markets, date=start_date
+                )
+            }
+
+            ohlcv_with_change = []
+            for code_id, ohlcv in end_map.items():
+                start_close = start_map.get(code_id)
+                if start_close and start_close > 0:
+                    change = (ohlcv.close - start_close) / start_close
+                    if change > 0:
+                        ohlcv_with_change.append((change, ohlcv))
+
+            ohlcv_with_change.sort(key=lambda x: x[0], reverse=True)
+            ohlcv_with_change = ohlcv_with_change[:50]
+
+            if not ohlcv_with_change:
+                return 404, ErrorResponse(
+                    status="error",
+                    message=f"No rising stocks found for period '{period}'",
+                )
+
+            query_date = end_date
+
+        # 분석 데이터 조회
+        stock_codes = [ohlcv.code for _, ohlcv in ohlcv_with_change]
         analysis_data = StockAnalysis.objects.filter(
             code__in=stock_codes, date=query_date
         ).select_related("code")
-        print(
-            f"Found {len(analysis_data)} analysis records for {len(stock_codes)} stocks on {query_date}"
-        )
 
         # 분석 데이터를 딕셔너리로 변환 (빠른 조회를 위해)
         analysis_dict = {analysis.code.code: analysis for analysis in analysis_data}
 
         results = []
-        for ohlcv in ohlcv_queryset:
+        for period_change, ohlcv in ohlcv_with_change:
             # 분석 데이터가 있는 종목만 포함
             if ohlcv.code.code in analysis_dict:
                 analysis = analysis_dict[ohlcv.code.code]
@@ -234,7 +301,7 @@ def find_stock_top_rising(
                     "is_minervini_trend": analysis.is_minervini_trend,
                     # OHLCV 추가 필드 (상승률 정보)
                     "close": ohlcv.close,
-                    "change": ohlcv.change,  # 상승률
+                    "change": period_change,
                     # 재무 데이터
                     "market_cap": analysis.market_cap,
                     "당기매출": 매출[0] if len(매출) > 0 else 0,
