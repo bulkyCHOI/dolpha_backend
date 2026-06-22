@@ -1040,8 +1040,6 @@ class TradingEngine:
 
                 total_buy_amount  = int(sum(float(e.filled_amount) for e in buy_entries))
                 total_sell_amount = int(sum(float(e.filled_amount) for e in sell_entries))
-                total_pl          = total_sell_amount - total_buy_amount
-                pl_pct            = total_pl / total_buy_amount * 100.0 if total_buy_amount else 0.0
 
                 entry_count = buy_entries.count()
                 exit_count  = sell_entries.count()
@@ -1060,6 +1058,17 @@ class TradingEngine:
                 # 현재 보유 여부
                 active_buys = all_entries.filter(trade_type="BUY", status="FILLED").exists()
                 final_status = "HOLDING" if active_buys else "CLOSED"
+
+                # 손익 계산
+                # HOLDING(부분 매도): TradeEntry.profit_loss 합계로 실현 손익만 계산
+                #   (total_sell - total_buy 방식은 남은 주식 가치를 0으로 처리해 오류 발생)
+                # CLOSED(전량 매도): total_sell - total_buy가 정확
+                if active_buys:
+                    sell_pls = [e.profit_loss for e in sell_entries if e.profit_loss is not None]
+                    total_pl = int(sum(float(pl) for pl in sell_pls)) if sell_pls else 0
+                else:
+                    total_pl = total_sell_amount - total_buy_amount
+                pl_pct = total_pl / total_buy_amount * 100.0 if total_buy_amount else 0.0
 
                 # 승률: 이 포지션의 최종 손익 기준 (분할 매도 건 단위가 아닌 포지션 전체)
                 win_rate = 100.0 if total_pl > 0 else 0.0
