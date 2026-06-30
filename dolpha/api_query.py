@@ -17,6 +17,7 @@ import OpenDartReader
 
 # Django
 from django.db import transaction, models
+from django.db.models import Count
 from django.http import HttpResponse
 
 # local Django
@@ -211,13 +212,31 @@ def find_stock_top_rising(
                 )
             }
 
+            # 기간 내 각 종목의 실제 거래일 수 집계 (거래정지 종목 필터링용)
+            expected_trading_days = n_days + 1
+            trading_day_counts = {
+                item["code_id"]: item["count"]
+                for item in StockOHLCV.objects.filter(
+                    code__market__in=markets,
+                    date__gte=start_date,
+                    date__lte=end_date,
+                )
+                .values("code_id")
+                .annotate(count=Count("id"))
+            }
+
             ohlcv_with_change = []
             for code_id, ohlcv in end_map.items():
                 start_close = start_map.get(code_id)
-                if start_close and start_close > 0:
-                    change = (ohlcv.close - start_close) / start_close
-                    if change > 0:
-                        ohlcv_with_change.append((change, ohlcv))
+                if not (start_close and start_close > 0):
+                    continue
+                # 기간 내 거래일이 기대치의 80% 미만이면 거래정지 종목으로 간주하여 제외
+                actual_days = trading_day_counts.get(code_id, 0)
+                if actual_days < expected_trading_days * 0.8:
+                    continue
+                change = (ohlcv.close - start_close) / start_close
+                if change > 0:
+                    ohlcv_with_change.append((change, ohlcv))
 
             ohlcv_with_change.sort(key=lambda x: x[0], reverse=True)
             ohlcv_with_change = ohlcv_with_change[:50]
