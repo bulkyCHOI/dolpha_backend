@@ -355,6 +355,19 @@ def run_catchup_pipeline_if_needed():
     t.start()
 
 
+def collect_investor_flow_snapshots():
+    """자동매매 대상 종목의 매매동향을 장마감 직전에 수집해 저장 (장 마감 후 조회용)"""
+    from dolpha.investor_flow_collector import collect_and_save_investor_flow_snapshots
+
+    _slog("[매매동향] 스냅샷 수집 시작")
+    try:
+        result = collect_and_save_investor_flow_snapshots()
+        _slog(f"[매매동향] 스냅샷 수집 완료: {result}")
+    except Exception as e:
+        _slog(f"[매매동향] 스냅샷 수집 오류: {e}")
+        traceback.print_exc()
+
+
 def _run_pipeline_1535():
     run_data_collection_pipeline("15시")
 
@@ -443,6 +456,15 @@ def start():
             replace_existing=True,
         )
         print("Scheduled job 'auto_trading_cycle' at every minute (09:00-15:59 Mon-Fri)")
+
+    # ── 매매동향 스냅샷 (KIS REAL 키 설정 시에만 등록, investor_flow API는 REAL 모드 고정) ──
+    if os.environ.get("KIS_REAL_APP_KEY", ""):
+        add_cron_job(
+            collect_investor_flow_snapshots,
+            15, 29,
+            "collect_investor_flow_snapshots",
+            "자동매매 대상 종목 매매동향 스냅샷 (장 마감 직전, 조회 가능한 마지막 시점)",
+        )
 
     register_events(scheduler)  # Django 관리자 인터페이스와 통합
     scheduler.start()

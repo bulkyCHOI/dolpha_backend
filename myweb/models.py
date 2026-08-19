@@ -313,6 +313,30 @@ class TradingConfig(models.Model):
         return f"{self.user.username} - {self.stock_name} ({self.strategy_type}/{self.trading_mode})"
 
 
+class InvestorFlowSnapshot(models.Model):
+    """자동매매 대상 종목의 매매동향(투자자별/외국인·기관/프로그램/회원사) 장중 마지막 스냅샷.
+
+    KIS 매매동향 API는 장중(09:00~15:30 KST)에만 조회 가능하므로, 장 마감 직전에
+    자동매매 설정 목록의 종목들에 대해 미리 수집해 두고 장 마감 후 조회할 수 있도록 한다.
+    """
+
+    stock_code = models.CharField(max_length=10)
+    stock_name = models.CharField(max_length=100, blank=True)
+    date = models.DateField()
+    investor_today = models.JSONField(default=dict, blank=True)  # 당일 투자자별(개인/외국인/기관) 순매수
+    foreign_total = models.JSONField(default=dict, blank=True)  # 외국인/기관 가집계 시간대별
+    program_trade = models.JSONField(default=dict, blank=True)  # 프로그램매매 추이
+    member_firm = models.JSONField(default=dict, blank=True)  # 회원사별 매매동향
+    captured_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ["stock_code", "date"]
+        ordering = ["-date", "stock_code"]
+
+    def __str__(self):
+        return f"{self.stock_code} - {self.date}"
+
+
 class TradingDefaults(models.Model):
     """자동매매 기본값 설정 모델"""
 

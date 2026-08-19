@@ -6,8 +6,11 @@
   GET /stock/{code}/foreign-total     — 당일 외국인/기관 가집계 시간대별
   GET /stock/{code}/program-trade     — 당일 프로그램매매 추이
   GET /stock/{code}/member-firm       — 당일 회원사(전 증권사)별 매매동향
+  GET /stock/{code}/investor-flow-snapshot — 장 마감 직전 저장된 스냅샷 조회 (장 마감 후용)
+  GET /investor-flow-snapshot/list         — 자동매매 대상 전 종목 스냅샷 목록 (장 마감 후용)
 
-참고: KIS API의 해당 엔드포인트들은 장중(평일 09:00~15:30 KST)에만 데이터를 제공합니다.
+참고: KIS API의 실시간 엔드포인트들은 장중(평일 09:00~15:30 KST)에만 데이터를 제공하며,
+      자동매매 대상 종목은 15:29에 스냅샷으로 미리 저장되어 장 마감 후에도 조회 가능합니다.
 """
 
 import time
@@ -96,3 +99,56 @@ def get_program_trade(request, stock_code: str):
 def get_member_firm(request, stock_code: str):
     """전 증권사(회원사)별 당일 매매동향 — FHKST01010600"""
     return _handle(request, stock_code, GetMemberFirmTrading, "member-firm")
+
+
+def _snapshot_to_dict(snapshot) -> dict:
+    return {
+        "stock_code": snapshot.stock_code,
+        "stock_name": snapshot.stock_name,
+        "date": snapshot.date.isoformat(),
+        "investor_today": snapshot.investor_today,
+        "foreign_total": snapshot.foreign_total,
+        "program_trade": snapshot.program_trade,
+        "member_firm": snapshot.member_firm,
+        "captured_at": snapshot.captured_at.isoformat(),
+    }
+
+
+@investor_flow_router.get("/stock/{stock_code}/investor-flow-snapshot")
+def get_investor_flow_snapshot(request, stock_code: str, date: str = ""):
+    """장 마감 직전(15:29)에 저장해 둔 매매동향 스냅샷 조회 (장 마감 후 조회용).
+
+    date 미지정 시 가장 최근 저장된 스냅샷을 반환한다.
+    """
+    from myweb.models import InvestorFlowSnapshot
+
+    if not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
+        return JsonResponse({"success": False, "error": "유효한 6자리 종목코드가 필요합니다."}, status=400)
+
+    qs = InvestorFlowSnapshot.objects.filter(stock_code=stock_code)
+    if date:
+        qs = qs.filter(date=date)
+
+    snapshot = qs.order_by("-date").first()
+    if snapshot is None:
+        return JsonResponse({"success": False, "error": "저장된 매매동향 스냅샷이 없습니다."}, status=404)
+
+    return JsonResponse({"success": True, "data": _snapshot_to_dict(snapshot)})
+
+
+@investor_flow_router.get("/investor-flow-snapshot/list")
+def list_investor_flow_snapshots(request, date: str = ""):
+    """자동매매 대상 전 종목의 매매동향 스냅샷 목록 조회 (date 미지정 시 최신 날짜)."""
+    from myweb.models import InvestorFlowSnapshot
+
+    qs = InvestorFlowSnapshot.objects.all()
+    if date:
+        qs = qs.filter(date=date)
+    else:
+        latest = InvestorFlowSnapshot.objects.order_by("-date").values_list("date", flat=True).first()
+        if latest is None:
+            return JsonResponse({"success": True, "data": []})
+        qs = qs.filter(date=latest)
+
+    data = [_snapshot_to_dict(s) for s in qs.order_by("stock_code")]
+    return JsonResponse({"success": True, "data": data})
