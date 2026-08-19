@@ -13,6 +13,7 @@ dolpha.kis — KIS(한국투자증권) API 통합 패키지
   KIS_MODE         REAL | VIRTUAL (기본 REAL)
 """
 from .auth import GetToken, MakeToken, GetHeaders
+from .holiday import is_trading_day, refresh_holiday_cache, next_trading_day
 from .ohlcv import GetOhlcvKR
 from .minute import GetMinuteOhlcvKR, _iter_minute_pages
 from .trade import (
@@ -26,6 +27,7 @@ from .trade import (
 
 __all__ = [
     "GetToken", "MakeToken", "GetHeaders",
+    "is_trading_day", "refresh_holiday_cache", "next_trading_day",
     "GetOhlcvKR",
     "GetMinuteOhlcvKR", "_iter_minute_pages",
     "GetHashKey",
