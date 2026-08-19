@@ -271,6 +271,7 @@ class TradingConfig(models.Model):
         ("fifty_day_high", "50일 신고가"),
         ("daily_top50", "일일 Top50"),
         ("htf", "High Tight Flag"),
+        ("theme_surge", "급등테마주"),
     ]
 
     user = models.ForeignKey(
@@ -440,6 +441,17 @@ class TradingDefaults(models.Model):
     nl_stage2_sell_pct = models.FloatField(default=50.0)   # 2단계 매도 비율(%)
     nl_stage3_days     = models.IntegerField(default=20)   # 3단계 기간
     nl_stage3_sell_pct = models.FloatField(default=100.0)  # 3단계 매도 비율(%)
+
+    # ── 급등테마주 전략 설정 ─────────────────────────────────
+    # 진입만 별도 로직(테마 급등 + 1분봉 눌림목 돌파 + 외국인 수급)을 쓰고,
+    # 익절/손절/트레일링스탑/분할익절은 위 Manual 기본값을 그대로 따른다.
+    theme_surge_enabled = models.BooleanField(default=False)          # 급등테마주 자동매매 사용
+    theme_surge_max_candidates = models.IntegerField(default=3)       # 동시 추적 최대 후보 종목 수
+    theme_surge_min_fluctuation = models.FloatField(default=3.0)      # 급등 테마 판정 등락률(%)
+    theme_surge_min_trading_value = models.BigIntegerField(
+        default=50_000_000_000
+    )                                                                  # 급등 테마 판정 거래대금 하한(원)
+    theme_surge_use_foreign_filter = models.BooleanField(default=True)  # 외국인 매수세 필터 사용
 
     # 메타데이터
     created_at = models.DateTimeField(auto_now_add=True)
@@ -673,6 +685,121 @@ class StockMinuteOhlcv(models.Model):
 
     def __str__(self):
         return f"{self.stock_code} {self.bar_datetime}"
+
+
+class ThemeSnapshot(models.Model):
+    """토스증권 '지금 뜨는 산업' 5분 단위 스냅샷 (테마 1개 = 1행).
+
+    09:00~15:30 사이 5분마다 수집하며, 하루치를 모으면 그대로 급등 테마 타임라인이 된다.
+    """
+
+    date = models.DateField(db_index=True)
+    slot_time = models.TimeField()                        # 5분 슬롯 시각 (09:00 ~ 15:30)
+    tics_id = models.IntegerField()                       # 토스 산업분류(TICS) ID
+    theme_name = models.CharField(max_length=100)         # 테마명
+    rank = models.IntegerField()                          # 해당 슬롯 내 등락률 순위
+    fluctuation_rate = models.FloatField(default=0.0)     # 테마 등락률(%) — 예: 7.44
+    trading_value = models.BigIntegerField(default=0)     # 테마 거래대금(원)
+    market_cap = models.BigIntegerField(default=0)        # 테마 시가총액(원)
+    stock_count = models.IntegerField(default=0)          # 테마 구성 종목 수
+    is_surge = models.BooleanField(default=False)         # 급등 테마 판정 여부
+    surge_reason = models.CharField(max_length=200, blank=True)  # 급등 판정 근거
+    momentum = models.FloatField(default=0.0)             # 직전 슬롯 대비 등락률 변화(%p)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "theme_snapshot"
+        unique_together = [("date", "slot_time", "tics_id")]
+        ordering = ["-date", "slot_time", "rank"]
+        indexes = [
+            models.Index(fields=["date", "slot_time"], name="idx_ts_date_slot"),
+            models.Index(fields=["date", "is_surge"], name="idx_ts_date_surge"),
+        ]
+
+    def __str__(self):
+        return f"{self.date} {self.slot_time} {self.theme_name} ({self.fluctuation_rate:+.2f}%)"
+
+
+class ThemeLeaderCandidate(models.Model):
+    """급등 테마의 주도주 후보 (거래대금 + 상승률 복합 점수 기준 상위 N개)."""
+
+    snapshot = models.ForeignKey(
+        ThemeSnapshot, on_delete=models.CASCADE, related_name="leaders"
+    )
+    date = models.DateField(db_index=True)      # snapshot.date 비정규화 (타임라인 조회용)
+    slot_time = models.TimeField()
+    tics_id = models.IntegerField()
+    theme_name = models.CharField(max_length=100)
+
+    stock_code = models.CharField(max_length=10)   # 6자리 종목코드
+    stock_name = models.CharField(max_length=100)
+    price = models.FloatField(default=0.0)         # 스냅샷 시점 가격
+    change_rate = models.FloatField(default=0.0)   # 상승률(%)
+    trading_value = models.BigIntegerField(default=0)  # 거래대금(원)
+    market_cap = models.BigIntegerField(default=0)
+
+    score = models.FloatField(default=0.0)         # 거래대금·상승률 복합 점수 (0~1)
+    rank_in_theme = models.IntegerField(default=0)  # 테마 내 순위 (1 = 1등 종목)
+    is_selected = models.BooleanField(default=False)  # 자동매매 후보로 등록되었는지
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "theme_leader_candidate"
+        unique_together = [("snapshot", "stock_code")]
+        ordering = ["-date", "slot_time", "rank_in_theme"]
+        indexes = [
+            models.Index(fields=["date", "stock_code"], name="idx_tlc_date_code"),
+            models.Index(fields=["date", "is_selected"], name="idx_tlc_date_sel"),
+        ]
+
+    def __str__(self):
+        return f"{self.date} {self.theme_name} #{self.rank_in_theme} {self.stock_name}"
+
+
+class ThemeEntrySignal(models.Model):
+    """급등테마주 후보에 대한 1분봉 진입 조건 판정 로그.
+
+    눌림목 → 전고점 돌파 → 외국인 매수세 3단 조건을 매 사이클 평가한 결과를 남겨
+    타임라인에 진입 시점 마커로 표시하고, 미진입 사유를 추적한다.
+    """
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="theme_entry_signals"
+    )
+    date = models.DateField(db_index=True)
+    checked_at = models.DateTimeField()
+    tics_id = models.IntegerField(default=0)
+    theme_name = models.CharField(max_length=100, blank=True)
+    stock_code = models.CharField(max_length=10)
+    stock_name = models.CharField(max_length=100)
+
+    price = models.FloatField(default=0.0)             # 판정 시점 현재가
+    prev_high = models.FloatField(null=True, blank=True)      # 직전 스윙 고점(전고점)
+    pullback_low = models.FloatField(null=True, blank=True)   # 눌림목 저점
+    pullback_pct = models.FloatField(null=True, blank=True)   # 전고점 대비 눌림 깊이(%)
+    volume_ratio = models.FloatField(null=True, blank=True)   # 돌파봉 거래량 / 평균 거래량
+    foreign_net_buy = models.BigIntegerField(null=True, blank=True)  # 외국인 순매수(주)
+
+    has_pullback = models.BooleanField(default=False)  # 눌림목 성립
+    has_breakout = models.BooleanField(default=False)  # 전고점 돌파
+    has_foreign_buying = models.BooleanField(default=False)  # 외국인 매수세 포착
+    passed = models.BooleanField(default=False)        # 3단 조건 모두 충족
+    executed = models.BooleanField(default=False)      # 실제 매수 주문 실행
+    reason = models.CharField(max_length=300, blank=True)  # 판정 사유
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "theme_entry_signal"
+        ordering = ["-checked_at"]
+        indexes = [
+            models.Index(fields=["user", "date"], name="idx_tes_user_date"),
+            models.Index(fields=["date", "stock_code"], name="idx_tes_date_code"),
+            models.Index(fields=["user", "date", "passed"], name="idx_tes_passed"),
+        ]
+
+    def __str__(self):
+        status = "진입" if self.executed else ("충족" if self.passed else "대기")
+        return f"{self.checked_at:%H:%M} {self.stock_name} [{status}]"
 
 
 class DailyAccountSnapshot(models.Model):

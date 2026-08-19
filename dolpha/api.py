@@ -20,6 +20,7 @@ from .api_trading_reviews import trading_reviews_router
 from .api_data_status import data_status_router
 from .api_trade import trade_router
 from .api_investor_flow import investor_flow_router
+from .api_theme_surge import theme_surge_router
 
 api = NinjaAPI()
 
@@ -68,6 +69,9 @@ api.add_router("/trade", trade_router)
 
 # 매매동향 API 라우터 추가 (외국인/프로그램/회원사)
 api.add_router("/", investor_flow_router)
+
+# 급등테마주 전략 API 라우터 추가
+api.add_router("/theme-surge", theme_surge_router)
 
 
 NAVER_STOCK_URL = "https://polling.finance.naver.com/api/realtime/domestic/stock/{code}"

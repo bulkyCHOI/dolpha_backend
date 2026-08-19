@@ -44,6 +44,9 @@ class TradingEngine:
         self.trading_configs: list[TradingConfig] = []
         # 당일 분봉 백필 실행 여부 추적 (날짜가 바뀌면 재실행)
         self._backfill_done_date: str = ""
+        self._backfilled_codes: set[str] = set()
+        # 급등테마주 진입 판정 시그널 (매수 성공 시 executed 표시용)
+        self._last_theme_signal = None
         self._load_configs()
 
     # ──────────────────────────────────────────────
@@ -92,6 +95,8 @@ class TradingEngine:
             "is_active",
         ])
         StockMinuteOhlcv.objects.filter(stock_code=stock_code).delete()
+        # 분봉을 지웠으므로 같은 종목이 재등록되면 백필을 다시 수행해야 한다
+        self._backfilled_codes.discard(stock_code)
         print(f"[{config.stock_name}] 포지션 청산 완료 — 자동매매 비활성화")
 
     def get_entry_count(self, stock_code: str) -> int:
@@ -264,6 +269,10 @@ class TradingEngine:
                     config, current_price, holding_qty
                 )
 
+            # 급등테마주: 가격 트리거 대신 1분봉 눌림목·돌파·외국인 수급으로 판정
+            if config.strategy_type == "theme_surge":
+                return self.check_theme_surge_entry(config, current_price)
+
             # 신규 진입: entry_point 이상이면 진입
             entry_point = config.entry_point or 0
             print(
@@ -279,6 +288,114 @@ class TradingEngine:
         except Exception as e:
             print(f"[{config.stock_name}] 진입 조건 체크 오류: {e}")
             return False
+
+    # ──────────────────────────────────────────────
+    # 급등테마주 진입 판정
+    # ──────────────────────────────────────────────
+
+    def check_theme_surge_entry(
+        self, config: TradingConfig, current_price: float
+    ) -> bool:
+        """
+        급등테마주 전략의 신규 진입 조건을 판정하고 판정 이력을 저장합니다.
+
+        조건: 1분봉 눌림목 → 전고점 돌파 → 외국인 매수세 (3단 모두 충족).
+        청산/익절은 기존 Manual 설정을 그대로 사용하므로 여기서 다루지 않습니다.
+        """
+        from dolpha.theme_surge import check_theme_surge_entry as _check
+
+        try:
+            use_foreign = self._theme_surge_uses_foreign_filter()
+            decision = _check(
+                stock_code=config.stock_code,
+                current_price=current_price,
+                use_foreign_filter=use_foreign,
+                prev_foreign_net_buy=self._last_foreign_net_buy(config.stock_code),
+            )
+
+            print(
+                f"[{config.stock_name}] 급등테마주 진입 판정:"
+                f" {'충족' if decision.passed else '미충족'} — {decision.reason}"
+            )
+            self._save_theme_entry_signal(config, current_price, decision)
+            return decision.passed
+
+        except Exception as e:
+            print(f"[{config.stock_name}] 급등테마주 진입 판정 오류: {e}")
+            return False
+
+    def _theme_surge_uses_foreign_filter(self) -> bool:
+        """유저 설정에서 외국인 매수세 필터 사용 여부를 읽습니다 (기본 True)."""
+        try:
+            return bool(self.user.trading_defaults.theme_surge_use_foreign_filter)
+        except Exception:
+            return True
+
+    def _last_foreign_net_buy(self, stock_code: str) -> int | None:
+        """직전 판정 시 기록된 외국인 순매수(주). 없으면 None."""
+        from myweb.models import ThemeEntrySignal
+
+        row = (
+            ThemeEntrySignal.objects.filter(
+                user=self.user, stock_code=stock_code, foreign_net_buy__isnull=False
+            )
+            .order_by("-checked_at")
+            .values_list("foreign_net_buy", flat=True)
+            .first()
+        )
+        return row
+
+    def _save_theme_entry_signal(
+        self, config: TradingConfig, current_price: float, decision
+    ) -> None:
+        """진입 조건 판정 결과를 타임라인용으로 저장합니다."""
+        from myweb.models import ThemeEntrySignal, ThemeLeaderCandidate
+
+        try:
+            now = tz.localtime()
+            candidate = (
+                ThemeLeaderCandidate.objects.filter(
+                    date=now.date(), stock_code=config.stock_code
+                )
+                .order_by("-slot_time")
+                .first()
+            )
+
+            self._last_theme_signal = ThemeEntrySignal.objects.create(
+                user=self.user,
+                date=now.date(),
+                checked_at=now,
+                tics_id=candidate.tics_id if candidate else 0,
+                theme_name=candidate.theme_name if candidate else "",
+                stock_code=config.stock_code,
+                stock_name=config.stock_name,
+                price=current_price,
+                prev_high=decision.prev_high,
+                pullback_low=decision.pullback_low,
+                pullback_pct=decision.pullback_pct,
+                volume_ratio=decision.volume_ratio,
+                foreign_net_buy=decision.foreign_net_buy,
+                has_pullback=decision.has_pullback,
+                has_breakout=decision.has_breakout,
+                has_foreign_buying=decision.has_foreign_buying,
+                passed=decision.passed,
+                reason=decision.reason[:300],
+            )
+        except Exception as e:
+            print(f"[{config.stock_name}] 진입 시그널 저장 오류: {e}")
+
+    def _mark_theme_signal_executed(self, config: TradingConfig) -> None:
+        """직전에 저장한 진입 시그널을 '실제 매수 실행됨'으로 표시합니다."""
+        signal = getattr(self, "_last_theme_signal", None)
+        if signal is None or signal.stock_code != config.stock_code:
+            return
+        try:
+            signal.executed = True
+            signal.save(update_fields=["executed"])
+        except Exception as e:
+            print(f"[{config.stock_name}] 진입 시그널 실행 표시 오류: {e}")
+        finally:
+            self._last_theme_signal = None
 
     def check_pyramiding_conditions(
         self, config: TradingConfig, current_price: float, holding_qty: int
@@ -1170,10 +1287,16 @@ class TradingEngine:
 
     @staticmethod
     def is_market_open() -> bool:
-        """한국 주식시장 운영 시간 여부 (09:00~15:30, 평일)."""
+        """한국 주식시장 운영 시간 여부 (개장일 09:00~15:30).
+
+        주말뿐 아니라 법정공휴일·대체공휴일도 제외한다 (KIS 휴장일 조회 기준).
+        """
         from pytz import timezone as pytz_tz
+
+        from dolpha.kis.holiday import is_trading_day
+
         now = datetime.now(pytz_tz("Asia/Seoul"))
-        if now.weekday() >= 5:   # 토/일
+        if not is_trading_day(now.date()):
             return False
         t = now.strftime("%H%M")
         return "0900" <= t < "1530"
@@ -1310,13 +1433,19 @@ class TradingEngine:
 
         print(f"[TradingEngine] 대상 종목 수: {len(self.trading_configs)}")
 
-        # 하루 첫 사이클(또는 날짜가 바뀐 첫 사이클)에 당일 분봉 백필 실행
-        # 네트워크 장애로 누락된 봉을 복구하고, 엔진 재시작 시 이전 데이터를 채움
+        # 당일 분봉 백필 — 네트워크 장애로 누락된 봉을 복구하고, 엔진 재시작 시 이전 데이터를 채움
+        # 장중에 새로 등록되는 종목(급등테마주 후보 등)도 등록 즉시 과거 분봉을 확보해야
+        # 눌림목·전고점 판정이 가능하므로, 아직 백필하지 않은 종목만 골라 실행한다
         today_str = datetime.now().strftime("%Y-%m-%d")
-        if self._backfill_done_date != today_str and self.trading_configs:
+        if self._backfill_done_date != today_str:
             self._backfill_done_date = today_str
-            for config in self.trading_configs:
-                self._backfill_today_bars(config.stock_code)
+            self._backfilled_codes = set()
+
+        for config in self.trading_configs:
+            if config.stock_code in self._backfilled_codes:
+                continue
+            self._backfilled_codes.add(config.stock_code)
+            self._backfill_today_bars(config.stock_code)
 
         for config in self.trading_configs:
             try:
@@ -1363,7 +1492,8 @@ class TradingEngine:
                     if position_amount > 0:
                         entry_amount = self.get_current_entry_amount(config, position_amount)
                         if entry_amount > 0:
-                            self.execute_buy_order(config, entry_amount, current_price)
+                            if self.execute_buy_order(config, entry_amount, current_price):
+                                self._mark_theme_signal_executed(config)
                         else:
                             print(f"[{config.stock_name}] 피라미딩 한도 초과")
 

@@ -154,6 +154,12 @@ class TradingDefaultsSchema(Schema):
     nl_stage2_sell_pct: float = 50.0
     nl_stage3_days: int = 20
     nl_stage3_sell_pct: float = 100.0
+    # 급등테마주 전략 설정
+    theme_surge_enabled: bool = False
+    theme_surge_max_candidates: int = 3
+    theme_surge_min_fluctuation: float = 3.0
+    theme_surge_min_trading_value: int = 50000000000
+    theme_surge_use_foreign_filter: bool = True
 
 # 즐겨찾기 관련 스키마
 class FavoriteStockSchema(Schema):
@@ -248,6 +254,12 @@ class TradingDefaultsResponseSchema(Schema):
     nl_stage2_sell_pct: float
     nl_stage3_days: int
     nl_stage3_sell_pct: float
+    # 급등테마주 전략 설정
+    theme_surge_enabled: bool = False
+    theme_surge_max_candidates: int = 3
+    theme_surge_min_fluctuation: float = 3.0
+    theme_surge_min_trading_value: int = 50000000000
+    theme_surge_use_foreign_filter: bool = True
     created_at: str
     updated_at: str
 
@@ -660,6 +672,12 @@ def get_trading_defaults(request):
             'nl_stage2_sell_pct': defaults.nl_stage2_sell_pct,
             'nl_stage3_days': defaults.nl_stage3_days,
             'nl_stage3_sell_pct': defaults.nl_stage3_sell_pct,
+            # 급등테마주 전략 설정
+            'theme_surge_enabled': defaults.theme_surge_enabled,
+            'theme_surge_max_candidates': defaults.theme_surge_max_candidates,
+            'theme_surge_min_fluctuation': defaults.theme_surge_min_fluctuation,
+            'theme_surge_min_trading_value': defaults.theme_surge_min_trading_value,
+            'theme_surge_use_foreign_filter': defaults.theme_surge_use_foreign_filter,
             'created_at': defaults.created_at.isoformat(),
             'updated_at': defaults.updated_at.isoformat(),
         }
@@ -732,6 +750,12 @@ def save_trading_defaults(request, data: TradingDefaultsSchema):
         defaults.nl_stage2_sell_pct = data.nl_stage2_sell_pct
         defaults.nl_stage3_days = data.nl_stage3_days
         defaults.nl_stage3_sell_pct = data.nl_stage3_sell_pct
+        # 급등테마주 전략 설정
+        defaults.theme_surge_enabled = data.theme_surge_enabled
+        defaults.theme_surge_max_candidates = data.theme_surge_max_candidates
+        defaults.theme_surge_min_fluctuation = data.theme_surge_min_fluctuation
+        defaults.theme_surge_min_trading_value = data.theme_surge_min_trading_value
+        defaults.theme_surge_use_foreign_filter = data.theme_surge_use_foreign_filter
 
         defaults.save()
         

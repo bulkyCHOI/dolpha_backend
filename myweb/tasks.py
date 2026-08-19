@@ -164,6 +164,48 @@ def run_all_trading_cycles():
         traceback.print_exc()
 
 
+def run_theme_surge_scan():
+    """급등테마주: 토스증권 '지금 뜨는 산업'을 5분마다 수집·판정하고 후보를 등록한다.
+
+    KIS 설정 여부와 무관하게 스캔·스냅샷 저장은 수행한다(타임라인은 조회 전용으로도 유용).
+    실제 후보 등록은 theme_surge_enabled=True 인 유저에게만 일어난다.
+    """
+    from dolpha.trading_engine import TradingEngine
+
+    # is_market_open()이 개장일(공휴일 포함)과 09:00~15:30을 모두 확인한다
+    if not TradingEngine.is_market_open():
+        return
+
+    try:
+        from dolpha.theme_surge import run_theme_scan
+
+        result = run_theme_scan()
+        if result.get("skipped"):
+            return
+        _slog(
+            f"[급등테마] {result['slot']} 스캔 — 테마 {result['themes']}개,"
+            f" 급등 {result['surges']}개, 후보 {result['candidates']}개,"
+            f" 신규등록 {result['registered']}건"
+        )
+        for message in result.get("errors", []):
+            _slog(f"[급등테마] 경고: {message}")
+    except Exception as e:
+        _slog(f"[급등테마] 스캔 오류: {e}")
+        traceback.print_exc()
+
+
+def cleanup_theme_surge_candidates():
+    """급등테마주: 장 마감 후 끝내 진입하지 못한 후보 설정을 비활성화한다."""
+    try:
+        from dolpha.theme_surge import cleanup_stale_candidates
+
+        count = cleanup_stale_candidates()
+        _slog(f"[급등테마] 미진입 후보 정리 완료: {count}건 비활성화")
+    except Exception as e:
+        _slog(f"[급등테마] 후보 정리 오류: {e}")
+        traceback.print_exc()
+
+
 def my_cron_task_getAndSave_index_data():
     execute_api_task(
         getAndSave_index_data, "getAndSave_index_data", "/getAndSave_index_data"
@@ -456,6 +498,28 @@ def start():
             replace_existing=True,
         )
         print("Scheduled job 'auto_trading_cycle' at every minute (09:00-15:59 Mon-Fri)")
+
+    # ── 급등테마주 테마 스캔 (평일 09:00~15:30, 5분 주기) ───────────
+    scheduler.add_job(
+        run_theme_surge_scan,
+        trigger="cron",
+        day_of_week="mon-fri",
+        hour="9-15",
+        minute="*/5",            # 09:00, 09:05, ... (is_market_open이 15:30 이후 차단)
+        id="theme_surge_scan",
+        max_instances=1,
+        replace_existing=True,
+        misfire_grace_time=60,
+    )
+    print("Scheduled job 'theme_surge_scan' every 5 minutes (09:00-15:30 Mon-Fri)")
+
+    # ── 급등테마주 미진입 후보 정리 (장 마감 후) ────────────────────
+    add_cron_job(
+        cleanup_theme_surge_candidates,
+        15, 32,
+        "theme_surge_cleanup",
+        "급등테마주 미진입 후보 비활성화",
+    )
 
     # ── 매매동향 스냅샷 (KIS REAL 키 설정 시에만 등록, investor_flow API는 REAL 모드 고정) ──
     if os.environ.get("KIS_REAL_APP_KEY", ""):
