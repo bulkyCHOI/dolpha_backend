@@ -213,6 +213,7 @@ def find_stock_top_rising(
             }
 
             # 기간 내 각 종목의 실제 거래일 수 집계 (거래정지 종목 필터링용)
+            # 거래정지일은 open/high/low=0인 행으로 저장되므로 open>0 조건으로 실거래일만 집계
             expected_trading_days = n_days + 1
             trading_day_counts = {
                 item["code_id"]: item["count"]
@@ -220,6 +221,7 @@ def find_stock_top_rising(
                     code__market__in=markets,
                     date__gte=start_date,
                     date__lte=end_date,
+                    open__gt=0,
                 )
                 .values("code_id")
                 .annotate(count=Count("id"))
@@ -951,8 +953,9 @@ def find_stock_ohlcv(request, code: str = "005930", limit: int = 63):
             )
 
         # 최적화된 쿼리: 최신 데이터부터 limit개를 가져온 후 순서를 뒤집어서 과거->최신 순으로 정렬
+        # 거래정지일은 open/high/low=0(close만 직전가)으로 저장되어 차트를 깨뜨리므로 제외
         queryset = (
-            StockOHLCV.objects.filter(code=company)
+            StockOHLCV.objects.filter(code=company, open__gt=0)
             .order_by("-date")
             .values("date", "open", "high", "low", "close", "volume", "change")[:limit]
         )
