@@ -195,7 +195,11 @@ def run_theme_surge_scan():
 
 
 def cleanup_theme_surge_candidates():
-    """급등테마주: 장 마감 후 끝내 진입하지 못한 후보 설정을 비활성화한다."""
+    """급등테마주: 장 마감 후 끝내 진입하지 못한 후보 설정을 비활성화한다.
+
+    설정 행과 1분봉은 남긴다 — 급등테마주 탭에서 날짜별로 되짚어 보고,
+    사용자가 직접 삭제 버튼을 누를 때만 지운다.
+    """
     try:
         from dolpha.theme_surge import cleanup_stale_candidates
 
@@ -499,19 +503,19 @@ def start():
         )
         print("Scheduled job 'auto_trading_cycle' at every minute (09:00-15:59 Mon-Fri)")
 
-    # ── 급등테마주 테마 스캔 (평일 09:00~15:30, 5분 주기) ───────────
+    # ── 급등테마주 테마 스캔 (평일 09:00~15:30, 1분 주기) ───────────
     scheduler.add_job(
         run_theme_surge_scan,
         trigger="cron",
         day_of_week="mon-fri",
         hour="9-15",
-        minute="*/5",            # 09:00, 09:05, ... (is_market_open이 15:30 이후 차단)
+        minute="*",              # 매 분 (is_market_open이 15:30 이후 차단)
         id="theme_surge_scan",
         max_instances=1,
         replace_existing=True,
         misfire_grace_time=60,
     )
-    print("Scheduled job 'theme_surge_scan' every 5 minutes (09:00-15:30 Mon-Fri)")
+    print("Scheduled job 'theme_surge_scan' every minute (09:00-15:30 Mon-Fri)")
 
     # ── 급등테마주 미진입 후보 정리 (장 마감 후) ────────────────────
     add_cron_job(

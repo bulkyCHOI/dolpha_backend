@@ -3,7 +3,7 @@
 하루치 ThemeSnapshot / ThemeLeaderCandidate / ThemeEntrySignal 을 읽어
 프론트엔드가 그대로 렌더링할 수 있는 형태로 가공한다.
 
-    slots   : 09:00 ~ 15:30 5분 슬롯 라벨 (고정 79칸)
+    slots   : 09:00 ~ 15:30 1분 슬롯 라벨 (고정 391칸)
     themes  : 테마별 슬롯 셀 배열 (등락률·거래대금·급등 여부) + 1등 종목
     signals : 진입 조건 판정 이력 (타임라인 위 마커)
 """
@@ -16,7 +16,7 @@ from .config import MARKET_CLOSE, MARKET_OPEN, SLOT_MINUTES
 
 
 def slot_labels() -> list[str]:
-    """09:00 ~ 15:30 의 5분 슬롯 라벨을 생성한다."""
+    """09:00 ~ 15:30 의 SLOT_MINUTES 슬롯 라벨을 생성한다."""
     labels: list[str] = []
     cursor = datetime.combine(date_cls(2000, 1, 1), MARKET_OPEN)
     end = datetime.combine(date_cls(2000, 1, 1), MARKET_CLOSE)
@@ -192,7 +192,7 @@ def _label(value: time_cls) -> str:
 
 
 def _floor_slot(value: time_cls) -> time_cls:
-    """시각을 5분 슬롯으로 내림한다."""
+    """시각을 SLOT_MINUTES 슬롯으로 내림한다."""
     return value.replace(
         minute=(value.minute // SLOT_MINUTES) * SLOT_MINUTES, second=0, microsecond=0
     )

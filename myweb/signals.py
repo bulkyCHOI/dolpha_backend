@@ -1,9 +1,7 @@
-from django.db.models.signals import post_delete
-from django.dispatch import receiver
+"""myweb 앱 시그널.
 
-
-@receiver(post_delete, sender="myweb.TradingConfig")
-def delete_minute_ohlcv_on_config_delete(sender, instance, **kwargs):
-    """TradingConfig 삭제 시 해당 종목의 분봉 데이터를 모두 삭제."""
-    from myweb.models import StockMinuteOhlcv
-    StockMinuteOhlcv.objects.filter(stock_code=instance.stock_code).delete()
+분봉(StockMinuteOhlcv)은 TradingConfig 삭제·청산과 함께 지우지 않는다.
+진입 판정 차트가 지난 날짜의 분봉을 근거 데이터로 사용하므로,
+삭제는 사용자가 급등테마주 탭에서 날짜 단위로 명시적으로 실행할 때만 이루어진다.
+(dolpha.theme_surge.scanner.purge_candidate_date)
+"""

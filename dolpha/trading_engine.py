@@ -19,6 +19,7 @@ autobot/tradingBot/autoTrading_Bot.py 를 Django 환경으로 포팅.
 
 import traceback
 from datetime import datetime, timedelta
+from dataclasses import replace
 from decimal import Decimal
 
 from django.db import transaction
@@ -26,7 +27,16 @@ from django.utils import timezone as tz
 
 from myweb.models import TradingConfig, TradeEntry, TradingSummary, StockMinuteOhlcv
 from dolpha.kis import trade as KIS
+from dolpha.order_log import order_log
 from dolpha.stockCommon import GetOhlcv, GetNowDateStr
+
+
+def _pop_order_error(side: str) -> str:
+    """직전 KIS 주문 실패 사유를 꺼내고 비운다.
+
+    남겨두면 다음 주문이 실패했을 때 이전 사유를 잘못 기록하게 되므로 즉시 소비한다.
+    """
+    return KIS.LAST_ORDER_ERROR.pop(side, "")
 
 
 class TradingEngine:
@@ -88,14 +98,21 @@ class TradingEngine:
         self._buy_entries(stock_code).update(status="CANCELLED")
         config.trailing_stop_peak_price = None
         config.staged_exit_completed_stages = []
+        # 급등테마주 청산 좌표도 함께 초기화 — 다음 진입은 그때의 눌림 저점으로 다시 잡는다
+        config.theme_pullback_low = None
+        config.theme_t_value = None
+        config.theme_trailing_started = False
         config.is_active = False
         config.save(update_fields=[
             "trailing_stop_peak_price",
             "staged_exit_completed_stages",
+            "theme_pullback_low",
+            "theme_t_value",
+            "theme_trailing_started",
             "is_active",
         ])
-        StockMinuteOhlcv.objects.filter(stock_code=stock_code).delete()
-        # 분봉을 지웠으므로 같은 종목이 재등록되면 백필을 다시 수행해야 한다
+        # 분봉은 남긴다 — 진입 판정 차트가 지난 날짜의 근거 데이터로 사용한다.
+        # 재등록 시 누락 구간만 백필하면 되므로 백필 이력만 초기화한다.
         self._backfilled_codes.discard(stock_code)
         print(f"[{config.stock_name}] 포지션 청산 완료 — 자동매매 비활성화")
 
@@ -313,16 +330,93 @@ class TradingEngine:
                 prev_foreign_net_buy=self._last_foreign_net_buy(config.stock_code),
             )
 
+            # 전고점이 20봉 이상 유지되므로 돌파 상태도 여러 분 지속된다.
+            # 그대로 두면 같은 전고점에 매 사이클 진입 신호가 떠 피라미딩 한도까지
+            # 연속 매수되므로, 이미 진입한 전고점은 한 번만 인정한다.
+            if decision.passed and self._already_entered_on(config, decision.prev_high):
+                decision = replace(
+                    decision,
+                    passed=False,
+                    reason=f"이미 진입한 전고점 ({decision.prev_high:,.0f}) — 중복 진입 방지",
+                )
+
             print(
                 f"[{config.stock_name}] 급등테마주 진입 판정:"
                 f" {'충족' if decision.passed else '미충족'} — {decision.reason}"
             )
             self._save_theme_entry_signal(config, current_price, decision)
+            if decision.passed:
+                self._apply_theme_exit_levels(config, current_price, decision)
             return decision.passed
 
         except Exception as e:
             print(f"[{config.stock_name}] 급등테마주 진입 판정 오류: {e}")
             return False
+
+    def _theme_exit_settings(self):
+        """유저의 급등테마주 청산 설정을 읽습니다 (없으면 config.py 기본값)."""
+        from dolpha.theme_surge.exit_rules import load_exit_settings
+
+        return load_exit_settings(getattr(self.user, "trading_defaults", None))
+
+    def _uses_theme_exit(self, config: TradingConfig) -> bool:
+        """이 설정에 급등테마주 전용 청산 규칙을 적용해야 하는지 판정합니다."""
+        if config.strategy_type != "theme_surge":
+            return False
+        return self._theme_exit_settings().use_own_exit
+
+    def _apply_theme_exit_levels(
+        self, config: TradingConfig, entry_price: float, decision
+    ) -> None:
+        """진입 신호에서 손절가(눌림 저점)와 1T 폭을 뽑아 설정에 확정 저장합니다.
+
+        포지션 사이즈는 이 손절폭을 기준으로 계산되므로, 매수 주문보다 먼저
+        저장되어야 합니다 (호출 순서: 진입 판정 → 여기 → 포지션 계산 → 매수).
+        """
+        from dolpha.theme_surge.exit_rules import derive_entry_levels, stop_loss_pct
+
+        settings = self._theme_exit_settings()
+        if not settings.use_own_exit:
+            return
+
+        levels = derive_entry_levels(
+            pullback_low=decision.pullback_low,
+            breakout_price=entry_price,
+            entry_price=entry_price,
+        )
+        if levels is None:
+            print(f"[{config.stock_name}] 청산 좌표 계산 실패 — 기존 설정값 유지")
+            return
+
+        stop_price, t_value = levels
+        stop_pct = stop_loss_pct(entry_price, stop_price)
+        if stop_pct is None:
+            print(f"[{config.stock_name}] 손절폭 산출 실패 — 기존 설정값 유지")
+            return
+
+        # 이미 보유 중(피라미딩)이면 최초 진입 시 확정한 좌표를 그대로 유지한다
+        if config.theme_pullback_low:
+            return
+
+        config.theme_pullback_low = stop_price
+        config.theme_t_value = t_value
+        config.theme_trailing_started = False
+        config.staged_exit_completed_stages = []
+        config.stop_loss = stop_pct
+        config.max_loss = settings.max_loss_pct
+        config.save(update_fields=[
+            "theme_pullback_low",
+            "theme_t_value",
+            "theme_trailing_started",
+            "staged_exit_completed_stages",
+            "stop_loss",
+            "max_loss",
+        ])
+        print(
+            f"[{config.stock_name}] 청산 좌표 확정:"
+            f" 손절={stop_price:,.0f}({stop_pct:.2f}%), 1T={t_value:,.0f}원,"
+            f" 계좌리스크={settings.max_loss_pct:.2f}%"
+        )
 
     def _theme_surge_uses_foreign_filter(self) -> bool:
         """유저 설정에서 외국인 매수세 필터 사용 여부를 읽습니다 (기본 True)."""
@@ -344,6 +438,30 @@ class TradingEngine:
             .first()
         )
         return row
+
+    def _already_entered_on(self, config: TradingConfig, prev_high: float | None) -> bool:
+        """오늘 이 전고점으로 이미 매수를 체결했는지 확인합니다.
+
+        판정 기준은 실제 체결(executed=True) 입니다. 주문이 거부된 경우는
+        진입하지 못한 것이므로 같은 전고점에서 다시 시도할 수 있어야 합니다.
+        """
+        if prev_high is None:
+            return False
+
+        from myweb.models import ThemeEntrySignal
+
+        try:
+            return ThemeEntrySignal.objects.filter(
+                user=self.user,
+                date=tz.localtime().date(),
+                stock_code=config.stock_code,
+                prev_high=prev_high,
+                executed=True,
+            ).exists()
+        except Exception as e:
+            # 조회 실패로 매매를 막지는 않되, 중복 진입 위험을 남기지 않도록 보수적으로 차단
+            print(f"[{config.stock_name}] 중복 진입 확인 오류: {e}")
+            return True
 
     def _save_theme_entry_signal(
         self, config: TradingConfig, current_price: float, decision
@@ -556,17 +674,25 @@ class TradingEngine:
             (should_exit, reason_str)
         """
         try:
+            holding_qty = holding_info["qty"]
+            if holding_qty <= 0:
+                return False, None
+
+            # 급등테마주는 데이 트레이딩 전용 청산 규칙(눌림저점 손절 · nT 익절 ·
+            # N봉 최저점 트레일링 · 당일 강제청산)을 따른다
+            if self._uses_theme_exit(config):
+                should_exit, reason, _ = self.check_theme_surge_exit(
+                    config, current_price, holding_info
+                )
+                return should_exit, reason
+
             stock_code  = config.stock_code
             mode        = config.trading_mode
             # manual 모드: stop_loss는 퍼센트(기본 8%), atr 모드: ATR 배수(기본 2.0)
             stop_loss   = config.stop_loss or (8.0 if mode == "manual" else 2.0)
             take_profit = config.take_profit or 24.0
 
-            holding_qty = holding_info["qty"]
             avg_price   = holding_info["avg_price"]
-
-            if holding_qty <= 0:
-                return False, None
 
             # 보유 중이면 트레일링 스탑 여부와 무관하게 항상 고점 갱신
             self._update_peak_price(config, current_price)
@@ -640,6 +766,124 @@ class TradingEngine:
             return False, None
 
     # ──────────────────────────────────────────────
+    # 급등테마주 전용 청산
+    # ──────────────────────────────────────────────
+
+    def _evaluate_theme_exit(
+        self, config: TradingConfig, current_price: float, holding_info: dict
+    ):
+        """급등테마주 청산 판정을 1회 수행하고 결과를 캐시합니다.
+
+        check_exit_conditions 와 check_staged_exit 가 같은 사이클에서 연달아
+        호출되므로, 봉 조회를 두 번 하지 않도록 (config.id, 현재가) 기준으로 캐시합니다.
+        """
+        from dolpha.theme_surge.exit_rules import (
+            ExitDecision,
+            evaluate_exit,
+            fetch_bars,
+            is_trailing_triggered,
+            trailing_stop_line,
+        )
+
+        cache_key = (config.id, current_price)
+        cached = getattr(self, "_theme_exit_cache", None)
+        if cached and cached[0] == cache_key:
+            return cached[1]
+
+        avg_price = holding_info["avg_price"]
+        settings = self._theme_exit_settings()
+        now = tz.localtime()
+
+        # 보유 중이면 항상 고점을 갱신해야 트레일링 발동 판정이 성립한다
+        self._update_peak_price(config, current_price)
+
+        # nT 초과 도달 여부를 기록해 둔다 (한 번 시작하면 되돌리지 않는다)
+        if not config.theme_trailing_started and is_trailing_triggered(
+            settings, avg_price, config.theme_t_value, config.trailing_stop_peak_price
+        ):
+            config.theme_trailing_started = True
+            config.save(update_fields=["theme_trailing_started"])
+            print(
+                f"[{config.stock_name}] 트레일링 추적 시작"
+                f" ({settings.trailing_start_t:g}T 초과)"
+            )
+
+        # 봉 조회는 추적이 시작된 뒤에만 필요하다
+        trailing_line = None
+        if settings.use_trailing and config.theme_trailing_started:
+            try:
+                bars = fetch_bars(config.stock_code, settings, now)
+                trailing_line = trailing_stop_line(settings, bars)
+            except Exception as e:
+                print(f"[{config.stock_name}] 트레일링 최저점 조회 실패: {e}")
+
+        try:
+            decision = evaluate_exit(
+                settings,
+                avg_price=avg_price,
+                current_price=current_price,
+                stop_price=config.theme_pullback_low,
+                t_value=config.theme_t_value,
+                peak_price=config.trailing_stop_peak_price,
+                completed_stages=list(config.staged_exit_completed_stages or []),
+                trailing_started=config.theme_trailing_started,
+                trailing_line=trailing_line,
+                now=now,
+            )
+        except Exception as e:
+            print(f"[{config.stock_name}] 급등테마주 청산 판정 오류: {e}")
+            decision = ExitDecision(False)
+
+        self._theme_exit_cache = (cache_key, decision)
+        return decision
+
+    def check_theme_surge_exit(
+        self, config: TradingConfig, current_price: float, holding_info: dict
+    ) -> tuple[bool, str | None, int | None]:
+        """급등테마주 전량 청산(손절·트레일링·강제청산) 여부를 판정합니다.
+
+        분할 익절(부분 매도)은 여기서 걸러 내고 check_staged_exit 가 처리합니다.
+
+        Returns:
+            (should_exit, reason, stage) — 전량 청산이 아니면 (False, None, None)
+        """
+        if holding_info["qty"] <= 0:
+            return False, None, None
+
+        decision = self._evaluate_theme_exit(config, current_price, holding_info)
+        if decision.should_exit and decision.sell_pct >= 100 and decision.stage is None:
+            return True, decision.reason, None
+        return False, None, None
+
+    def _theme_staged_exit(
+        self, config: TradingConfig, current_price: float
+    ) -> tuple[int | None, float, str]:
+        """급등테마주 nT 분할 익절 차수를 반환합니다.
+
+        마지막 차수까지 도달했는데 트레일링을 쓰지 않는다면 잔량을 전량 정리한다.
+
+        Returns:
+            (차수, 청산 비율%, 사유). 해당 없으면 (None, 0, "")
+        """
+        # 같은 사이클의 check_exit_conditions 가 이미 판정해 둔 결과를 재사용한다.
+        # 보유 수량이 0이면 그쪽에서 아예 판정하지 않으므로 캐시도 비어 있다.
+        cached = getattr(self, "_theme_exit_cache", None)
+        if not cached or cached[0] != (config.id, current_price):
+            return None, 0, ""
+
+        decision = cached[1]
+        if not decision.should_exit or decision.stage is None:
+            return None, 0, ""
+
+        settings = self._theme_exit_settings()
+        sell_pct = decision.sell_pct
+        # 마지막 차수 + 트레일링 미사용 → 남길 이유가 없으므로 전량 정리
+        if not settings.use_trailing and decision.stage == len(settings.stages):
+            sell_pct = 100.0
+
+        return decision.stage, sell_pct, decision.reason
+
+    # ──────────────────────────────────────────────
     # 분할 익절 조건 체크
     # ──────────────────────────────────────────────
 
@@ -651,8 +895,20 @@ class TradingEngine:
         return GetOhlcv("KRX", stock_code, start_date=start_date, end_date=end_date)
 
     def _mark_staged_exit_stage(self, config: TradingConfig, stage: int):
-        """해당 단계를 완료 목록에 기록합니다."""
+        """해당 단계를 완료 목록에 기록합니다.
+
+        급등테마주는 1분 사이에 2차·3차를 한꺼번에 통과할 수 있어 도달한 최고
+        차수만 실행하므로, 건너뛴 하위 차수도 함께 완료 처리해 재실행을 막는다.
+        """
         completed = list(config.staged_exit_completed_stages or [])
+
+        if self._uses_theme_exit(config):
+            merged = sorted(set(completed) | set(range(1, stage + 1)))
+            if merged != completed:
+                config.staged_exit_completed_stages = merged
+                config.save(update_fields=["staged_exit_completed_stages"])
+            return
+
         if stage not in completed:
             completed.append(stage)
             config.staged_exit_completed_stages = completed
@@ -762,6 +1018,11 @@ class TradingEngine:
         except Exception:
             return None, 0.0, ""
 
+        # 급등테마주 분할 익절은 nT 기준이라 이동평균/데드크로스 체계와 다르다.
+        # check_exit_conditions 에서 이미 판정되므로 여기서는 그 결과를 그대로 쓴다.
+        if self._uses_theme_exit(config):
+            return self._theme_staged_exit(config, current_price)
+
         exit_type = defaults.staged_exit_type
         if exit_type == "none":
             return None, 0.0, ""
@@ -835,7 +1096,11 @@ class TradingEngine:
                 # KIS 시장가 매수 주문
                 result = KIS.MakeBuyMarketOrder(stock_code, buy_qty)
                 if result is None:
-                    print(f"[{stock_name}] 매수 주문 실패")
+                    err_msg = _pop_order_error("buy")
+                    order_log(
+                        f"[매수실패] {stock_name}({stock_code}) {buy_qty}주"
+                        f" @ {current_price:,.0f}원 — {err_msg or '사유 미상'}"
+                    )
                     TradeEntry.objects.create(
                         user=self.user, trading_config=config,
                         stock_code=stock_code, stock_name=stock_name,
@@ -843,7 +1108,7 @@ class TradingEngine:
                         order_quantity=buy_qty, order_price=Decimal(str(current_price)),
                         filled_quantity=0, filled_price=Decimal("0"),
                         filled_amount=Decimal("0"), status="FAILED",
-                        note="KIS 매수 주문 실패", ordered_at=tz.now(),
+                        note=f"KIS 매수 주문 실패: {err_msg}"[:255], ordered_at=tz.now(),
                     )
                     return False
 
@@ -891,9 +1156,9 @@ class TradingEngine:
                 # TradingSummary HOLDING 레코드 생성/갱신 (매수 시점에도 호출해야 _update_peak_stats가 동작함)
                 self._update_trading_summary(config, stock_code, stock_name)
 
-            print(
-                f"[{stock_name}] 매수 완료: {buy_qty}주 @ {current_price:,.0f}원"
-                f" (유형={entry_type}, 주문번호={result['OrderNum2']})"
+            order_log(
+                f"[매수완료] {stock_name}({stock_code}) {buy_qty}주 @ {current_price:,.0f}원"
+                f" 유형={entry_type} 주문번호={result['OrderNum2']}"
             )
             return True
 
@@ -964,7 +1229,11 @@ class TradingEngine:
             # KIS 시장가 매도 주문
             result = KIS.MakeSellMarketOrder(stock_code, holding_qty)
             if result is None:
-                print(f"[{stock_name}] 매도 주문 실패")
+                err_msg = _pop_order_error("sell")
+                order_log(
+                    f"[매도실패] {stock_name}({stock_code}) {holding_qty}주"
+                    f" @ {current_price:,.0f}원 ({reason}) — {err_msg or '사유 미상'}"
+                )
                 TradeEntry.objects.create(
                     user=self.user, trading_config=config,
                     stock_code=stock_code, stock_name=stock_name,
@@ -972,7 +1241,7 @@ class TradingEngine:
                     order_quantity=holding_qty, order_price=Decimal(str(current_price)),
                     filled_quantity=0, filled_price=Decimal("0"),
                     filled_amount=Decimal("0"), status="FAILED",
-                    note=f"KIS 매도 주문 실패 ({reason})", ordered_at=tz.now(),
+                    note=f"KIS 매도 주문 실패 ({reason}): {err_msg}"[:255], ordered_at=tz.now(),
                 )
                 return False
 
@@ -1075,7 +1344,11 @@ class TradingEngine:
 
             result = KIS.MakeSellMarketOrder(stock_code, sell_qty)
             if result is None:
-                print(f"[{stock_name}] 분할 매도 주문 실패")
+                err_msg = _pop_order_error("sell")
+                order_log(
+                    f"[분할매도실패] {stock_name}({stock_code}) {sell_qty}주"
+                    f" @ {current_price:,.0f}원 ({reason}) — {err_msg or '사유 미상'}"
+                )
                 TradeEntry.objects.create(
                     user=self.user, trading_config=config,
                     stock_code=stock_code, stock_name=stock_name,
@@ -1083,7 +1356,7 @@ class TradingEngine:
                     order_quantity=sell_qty, order_price=Decimal(str(current_price)),
                     filled_quantity=0, filled_price=Decimal("0"),
                     filled_amount=Decimal("0"), status="FAILED",
-                    note=f"KIS 분할매도 주문 실패 ({reason})", ordered_at=tz.now(),
+                    note=f"KIS 분할매도 주문 실패 ({reason}): {err_msg}"[:255], ordered_at=tz.now(),
                 )
                 return False
 

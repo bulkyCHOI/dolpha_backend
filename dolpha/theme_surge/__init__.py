@@ -17,7 +17,7 @@ from .entry import EntryDecision, check_theme_surge_entry
 from .entry_chart import EntryChartError, build_entry_chart
 from .leader import select_leaders
 from .positions import build_positions
-from .scanner import cleanup_stale_candidates, run_theme_scan
+from .scanner import cleanup_stale_candidates, purge_candidate_date, run_theme_scan
 from .timeline import build_timeline
 from .toss_client import TossThemeError, fetch_theme_ranking, fetch_theme_stocks
 
@@ -30,6 +30,7 @@ __all__ = [
     "build_timeline",
     "check_theme_surge_entry",
     "cleanup_stale_candidates",
+    "purge_candidate_date",
     "detect_surge_themes",
     "fetch_theme_ranking",
     "fetch_theme_stocks",

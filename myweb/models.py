@@ -1,8 +1,24 @@
+from datetime import time as dt_time
+
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 
 
 # Default functions for JSONField
+def default_theme_surge_force_exit_time():
+    """급등테마주 당일 강제 청산 기본 시각 (동시호가 직전)."""
+    return dt_time(15, 20)
+
+
+def default_theme_surge_exit_stages():
+    """급등테마주 분할 익절 기본 차수.
+
+    T = 진입 신호의 눌림 저점 → 전고점 돌파가 사이의 상승폭.
+    2T 도달 시 50% 청산하고, 나머지는 트레일링 스탑이 담당한다.
+    """
+    return [{"t": 2.0, "sell_pct": 50.0}]
+
+
 def default_manual_positions():
     return [100]
 
@@ -297,17 +313,19 @@ class TradingConfig(models.Model):
     is_active = models.BooleanField(default=True)  # 활성화 여부
     trailing_stop_peak_price = models.FloatField(null=True, blank=True)  # 트레일링 스탑 고점 추적
     staged_exit_completed_stages = models.JSONField(default=list, blank=True)  # 완료된 분할 익절 단계 [1, 2]
+
+    # ── 급등테마주 전용 청산 상태 ───────────────────────────
+    # 손절가·1T 폭은 진입 신호(눌림 저점 → 돌파가)로 결정되므로 진입 시점에 확정해 저장한다.
+    theme_pullback_low = models.FloatField(null=True, blank=True)   # 진입 신호의 눌림 저점 = 손절가
+    theme_t_value = models.FloatField(null=True, blank=True)        # 1T 상승폭(원) = 돌파가 - 눌림 저점
+    theme_trailing_started = models.BooleanField(default=False)     # nT 초과로 트레일링 추적 시작 여부
     # autobot_config_id 제거됨 (autobot 통합, 2026-04-17)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = [
-            "user",
-            "stock_code",
-            "strategy_type",
-            "is_active",
-        ]  # 사용자별 종목별 전략타입별 하나의 활성 설정만 허용
+        # 비활성 설정은 날짜별 이력으로 계속 쌓이므로 DB 유니크 제약을 두지 않는다.
+        # "활성 설정은 종목·전략당 1건" 규칙은 등록 로직에서 트랜잭션으로 보장한다.
         ordering = ["-updated_at"]
 
     def __str__(self):
@@ -452,6 +470,32 @@ class TradingDefaults(models.Model):
         default=50_000_000_000
     )                                                                  # 급등 테마 판정 거래대금 하한(원)
     theme_surge_use_foreign_filter = models.BooleanField(default=True)  # 외국인 매수세 필터 사용
+
+    # ── 급등테마주 청산 설정 (데이 트레이딩 전용) ───────────
+    # Manual 기본값(손절 8% / 트레일링 트리거 8%)은 스윙용이라 1분봉 진입 로직과
+    # 시간축이 맞지 않는다. 그래서 청산도 이 전략 전용 값을 따로 둔다.
+    theme_surge_use_own_exit = models.BooleanField(default=True)      # 전용 청산 규칙 사용(끄면 기존 Manual 설정)
+    theme_surge_max_loss = models.FloatField(default=1.0)             # 손절 시 감수할 계좌 손실(%) — 배팅사이즈 기준
+    theme_surge_exit_stages = models.JSONField(
+        default=default_theme_surge_exit_stages, blank=True
+    )  # 분할 익절 차수 [{"t": 배수, "sell_pct": 청산비율}] — n차 nT 자유 설정
+
+    theme_surge_use_trailing = models.BooleanField(default=True)      # 잔여 물량 트레일링 사용
+    theme_surge_trailing_start_t = models.FloatField(default=2.0)     # 이 배수(T) 초과 시부터 추적 시작
+    THEME_SURGE_BAR_UNITS = [
+        ("1m", "1분봉"),
+        ("5m", "5분봉"),
+        ("1d", "일봉"),
+    ]
+    theme_surge_trailing_bar_unit = models.CharField(
+        max_length=4, choices=THEME_SURGE_BAR_UNITS, default="5m"
+    )  # 최저점 판정에 쓸 봉 단위
+    theme_surge_trailing_bar_count = models.IntegerField(default=3)   # 직전 N봉 최저점 이탈 시 청산
+
+    theme_surge_force_exit_enabled = models.BooleanField(default=True)  # 당일 강제 청산 사용
+    theme_surge_force_exit_time = models.TimeField(
+        default=default_theme_surge_force_exit_time
+    )  # 강제 청산 시각 (오버나이트 갭 리스크 차단)
 
     # 메타데이터
     created_at = models.DateTimeField(auto_now_add=True)

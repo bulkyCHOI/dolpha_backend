@@ -1,9 +1,9 @@
-"""5분 주기 급등 테마 스캔 오케스트레이션.
+"""1분 주기 급등 테마 스캔 오케스트레이션.
 
-APScheduler 가 09:00~15:30 사이 5분마다 run_theme_scan() 을 호출한다.
+APScheduler 가 09:00~15:30 사이 매 분 run_theme_scan() 을 호출한다.
 
     토스 랭킹 조회
-      → 직전 슬롯 대비 급등 판정
+      → 직전 구간 대비 급등 판정
       → ThemeSnapshot 저장 (전 테마, 타임라인 소스)
       → 급등 테마의 구성 종목 조회 → 1등 종목 선정 → ThemeLeaderCandidate 저장
       → 급등테마주 전략을 켠 유저에게 TradingConfig 자동 등록
@@ -14,7 +14,7 @@ APScheduler 가 09:00~15:30 사이 5분마다 run_theme_scan() 을 호출한다.
 
 from __future__ import annotations
 
-from datetime import date as date_cls, datetime, time as time_cls
+from datetime import date as date_cls, datetime, time as time_cls, timedelta
 
 from django.db import transaction
 from pytz import timezone as pytz_tz
@@ -25,6 +25,7 @@ from .config import (
     LEADER_STORE_COUNT,
     MARKET_CLOSE,
     MARKET_OPEN,
+    MOMENTUM_LOOKBACK_MINUTES,
     SLOT_MINUTES,
     SURGE_MAX_THEMES_PER_SLOT,
     SURGE_TOP_N,
@@ -37,7 +38,7 @@ _KST = pytz_tz("Asia/Seoul")
 
 
 def current_slot(now: datetime | None = None) -> time_cls:
-    """현재 시각을 5분 슬롯 시각으로 내림한다 (09:00~15:30 범위로 clamp)."""
+    """현재 시각을 SLOT_MINUTES 슬롯 시각으로 내림한다 (09:00~15:30 범위로 clamp)."""
     moment = now or datetime.now(_KST)
     floored = moment.replace(
         minute=(moment.minute // SLOT_MINUTES) * SLOT_MINUTES, second=0, microsecond=0
@@ -154,11 +155,20 @@ def _is_trading_day(day: date_cls) -> bool:
 # ──────────────────────────────────────────────────────────────
 
 def _previous_rates(today: date_cls, slot: time_cls) -> dict[int, float]:
-    """직전 슬롯의 {tics_id: 등락률(%)} — 모멘텀 계산에 사용."""
+    """MOMENTUM_LOOKBACK_MINUTES 전 슬롯의 {tics_id: 등락률(%)} — 모멘텀 계산에 사용.
+
+    슬롯 주기(SLOT_MINUTES)가 짧아져도 모멘텀 판정 구간은 고정 분 수를 유지한다.
+    1분 슬롯에서 직전 1분과 비교하면 상승폭 요건이 사실상 5배로 강해져
+    급등 테마가 거의 잡히지 않기 때문이다.
+    """
     from myweb.models import ThemeSnapshot
 
+    cutoff = (
+        datetime.combine(today, slot) - timedelta(minutes=MOMENTUM_LOOKBACK_MINUTES)
+    ).time()
+
     prev_slot = (
-        ThemeSnapshot.objects.filter(date=today, slot_time__lt=slot)
+        ThemeSnapshot.objects.filter(date=today, slot_time__lte=cutoff)
         .order_by("-slot_time")
         .values_list("slot_time", flat=True)
         .first()
@@ -276,6 +286,33 @@ def _meets_user_thresholds(defaults, verdict: SurgeVerdict) -> bool:
     return not (min_value > 0 and 0 < theme.trading_value < min_value)
 
 
+def _exit_defaults(defaults) -> dict:
+    """후보 등록 시 복사할 청산 관련 필드를 만든다.
+
+    전용 청산(데이 트레이딩)을 쓰면 손절가·1T 폭은 진입 시점의 눌림 저점으로
+    확정되므로 여기서는 비워 두고, 계좌 리스크 비율만 미리 넣는다.
+    전용 청산을 끄면 기존처럼 Manual 기본값을 그대로 복사한다.
+    """
+    if getattr(defaults, "theme_surge_use_own_exit", True):
+        return {
+            "max_loss": defaults.theme_surge_max_loss,
+            "stop_loss": None,          # 진입 시 눌림 저점으로 확정
+            "take_profit": None,        # nT 분할 익절이 대신한다
+            "pyramiding_count": 0,      # 당일 청산 전략이라 피라미딩은 쓰지 않는다
+            "pyramiding_entries": [],
+            "positions": [100],
+        }
+
+    return {
+        "max_loss": defaults.manual_max_loss,
+        "stop_loss": defaults.manual_stop_loss,
+        "take_profit": defaults.manual_take_profit,
+        "pyramiding_count": defaults.manual_pyramiding_count,
+        "pyramiding_entries": list(defaults.manual_pyramiding_entries or []),
+        "positions": list(defaults.manual_positions or [100]),
+    }
+
+
 def _register_for_user(defaults, verdict: SurgeVerdict, leader: LeaderCandidate) -> bool:
     """유저 1명에게 후보 1종목을 등록한다. 실제 등록 시 True."""
     from myweb.models import TradingConfig
@@ -303,14 +340,9 @@ def _register_for_user(defaults, verdict: SurgeVerdict, leader: LeaderCandidate)
                 stock_name=stock.name,
                 trading_mode="manual",
                 strategy_type="theme_surge",
-                max_loss=defaults.manual_max_loss,
-                stop_loss=defaults.manual_stop_loss,
-                take_profit=defaults.manual_take_profit,
-                pyramiding_count=defaults.manual_pyramiding_count,
+                **_exit_defaults(defaults),
                 # 진입 시점은 1분봉 눌림목·돌파 로직이 판단하므로 가격 트리거는 쓰지 않는다
                 entry_point=0,
-                pyramiding_entries=list(defaults.manual_pyramiding_entries or []),
-                positions=list(defaults.manual_positions or [100]),
                 is_active=True,
             )
     except Exception as e:
@@ -332,6 +364,11 @@ def _register_for_user(defaults, verdict: SurgeVerdict, leader: LeaderCandidate)
 
 def cleanup_stale_candidates() -> int:
     """장 마감 후, 끝내 진입하지 못한 급등테마주 후보 설정을 비활성화한다.
+
+    후보는 그날 장중에만 유효하므로 다음 날 매매 대상에서 빼야 한다.
+    다만 설정 행 자체는 남긴다 — 급등테마주 탭의 날짜별 이력과
+    진입 판정 차트(1분봉)가 이 행을 근거로 조회되기 때문이다.
+    실제 삭제는 사용자가 날짜 단위로 실행한다(purge_candidate_date).
 
     보유 포지션(체결된 매수 기록이 있는 설정)은 건드리지 않는다.
     청산은 Manual 기본 설정(손절/익절/트레일링스탑/분할익절)이 계속 담당한다.
@@ -357,6 +394,80 @@ def cleanup_stale_candidates() -> int:
         config.is_active = False
         config.save(update_fields=["is_active"])
         deactivated += 1
-        print(f"[급등테마] 미진입 후보 정리 — {config.user.username} / {config.stock_name}")
+        print(f"[급등테마] 미진입 후보 비활성화 — {config.user.username} / {config.stock_name}")
 
     return deactivated
+
+
+def purge_candidate_date(user, target_date: date_cls) -> dict:
+    """특정 날짜에 등록된 급등테마주 후보 설정과 그 근거 데이터를 삭제한다.
+
+    삭제 대상은 세 가지다.
+      1) 해당 날짜(KST)에 등록된 이 유저의 theme_surge TradingConfig
+      2) 그 종목들의 해당 날짜 1분봉 (다른 날짜 분봉은 보존)
+      3) 그 날짜의 진입 판정 이력(ThemeEntrySignal)
+
+    보유 포지션이 남아 있는 설정은 청산 관리가 끊기므로 건너뛰고 그 수를 보고한다.
+
+    Args:
+        user:        삭제 대상 유저
+        target_date: 등록일 (KST)
+
+    Returns:
+        {"date", "deleted_configs", "deleted_bars", "deleted_signals", "kept_positions"}
+    """
+    from myweb.models import (
+        StockMinuteOhlcv,
+        ThemeEntrySignal,
+        TradeEntry,
+        TradingConfig,
+    )
+
+    start = _KST.localize(datetime.combine(target_date, time_cls.min))
+    end = _KST.localize(datetime.combine(target_date, time_cls.max))
+
+    configs = TradingConfig.objects.filter(
+        user=user, strategy_type="theme_surge", created_at__range=(start, end)
+    )
+
+    removable, kept = [], 0
+    for config in configs:
+        has_position = TradeEntry.objects.filter(
+            user=user,
+            stock_code=config.stock_code,
+            trade_type="BUY",
+            status="FILLED",
+        ).exists()
+        if has_position:
+            kept += 1
+            continue
+        removable.append(config)
+
+    codes = {config.stock_code for config in removable}
+    deleted_bars = 0
+    deleted_signals = 0
+
+    with transaction.atomic():
+        if codes:
+            deleted_bars, _ = StockMinuteOhlcv.objects.filter(
+                stock_code__in=codes, bar_datetime__range=(start, end)
+            ).delete()
+            deleted_signals, _ = ThemeEntrySignal.objects.filter(
+                user=user, date=target_date, stock_code__in=codes
+            ).delete()
+        for config in removable:
+            config.delete()
+
+    print(
+        f"[급등테마] {user.username} {target_date} 후보 정리 —"
+        f" 설정 {len(removable)}건, 분봉 {deleted_bars}건, 판정 {deleted_signals}건 삭제"
+        f" (보유 중 {kept}건 보존)"
+    )
+
+    return {
+        "date": target_date.isoformat(),
+        "deleted_configs": len(removable),
+        "deleted_bars": deleted_bars,
+        "deleted_signals": deleted_signals,
+        "kept_positions": kept,
+    }

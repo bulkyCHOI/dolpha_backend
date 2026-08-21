@@ -8,6 +8,7 @@
   GET  /theme-surge/positions   — 자동매매 현황: 보유 포지션 + 대기 후보 (로그인 필요)
   GET  /theme-surge/entry-chart — 종목 1분봉 + 진입 판정 좌표 (로그인 필요)
   POST /theme-surge/scan        — 5분 스캔 수동 실행 (로그인 필요)
+  DELETE /theme-surge/candidates — 특정 등록일의 후보 설정·분봉·판정 삭제 (로그인 필요)
 
 타임라인은 로그인 없이도 조회 가능하며, 로그인한 경우 해당 유저의 진입 시그널
 마커가 함께 내려간다.
@@ -27,6 +28,7 @@ from .theme_surge import (
     build_positions,
     build_timeline,
     fetch_theme_ranking,
+    purge_candidate_date,
     run_theme_scan,
 )
 from .theme_surge.config import SURGE_TOP_N
@@ -228,5 +230,28 @@ def trigger_scan(request):
         # 사용자가 명시적으로 누른 스캔이므로 개장일 게이트를 우회한다
         result = run_theme_scan(force=True)
         return JsonResponse({"status": "OK", "data": result})
+    except Exception as e:
+        return JsonResponse({"status": "error", "message": str(e)}, status=500)
+
+
+@theme_surge_router.delete("/candidates")
+def delete_candidates(request, date: str = ""):
+    """해당 등록일의 급등테마주 후보 설정과 1분봉·판정 이력을 모두 삭제한다.
+
+    후보 설정은 장 마감 후 비활성화만 되고 계속 쌓이므로, 다 본 날짜는
+    사용자가 직접 지운다. 보유 포지션이 남은 설정은 청산 관리가 끊기지 않도록 보존한다.
+    """
+    user = get_authenticated_user(request)
+    if not user:
+        return JsonResponse({"status": "error", "message": "인증이 필요합니다."}, status=401)
+
+    target = _parse_date(date)
+    if target is None:
+        return JsonResponse(
+            {"status": "error", "message": "date는 YYYY-MM-DD 형식이어야 합니다."}, status=400
+        )
+
+    try:
+        return JsonResponse({"status": "OK", "data": purge_candidate_date(user, target)})
     except Exception as e:
         return JsonResponse({"status": "error", "message": str(e)}, status=500)

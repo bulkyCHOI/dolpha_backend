@@ -3,7 +3,7 @@
 - 사용자 프로필 관리
 - 자동매매 설정 관리 (autobot 통합 후 Django DB 단독 관리)
 """
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from ninja import Router, Schema
 from ninja.security import django_auth
 from django.http import JsonResponse
@@ -160,6 +160,16 @@ class TradingDefaultsSchema(Schema):
     theme_surge_min_fluctuation: float = 3.0
     theme_surge_min_trading_value: int = 50000000000
     theme_surge_use_foreign_filter: bool = True
+    # 급등테마주 청산 설정 (데이 트레이딩 전용)
+    theme_surge_use_own_exit: bool = True
+    theme_surge_max_loss: float = 1.0
+    theme_surge_exit_stages: List[dict] = []
+    theme_surge_use_trailing: bool = True
+    theme_surge_trailing_start_t: float = 2.0
+    theme_surge_trailing_bar_unit: str = "5m"
+    theme_surge_trailing_bar_count: int = 3
+    theme_surge_force_exit_enabled: bool = True
+    theme_surge_force_exit_time: str = "15:20"
 
 # 즐겨찾기 관련 스키마
 class FavoriteStockSchema(Schema):
@@ -260,6 +270,16 @@ class TradingDefaultsResponseSchema(Schema):
     theme_surge_min_fluctuation: float = 3.0
     theme_surge_min_trading_value: int = 50000000000
     theme_surge_use_foreign_filter: bool = True
+    # 급등테마주 청산 설정 (데이 트레이딩 전용)
+    theme_surge_use_own_exit: bool = True
+    theme_surge_max_loss: float = 1.0
+    theme_surge_exit_stages: List[dict] = []
+    theme_surge_use_trailing: bool = True
+    theme_surge_trailing_start_t: float = 2.0
+    theme_surge_trailing_bar_unit: str = "5m"
+    theme_surge_trailing_bar_count: int = 3
+    theme_surge_force_exit_enabled: bool = True
+    theme_surge_force_exit_time: str = "15:20"
     created_at: str
     updated_at: str
 
@@ -678,6 +698,15 @@ def get_trading_defaults(request):
             'theme_surge_min_fluctuation': defaults.theme_surge_min_fluctuation,
             'theme_surge_min_trading_value': defaults.theme_surge_min_trading_value,
             'theme_surge_use_foreign_filter': defaults.theme_surge_use_foreign_filter,
+            'theme_surge_use_own_exit': defaults.theme_surge_use_own_exit,
+            'theme_surge_max_loss': defaults.theme_surge_max_loss,
+            'theme_surge_exit_stages': defaults.theme_surge_exit_stages,
+            'theme_surge_use_trailing': defaults.theme_surge_use_trailing,
+            'theme_surge_trailing_start_t': defaults.theme_surge_trailing_start_t,
+            'theme_surge_trailing_bar_unit': defaults.theme_surge_trailing_bar_unit,
+            'theme_surge_trailing_bar_count': defaults.theme_surge_trailing_bar_count,
+            'theme_surge_force_exit_enabled': defaults.theme_surge_force_exit_enabled,
+            'theme_surge_force_exit_time': defaults.theme_surge_force_exit_time.strftime('%H:%M'),
             'created_at': defaults.created_at.isoformat(),
             'updated_at': defaults.updated_at.isoformat(),
         }
@@ -687,6 +716,55 @@ def get_trading_defaults(request):
             'success': False,
             'error': str(e)
         }, status=500)
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    """설정값을 허용 범위로 자른다. 숫자가 아니면 하한을 쓴다."""
+    try:
+        return min(max(float(value), low), high)
+    except (TypeError, ValueError):
+        return low
+
+
+def _parse_hhmm(value: str, fallback: dt_time) -> dt_time:
+    """'HH:MM' 문자열을 time 으로 변환한다. 형식이 틀리면 fallback."""
+    try:
+        parsed = datetime.strptime(str(value).strip(), "%H:%M").time()
+    except (TypeError, ValueError):
+        return fallback
+    return parsed
+
+
+def _clean_exit_stages(raw: list) -> list:
+    """급등테마주 분할 익절 차수를 검증한다.
+
+    T 배수와 청산 비율이 모두 유효한 항목만 남기고 T 오름차순으로 정렬한다.
+    누적 청산 비율이 100%를 넘으면 넘는 차수는 버린다(잔량보다 많이 팔 수 없다).
+    """
+    cleaned = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            t_mult = float(item.get("t"))
+            sell_pct = float(item.get("sell_pct"))
+        except (TypeError, ValueError):
+            continue
+        if t_mult <= 0 or not (0 < sell_pct <= 100):
+            continue
+        cleaned.append({"t": round(t_mult, 2), "sell_pct": round(sell_pct, 2)})
+
+    cleaned.sort(key=lambda stage: stage["t"])
+
+    result = []
+    total = 0.0
+    for stage in cleaned:
+        if total + stage["sell_pct"] > 100.0:
+            break
+        result.append(stage)
+        total += stage["sell_pct"]
+
+    return result
 
 
 @mypage_router.post("/trading-defaults", response=ResponseSchema)
@@ -756,6 +834,24 @@ def save_trading_defaults(request, data: TradingDefaultsSchema):
         defaults.theme_surge_min_fluctuation = data.theme_surge_min_fluctuation
         defaults.theme_surge_min_trading_value = data.theme_surge_min_trading_value
         defaults.theme_surge_use_foreign_filter = data.theme_surge_use_foreign_filter
+        # 급등테마주 청산 설정 — 값 검증 후 저장 (잘못된 차수는 버린다)
+        defaults.theme_surge_use_own_exit = data.theme_surge_use_own_exit
+        defaults.theme_surge_max_loss = _clamp(data.theme_surge_max_loss, 0.1, 100.0)
+        defaults.theme_surge_exit_stages = _clean_exit_stages(data.theme_surge_exit_stages)
+        defaults.theme_surge_use_trailing = data.theme_surge_use_trailing
+        defaults.theme_surge_trailing_start_t = _clamp(data.theme_surge_trailing_start_t, 0.1, 100.0)
+        defaults.theme_surge_trailing_bar_unit = (
+            data.theme_surge_trailing_bar_unit
+            if data.theme_surge_trailing_bar_unit in {"1m", "5m", "1d"}
+            else "5m"
+        )
+        defaults.theme_surge_trailing_bar_count = int(
+            _clamp(data.theme_surge_trailing_bar_count, 1, 200)
+        )
+        defaults.theme_surge_force_exit_enabled = data.theme_surge_force_exit_enabled
+        defaults.theme_surge_force_exit_time = _parse_hhmm(
+            data.theme_surge_force_exit_time, fallback=dt_time(15, 20)
+        )
 
         defaults.save()
         
