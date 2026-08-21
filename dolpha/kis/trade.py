@@ -274,6 +274,9 @@ def GetCurrentPrice(stock_code: str) -> int:
 # 시장가 매수
 # ─────────────────────────────────────────────────────────────
 
+LAST_ORDER_ERROR: dict[str, str] = {}
+
+
 def MakeBuyMarketOrder(stock_code: str, qty: int) -> dict | None:
     """
     시장가 매수 주문을 접수합니다.
@@ -287,7 +290,7 @@ def MakeBuyMarketOrder(stock_code: str, qty: int) -> dict | None:
     """
     _sleep()
 
-    tr_id = "VTTC0802U" if _is_virtual() else "TTTC0802U"
+    tr_id = "VTTC0012U" if _is_virtual() else "TTTC0012U"
     path  = "uapi/domestic-stock/v1/trading/order-cash"
     url   = f"{get_url_base()}/{path}"
 
@@ -311,8 +314,10 @@ def MakeBuyMarketOrder(stock_code: str, qty: int) -> dict | None:
             "OrderTime": order["ORD_TMD"],
         }
     else:
-        err = res.json().get("msg_cd", res.text)
+        d = res.json()
+        err = f"{d.get('msg_cd', '')} {d.get('msg1', res.text[:200])}".strip()
         print(f"[KIS] MakeBuyMarketOrder({stock_code}, {qty}) 실패: {err}")
+        LAST_ORDER_ERROR["buy"] = err
         return None
 
 
@@ -333,7 +338,7 @@ def MakeSellMarketOrder(stock_code: str, qty: int) -> dict | None:
     """
     _sleep()
 
-    tr_id = "VTTC0801U" if _is_virtual() else "TTTC0801U"
+    tr_id = "VTTC0011U" if _is_virtual() else "TTTC0011U"
     path  = "uapi/domestic-stock/v1/trading/order-cash"
     url   = f"{get_url_base()}/{path}"
 
@@ -357,8 +362,10 @@ def MakeSellMarketOrder(stock_code: str, qty: int) -> dict | None:
             "OrderTime": order["ORD_TMD"],
         }
     else:
-        err = res.json().get("msg_cd", res.text)
+        d = res.json()
+        err = f"{d.get('msg_cd', '')} {d.get('msg1', res.text[:200])}".strip()
         print(f"[KIS] MakeSellMarketOrder({stock_code}, {qty}) 실패: {err}")
+        LAST_ORDER_ERROR["sell"] = err
         return None
 
 

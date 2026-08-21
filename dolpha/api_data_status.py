@@ -313,6 +313,7 @@ def get_logs(request, source: str = "dart", lines: int = 200):
         "index":     "/tmp/index_collect.log",
         "analysis":  "/tmp/analysis_collect.log",
         "scheduler": "/tmp/scheduler.log",
+        "order":     "/tmp/order.log",
         "server": os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "server.log"
