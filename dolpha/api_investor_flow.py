@@ -2,14 +2,13 @@
 매매동향 API — 외국인·프로그램·회원사 매매동향 엔드포인트
 
 엔드포인트:
-  GET /stock/{code}/investor-today    — 당일 투자자별 순매수 (개인/외국인/기관)
-  GET /stock/{code}/foreign-total     — 당일 외국인/기관 가집계 시간대별
+  GET /stock/{code}/investor-today    — 일자별 투자자 순매수 (개인/외국인/기관)
   GET /stock/{code}/program-trade     — 당일 프로그램매매 추이
-  GET /stock/{code}/member-firm       — 당일 회원사(전 증권사)별 매매동향
+  GET /stock/{code}/member-firm       — 회원사(증권사) 매도/매수 상위 및 외국계 합계
   GET /stock/{code}/investor-flow-snapshot — 장 마감 직전 저장된 스냅샷 조회 (장 마감 후용)
   GET /investor-flow-snapshot/list         — 자동매매 대상 전 종목 스냅샷 목록 (장 마감 후용)
 
-참고: KIS API의 실시간 엔드포인트들은 장중(평일 09:00~15:30 KST)에만 데이터를 제공하며,
+참고: program-trade 는 장중(평일 09:00~15:30 KST)에만 시간대별 데이터를 제공합니다.
       자동매매 대상 종목은 15:29에 스냅샷으로 미리 저장되어 장 마감 후에도 조회 가능합니다.
 """
 
@@ -22,7 +21,6 @@ from django.http import JsonResponse
 
 from .kis.investor_flow import (
     GetInvestorToday,
-    GetForeignInstitutionTotal,
     GetProgramTradeToday,
     GetMemberFirmTrading,
 )
@@ -79,14 +77,8 @@ def _handle(request, stock_code: str, fetcher_fn, cache_key_prefix: str):
 
 @investor_flow_router.get("/stock/{stock_code}/investor-today")
 def get_investor_today(request, stock_code: str):
-    """당일 투자자별 순매수 (개인/외국인/기관) — FHKST01010900"""
+    """일자별 투자자 순매수 (개인/외국인/기관) — FHKST01010900"""
     return _handle(request, stock_code, GetInvestorToday, "investor-today")
-
-
-@investor_flow_router.get("/stock/{stock_code}/foreign-total")
-def get_foreign_total(request, stock_code: str):
-    """당일 외국인/기관 매매 가집계 시간대별 — HHKST03900300"""
-    return _handle(request, stock_code, GetForeignInstitutionTotal, "foreign-total")
 
 
 @investor_flow_router.get("/stock/{stock_code}/program-trade")
@@ -97,7 +89,7 @@ def get_program_trade(request, stock_code: str):
 
 @investor_flow_router.get("/stock/{stock_code}/member-firm")
 def get_member_firm(request, stock_code: str):
-    """전 증권사(회원사)별 당일 매매동향 — FHKST01010600"""
+    """회원사(증권사) 매도/매수 상위 및 외국계 합계 — FHKST01010600"""
     return _handle(request, stock_code, GetMemberFirmTrading, "member-firm")
 
 
@@ -107,7 +99,6 @@ def _snapshot_to_dict(snapshot) -> dict:
         "stock_name": snapshot.stock_name,
         "date": snapshot.date.isoformat(),
         "investor_today": snapshot.investor_today,
-        "foreign_total": snapshot.foreign_total,
         "program_trade": snapshot.program_trade,
         "member_firm": snapshot.member_firm,
         "captured_at": snapshot.captured_at.isoformat(),

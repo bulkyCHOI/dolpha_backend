@@ -1,7 +1,7 @@
 """
 자동매매 설정 목록 종목의 매매동향 장마감 전 스냅샷 수집.
 
-KIS 매매동향 API(investor_flow.py)는 장중(09:00~15:30 KST)에만 데이터를 제공하므로,
+KIS 프로그램매매 추이는 장중(09:00~15:30 KST)에만 시간대별 데이터를 제공하므로,
 장 마감 직전에 TradingConfig(is_active=True)에 등록된 종목들의 매매동향을 미리 수집해
 InvestorFlowSnapshot에 저장한다. 장 마감 후에는 이 스냅샷을 조회해서 볼 수 있다.
 """
@@ -13,7 +13,6 @@ from django.utils import timezone
 
 from .kis.investor_flow import (
     GetInvestorToday,
-    GetForeignInstitutionTotal,
     GetProgramTradeToday,
     GetMemberFirmTrading,
 )
@@ -48,8 +47,6 @@ def collect_and_save_investor_flow_snapshots() -> dict:
         try:
             investor_today = GetInvestorToday(stock_code)
             time.sleep(_REQUEST_INTERVAL_SEC)
-            foreign_total = GetForeignInstitutionTotal(stock_code)
-            time.sleep(_REQUEST_INTERVAL_SEC)
             program_trade = GetProgramTradeToday(stock_code)
             time.sleep(_REQUEST_INTERVAL_SEC)
             member_firm = GetMemberFirmTrading(stock_code)
@@ -61,7 +58,6 @@ def collect_and_save_investor_flow_snapshots() -> dict:
                 defaults={
                     "stock_name": stock_name,
                     "investor_today": investor_today,
-                    "foreign_total": foreign_total,
                     "program_trade": program_trade,
                     "member_firm": member_firm,
                 },
