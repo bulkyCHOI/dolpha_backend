@@ -47,6 +47,7 @@ LEADER_MAX_CHANGE_RATE_PCT = 25.0     # 상한가 근접(+25% 초과) 종목은 
 LEADER_STORE_COUNT = 3                # 테마당 저장할 후보 수 (1등 + 추적용 2등·3등)
 
 # ── 1분봉 진입 판정 ─────────────────────────────────────────
+ENTRY_MAX_BAR_AGE_MIN = 5             # 마지막 분봉이 이보다 낡으면 판정 보류 (낡은 데이터 진입 차단)
 ENTRY_LOOKBACK_BARS = 120             # 전고점 탐색 구간(분봉 개수)
 ENTRY_MIN_BARS = 45                   # 판정에 필요한 최소 분봉 개수 (스윙 고점 확정에 좌우 PIVOT_WINDOW 봉 필요)
 PIVOT_WINDOW = 20                     # 스윙 고점 판정 좌우 봉 수

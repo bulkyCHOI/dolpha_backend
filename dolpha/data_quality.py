@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -28,6 +29,10 @@ HALT_COOLDOWN_TRADING_DAYS: int = 10
 
 # 수정주가 재수집 시 조회할 과거 기간 (일수, 약 1.5년)
 REFETCH_LOOKBACK_DAYS: int = 540
+
+# 분봉 백필 KIS 조회 재시도 횟수 / 백오프(초) — 유량 제한 일시 실패 대비
+BACKFILL_MAX_RETRY: int = 3
+BACKFILL_RETRY_BACKOFF_SEC: float = 1.0
 
 
 # ── Layer 2: 거래정지 감지 ──────────────────────────────────────────────────
@@ -172,6 +177,41 @@ def detect_corporate_action_from_saved(stock_ohlcv_list: list) -> bool:
     )
 
 
+def _fetch_minute_bars_with_retry(
+    stock_code: str, end_hhmmss: str, target_date: date
+) -> list:
+    """KIS 분봉을 재시도와 함께 조회합니다.
+
+    KIS 유량 제한에 걸리면 빈 리스트가 돌아오는데, 그대로 포기하면 그 종목의
+    분봉이 하루 종일 낡은 채로 남아 진입 판정이 과거 데이터로 이뤄진다.
+    짧은 백오프로 몇 번 더 시도하고, 끝내 실패하면 경고로 남긴다.
+    """
+    from dolpha.kis.minute import GetMinuteOhlcvKR
+
+    for attempt in range(1, BACKFILL_MAX_RETRY + 1):
+        try:
+            bars = GetMinuteOhlcvKR(stock_code, end_hhmmss=end_hhmmss)
+            if bars:
+                return bars
+            logger.warning(
+                "[backfill] %s %s KIS 반환 데이터 없음 (%d/%d)",
+                stock_code, target_date, attempt, BACKFILL_MAX_RETRY,
+            )
+        except Exception:
+            logger.warning(
+                "[backfill] %s %s KIS API 조회 실패 (%d/%d)",
+                stock_code, target_date, attempt, BACKFILL_MAX_RETRY, exc_info=True,
+            )
+        if attempt < BACKFILL_MAX_RETRY:
+            time.sleep(BACKFILL_RETRY_BACKOFF_SEC * attempt)
+
+    logger.error(
+        "[backfill] %s %s 분봉 조회 최종 실패 — 분봉이 갱신되지 않음",
+        stock_code, target_date,
+    )
+    return []
+
+
 def backfill_minute_bars(stock_code: str, target_date: Optional[date] = None) -> int:
     """
     당일(또는 지정 날짜)의 누락된 분봉 데이터를 KIS API로 채웁니다.
@@ -188,7 +228,6 @@ def backfill_minute_bars(stock_code: str, target_date: Optional[date] = None) ->
         upsert된 봉 수
     """
     from myweb.models import StockMinuteOhlcv
-    from dolpha.kis.minute import GetMinuteOhlcvKR
 
     if target_date is None:
         target_date = date.today()
@@ -205,14 +244,8 @@ def backfill_minute_bars(stock_code: str, target_date: Optional[date] = None) ->
 
     logger.info("[backfill] %s %s 백필 시작 (end=%s)", stock_code, target_date, end_hhmmss)
 
-    try:
-        bars = GetMinuteOhlcvKR(stock_code, end_hhmmss=end_hhmmss)
-    except Exception:
-        logger.error("[backfill] KIS API 조회 실패: %s %s", stock_code, target_date, exc_info=True)
-        return 0
-
+    bars = _fetch_minute_bars_with_retry(stock_code, end_hhmmss, target_date)
     if not bars:
-        logger.info("[backfill] %s %s KIS 반환 데이터 없음", stock_code, target_date)
         return 0
 
     # target_date 날짜의 봉만 필터 (GetMinuteOhlcvKR은 당일만 반환하지만 안전 확인)

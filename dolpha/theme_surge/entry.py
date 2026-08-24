@@ -15,7 +15,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date as date_cls, datetime
 
-from .config import ENTRY_LOOKBACK_BARS, ENTRY_MIN_BARS, FOREIGN_REQUIRE_INCREASING
+from .config import (
+    ENTRY_LOOKBACK_BARS,
+    ENTRY_MAX_BAR_AGE_MIN,
+    ENTRY_MIN_BARS,
+    FOREIGN_REQUIRE_INCREASING,
+)
 from .foreign_flow import ForeignFlow, get_foreign_flow
 from .patterns import analyze_breakout, analyze_pullback, find_last_swing_high
 
@@ -61,6 +66,17 @@ def check_theme_surge_entry(
         return EntryDecision(
             passed=False,
             reason=f"분봉 부족 ({len(minute_bars)}봉 < {ENTRY_MIN_BARS}봉)",
+        )
+
+    stale_min = _bar_age_minutes(minute_bars[-1])
+    if stale_min is not None and stale_min > ENTRY_MAX_BAR_AGE_MIN:
+        # 분봉 수집이 밀린 상태에서 판정하면 과거 전고점·눌림으로 매수하게 된다
+        return EntryDecision(
+            passed=False,
+            reason=(
+                f"분봉 지연 (마지막 봉 {minute_bars[-1]['time']},"
+                f" {stale_min:.0f}분 경과 > {ENTRY_MAX_BAR_AGE_MIN}분) — 판정 보류"
+            ),
         )
 
     window = minute_bars[-ENTRY_LOOKBACK_BARS:]
@@ -135,6 +151,30 @@ def check_theme_surge_entry(
         has_breakout=True,
         has_foreign_buying=True,
     )
+
+
+def _bar_age_minutes(last_bar: dict) -> float | None:
+    """마지막 분봉이 몇 분 전 봉인지 계산한다 (장 마감 후 조회면 None).
+
+    실시간 판정에서만 의미가 있으므로, 정규장 시간이 아닌 시각(과거 날짜 재현 등)
+    에는 None 을 돌려 지연 검사를 건너뛴다.
+    """
+    from pytz import timezone as pytz_tz
+
+    from .config import MARKET_CLOSE, MARKET_OPEN
+
+    kst = pytz_tz("Asia/Seoul")
+    now = datetime.now(kst)
+    if not (MARKET_OPEN <= now.time() <= MARKET_CLOSE):
+        return None
+
+    try:
+        hour, minute = (int(part) for part in last_bar["time"].split(":"))
+    except (KeyError, ValueError):
+        return None
+
+    bar_moment = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return (now - bar_moment).total_seconds() / 60.0
 
 
 def _is_foreign_buying(flow: ForeignFlow) -> bool:

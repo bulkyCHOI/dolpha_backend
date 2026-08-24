@@ -30,6 +30,10 @@ from dolpha.kis import trade as KIS
 from dolpha.order_log import order_log
 from dolpha.stockCommon import GetOhlcv, GetNowDateStr
 
+# 분봉 백필 정책
+BACKFILL_STALE_MINUTES = 3        # 마지막 분봉이 이 시간보다 낡으면 백필을 다시 시도
+MAX_BACKFILLS_PER_CYCLE = 5       # 한 사이클에서 허용할 풀 백필 횟수 (KIS 호출량 상한)
+
 
 def _pop_order_error(side: str) -> str:
     """직전 KIS 주문 실패 사유를 꺼내고 비운다.
@@ -45,6 +49,13 @@ class TradingEngine:
     매매 사이클을 실행합니다.
     """
 
+    # 분봉 백필 이력은 클래스 레벨로 공유한다.
+    # 사이클마다 엔진 인스턴스가 새로 만들어지므로 인스턴스 속성으로 두면
+    # 매 분 전 종목 풀 백필이 반복되어 사이클이 수 분씩 길어지고,
+    # max_instances=1 스케줄러가 나머지 분을 통째로 스킵한다.
+    _backfill_done_date: str = ""
+    _backfilled_at: dict[str, datetime] = {}
+
     def __init__(self, user):
         """
         Args:
@@ -52,9 +63,6 @@ class TradingEngine:
         """
         self.user = user
         self.trading_configs: list[TradingConfig] = []
-        # 당일 분봉 백필 실행 여부 추적 (날짜가 바뀌면 재실행)
-        self._backfill_done_date: str = ""
-        self._backfilled_codes: set[str] = set()
         # 급등테마주 진입 판정 시그널 (매수 성공 시 executed 표시용)
         self._last_theme_signal = None
         self._load_configs()
@@ -113,7 +121,7 @@ class TradingEngine:
         ])
         # 분봉은 남긴다 — 진입 판정 차트가 지난 날짜의 근거 데이터로 사용한다.
         # 재등록 시 누락 구간만 백필하면 되므로 백필 이력만 초기화한다.
-        self._backfilled_codes.discard(stock_code)
+        self._backfilled_at.pop(stock_code, None)
         print(f"[{config.stock_name}] 포지션 청산 완료 — 자동매매 비활성화")
 
     def get_entry_count(self, stock_code: str) -> int:
@@ -1620,18 +1628,102 @@ class TradingEngine:
         except Exception as e:
             print(f"[{stock_code}] 분봉 수집 오류: {e}")
 
-    def _backfill_today_bars(self, stock_code: str) -> None:
+    def _backfill_today_bars(self, stock_code: str) -> bool:
         """
         당일 누락된 분봉을 KIS API로 일괄 채웁니다.
         엔진 재시작 또는 장 시작 직후 호출해 네트워크 장애로 빠진 봉을 복구합니다.
+
+        Returns:
+            1봉 이상 upsert 했으면 True, 실패(0봉/예외)면 False.
         """
         try:
             from dolpha.data_quality import backfill_minute_bars
             count = backfill_minute_bars(stock_code)
             if count > 0:
                 print(f"[{stock_code}] 분봉 백필 완료: {count}봉 upsert")
+                return True
+            # 0봉은 KIS 유량 제한·일시 장애일 가능성이 크다. 조용히 넘기면
+            # 낡은 분봉으로 진입 판정을 계속하게 되므로 반드시 남긴다.
+            print(f"[{stock_code}] 분봉 백필 실패: 0봉 (KIS 응답 없음) — 다음 사이클 재시도")
+            return False
         except Exception as e:
             print(f"[{stock_code}] 분봉 백필 오류: {e}")
+            return False
+
+    @staticmethod
+    def last_bar_age_minutes(stock_code: str) -> float | None:
+        """마지막으로 저장된 당일 분봉이 몇 분 전 봉인지 반환합니다.
+
+        Returns:
+            경과 분(float). 당일 분봉이 하나도 없으면 None.
+        """
+        from pytz import timezone as pytz_tz
+
+        kst = pytz_tz("Asia/Seoul")
+        now_kst = datetime.now(kst)
+        day_start = kst.localize(
+            datetime(now_kst.year, now_kst.month, now_kst.day, 0, 0, 0)
+        )
+
+        last = (
+            StockMinuteOhlcv.objects.filter(
+                stock_code=stock_code, bar_datetime__gte=day_start
+            )
+            .order_by("-bar_datetime")
+            .values_list("bar_datetime", flat=True)
+            .first()
+        )
+        if last is None:
+            return None
+        return (now_kst - last.astimezone(kst)).total_seconds() / 60.0
+
+    def _needs_backfill(self, stock_code: str, now: datetime) -> bool:
+        """풀 백필이 필요한 종목인지 판단합니다.
+
+        당일 첫 등장이거나, 마지막 분봉이 낡았는데 재시도 쿨다운도 지난 경우에만 True.
+        (쿨다운이 없으면 거래가 뜸한 종목에서 매 사이클 풀 백필이 반복된다)
+        """
+        attempted_at = self._backfilled_at.get(stock_code)
+        if attempted_at is None:
+            return True
+
+        if (now - attempted_at).total_seconds() / 60.0 < BACKFILL_STALE_MINUTES:
+            return False
+
+        age = self.last_bar_age_minutes(stock_code)
+        return age is None or age > BACKFILL_STALE_MINUTES
+
+    def _run_backfills(self) -> None:
+        """대상 종목의 당일 분봉을 필요한 것만 백필합니다.
+
+        장중에 새로 등록되는 종목(급등테마주 후보 등)은 등록 즉시 과거 분봉을 확보해야
+        눌림목·전고점 판정이 가능하므로 첫 등장 시 반드시 백필한다.
+        이미 확보한 종목은 분봉이 낡았을 때만 다시 채워 KIS 호출량을 억제한다.
+        """
+        now = datetime.now()
+        today_str = now.strftime("%Y-%m-%d")
+        if TradingEngine._backfill_done_date != today_str:
+            TradingEngine._backfill_done_date = today_str
+            TradingEngine._backfilled_at = {}
+
+        done = failed = 0
+        for config in self.trading_configs:
+            if not self._needs_backfill(config.stock_code, now):
+                continue
+            if done >= MAX_BACKFILLS_PER_CYCLE:
+                print(
+                    f"[TradingEngine] 분봉 백필 상한({MAX_BACKFILLS_PER_CYCLE}건) 도달"
+                    f" — 나머지는 다음 사이클로 이월"
+                )
+                break
+            done += 1
+            if not self._backfill_today_bars(config.stock_code):
+                failed += 1
+            # 성공·실패 모두 시각을 남긴다 — 실패한 종목은 쿨다운 뒤 다시 시도한다
+            TradingEngine._backfilled_at[config.stock_code] = now
+
+        if done:
+            print(f"[TradingEngine] 분봉 백필 {done}건 실행 (실패 {failed}건)")
 
     def _extract_holding_info(self, stock_code: str, my_stocks: list[dict]) -> dict:
         """my_stocks 캐시에서 특정 종목의 보유 정보를 추출합니다."""
@@ -1706,19 +1798,7 @@ class TradingEngine:
 
         print(f"[TradingEngine] 대상 종목 수: {len(self.trading_configs)}")
 
-        # 당일 분봉 백필 — 네트워크 장애로 누락된 봉을 복구하고, 엔진 재시작 시 이전 데이터를 채움
-        # 장중에 새로 등록되는 종목(급등테마주 후보 등)도 등록 즉시 과거 분봉을 확보해야
-        # 눌림목·전고점 판정이 가능하므로, 아직 백필하지 않은 종목만 골라 실행한다
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        if self._backfill_done_date != today_str:
-            self._backfill_done_date = today_str
-            self._backfilled_codes = set()
-
-        for config in self.trading_configs:
-            if config.stock_code in self._backfilled_codes:
-                continue
-            self._backfilled_codes.add(config.stock_code)
-            self._backfill_today_bars(config.stock_code)
+        self._run_backfills()
 
         for config in self.trading_configs:
             try:
