@@ -11,6 +11,7 @@ patterns.py 로 똑같이 다시 계산해 시각 좌표를 복원한다. 재계
 반환 구조:
     bars      — 당일 1분봉 (lightweight-charts 가 그대로 쓰는 time/ohlcv)
     decisions — 판정 1건 = 1행, 각 행에 geometry(전고점·눌림·돌파 좌표) 포함
+    exits     — 당일 청산 체결 1건 = 1행 (진입과 달리 판정 이력이 없다)
     params    — 판정 임계값 (화면 범례·툴팁용)
 """
 
@@ -34,6 +35,7 @@ from .config import (
     PULLBACK_MIN_PCT,
     PULLBACK_VOLUME_RATIO_MAX,
 )
+from .exits import load_exits
 from .patterns import analyze_breakout, analyze_pullback, find_last_swing_high
 
 _KST = pytz_tz("Asia/Seoul")
@@ -97,6 +99,8 @@ def build_entry_chart(user, target_date: date_cls, stock_code: str) -> dict:
         "theme_name": identity["theme_name"],
         "bars": bars,
         "decisions": [_decision_row(bars, signal) for signal in signals],
+        # 청산은 판정 이력이 없고 체결 기록만 남는다 (exits.py 주석 참고)
+        "exits": load_exits(user, target_date, code),
         "params": CHART_PARAMS,
     }
 

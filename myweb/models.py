@@ -497,6 +497,19 @@ class TradingDefaults(models.Model):
         default=default_theme_surge_force_exit_time
     )  # 강제 청산 시각 (오버나이트 갭 리스크 차단)
 
+    # ── 종목 화면 재무 필터 기본값 ───────────────────────────
+    # MTT · 52주 신고가 등 종목 목록 화면의 재무 필터 초기값.
+    # null 이면 해당 조건을 걸지 않는다(= 전체 표시).
+    screener_min_revenue_growth = models.FloatField(
+        null=True, blank=True
+    )  # 매출증가율 하한(%)
+    screener_min_op_profit_growth = models.FloatField(
+        null=True, blank=True
+    )  # 영업이익증가율 하한(%)
+    screener_min_op_margin = models.FloatField(
+        null=True, blank=True
+    )  # 영업이익률 하한(%)
+
     # 메타데이터
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

@@ -15,6 +15,7 @@ from .api_mypage_ninja import mypage_router
 from .api_query import query_router
 from .api_trading_status import trading_status_router
 from .api_account_settings import account_settings_router
+from .api_screener_filters import screener_filters_router
 from .api_search import search_router
 from .api_trading_reviews import trading_reviews_router
 from .api_data_status import data_status_router
@@ -52,6 +53,10 @@ api.add_router("/mypage", trading_status_router)
 # 계좌 설정 API 라우터 추가
 
 api.add_router("/mypage", account_settings_router)
+
+# 종목 화면 재무 필터 기본값 API 라우터 추가
+
+api.add_router("/mypage", screener_filters_router)
 
 # 종목 검색 API 라우터 추가
 

@@ -5,19 +5,33 @@ autobot 통합 후: TradingSummary 모델에서 직접 조회합니다.
 (이전: autobot FastAPI 서버에 HTTP 프록시 → 현재: Django DB 직접 조회)
 """
 
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List, Optional
 from ninja import Router, Schema, Query
 from django.shortcuts import get_object_or_404
 from django.http import JsonResponse
 from django.db.models import Q
 from django.core.paginator import Paginator
+from pytz import timezone as pytz_tz
 
 from myweb.models import TradingSummary, TradeEntry
 from .api_mypage_ninja import get_authenticated_user
 
 # 라우터 생성
 trading_reviews_router = Router()
+
+_KST = pytz_tz("Asia/Seoul")
+
+
+def _kst_day_start(day: date) -> datetime:
+    """KST 자정 시각의 timezone-aware datetime.
+
+    `field__date=...` 류 lookup은 쓰지 않는다. 이 DB는 MySQL 타임존 테이블이
+    로드돼 있지 않아 Django가 KST 변환에 쓰는 CONVERT_TZ가 항상 NULL을
+    반환하고, `__date` lookup이 조용히 0건으로 빠진다. 그래서 KST 자정
+    경계를 파이썬에서 직접 계산해 범위(gte/lt)로 비교한다.
+    """
+    return _KST.localize(datetime.combine(day, datetime.min.time()))
 
 
 # Schema 정의
@@ -157,10 +171,12 @@ def list_trading_summaries(request, filters: TradingSummaryFilter = Query(...)):
             queryset = queryset.filter(total_profit_loss__lt=0)
         
         if filters.start_date:
-            queryset = queryset.filter(first_entry_date__date__gte=filters.start_date)
-        
+            queryset = queryset.filter(first_entry_date__gte=_kst_day_start(filters.start_date))
+
         if filters.end_date:
-            queryset = queryset.filter(first_entry_date__date__lte=filters.end_date)
+            queryset = queryset.filter(
+                first_entry_date__lt=_kst_day_start(filters.end_date) + timedelta(days=1)
+            )
         
         # 페이지네이션
         paginator = Paginator(queryset, filters.page_size)
@@ -389,9 +405,13 @@ def get_trade_entries(request, trading_summary_id: int):
         if not entries.exists():
             fallback_filter = dict(user=user, stock_code=trading_summary.stock_code)
             if trading_summary.first_entry_date:
-                fallback_filter["ordered_at__date__gte"] = trading_summary.first_entry_date
+                fallback_filter["ordered_at__gte"] = _kst_day_start(
+                    trading_summary.first_entry_date.astimezone(_KST).date()
+                )
             if trading_summary.last_exit_date:
-                fallback_filter["ordered_at__date__lte"] = trading_summary.last_exit_date
+                fallback_filter["ordered_at__lt"] = _kst_day_start(
+                    trading_summary.last_exit_date.astimezone(_KST).date()
+                ) + timedelta(days=1)
             entries = TradeEntry.objects.filter(**fallback_filter).order_by("ordered_at", "created_at")
             # 조회된 orphan 엔트리를 summary에 연결해 다음 조회부터는 정확히 반환
             if entries.exists():

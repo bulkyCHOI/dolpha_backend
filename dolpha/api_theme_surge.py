@@ -6,7 +6,7 @@
   GET  /theme-surge/candidates  — 주도주 후보 목록 (테마별 1등 종목)
   GET  /theme-surge/live        — 토스증권 실시간 테마 랭킹 (DB 미경유)
   GET  /theme-surge/positions   — 자동매매 현황: 보유 포지션 + 대기 후보 (로그인 필요)
-  GET  /theme-surge/entry-chart — 종목 1분봉 + 진입 판정 좌표 (로그인 필요)
+  GET  /theme-surge/entry-chart — 종목 1분봉 + 진입 판정 좌표 + 청산 체결 (로그인 필요)
   POST /theme-surge/scan        — 5분 스캔 수동 실행 (로그인 필요)
   DELETE /theme-surge/candidates — 특정 등록일의 후보 설정·분봉·판정 삭제 (로그인 필요)
 

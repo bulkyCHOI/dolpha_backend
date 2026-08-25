@@ -173,9 +173,12 @@ class TradingEngine:
     def calculate_position_size(self, config: TradingConfig, balance: dict, current_price: float = 0.0) -> float:
         """
         매매모드에 따른 총 포지션 크기(원)를 계산합니다.
-          - manual : 가용현금 × max_loss% ÷ stop_loss%
-          - atr    : (가용현금 × max_loss%) ÷ (ATR × stop_loss배수 / 현재가)
-        기준: RemainMoney(가용현금)만 사용 — 보유주식 평가금액 제외
+          - manual : 확정원금 × max_loss% ÷ stop_loss%
+          - atr    : (확정원금 × max_loss%) ÷ (ATR × stop_loss배수 / 현재가)
+        기준: ConfirmedCapital(예수금+보유주식 매수원가 합계, 계좌 총자산)을 사용.
+        이 값은 매수 체결 후에도 거의 줄지 않으므로(현금이 주식으로 전환될 뿐),
+        실제 가용현금(RemainMoney) 부족 여부는 이 함수가 아니라 호출부와
+        execute_buy_order()에서 별도로 검증한다.
         """
         try:
             confirmed_capital = float(balance["ConfirmedCapital"])
@@ -1083,6 +1086,20 @@ class TradingEngine:
                 print(f"[{stock_name}] 매수 수량 0 — 투자금액 부족: {amount:,.0f}원")
                 return False
 
+            # 주문 직전 실시간 가용현금 재검증 — 호출부(run_trading_cycle)가 사이클 내
+            # 누적 소진액을 추적하지만, 이 함수 자체를 최종 방어선으로 한 번 더 확인한다.
+            try:
+                remain_cash = float(KIS.GetBalance()["RemainMoney"])
+            except Exception as e:
+                print(f"[{stock_name}] 실시간 잔고 재확인 실패: {e} — 매수 취소")
+                return False
+            if amount > remain_cash:
+                print(
+                    f"[{stock_name}] 가용 현금 부족 — 필요={amount:,.0f}원,"
+                    f" 실시간 가용={remain_cash:,.0f}원 — 매수 취소"
+                )
+                return False
+
             # select_for_update로 config 행 잠금 — 동시 사이클에서 동일 종목 중복 매수 방지
             # 잠금 후 entry_count를 재조회하여 race condition으로 인한 중복 진입을 방지
             # 주의: KIS API 호출을 트랜잭션 내에 포함하므로 DB 커넥션이 API 응답 시까지 유지됨
@@ -1770,6 +1787,11 @@ class TradingEngine:
             if float(balance["TotalMoney"]) <= 0:
                 print("[TradingEngine] 잔고 부족 — 종료")
                 return
+            # 실시간 가용 현금 추적용 변수 — calculate_position_size는 ConfirmedCapital
+            # (예수금+보유주식 매수원가)을 기준으로 계산하므로 매수해도 거의 줄지 않는다.
+            # 사이클 내 여러 종목을 연달아 매수할 때 이미 쓴 금액을 반영하기 위해
+            # RemainMoney를 별도로 차감하며 추적한다.
+            available_cash = float(balance["RemainMoney"])
             print(
                 f"[TradingEngine] 잔고: 총={balance['TotalMoney']:,.0f}원,"
                 f" 현금={balance['RemainMoney']:,.0f}원"
@@ -1845,7 +1867,14 @@ class TradingEngine:
                     if position_amount > 0:
                         entry_amount = self.get_current_entry_amount(config, position_amount)
                         if entry_amount > 0:
-                            if self.execute_buy_order(config, entry_amount, current_price):
+                            if entry_amount > available_cash:
+                                print(
+                                    f"[{config.stock_name}] 가용 현금 부족 — 필요="
+                                    f"{entry_amount:,.0f}원, 가용={available_cash:,.0f}원"
+                                    " — 매수 스킵"
+                                )
+                            elif self.execute_buy_order(config, entry_amount, current_price):
+                                available_cash -= entry_amount
                                 self._mark_theme_signal_executed(config)
                         else:
                             print(f"[{config.stock_name}] 피라미딩 한도 초과")
