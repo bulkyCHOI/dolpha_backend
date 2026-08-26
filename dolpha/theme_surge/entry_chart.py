@@ -29,6 +29,15 @@ from .config import (
     BREAKOUT_VOLUME_RATIO_MIN,
     ENTRY_LOOKBACK_BARS,
     ENTRY_MIN_BARS,
+    MORNING_BREAKOUT_VOLUME_RATIO_MIN,
+    MORNING_LOOKBACK_BARS,
+    MORNING_MIN_BARS,
+    MORNING_PEAK_MIN_RISE_PCT,
+    MORNING_PULLBACK_MAX_BARS,
+    MORNING_PULLBACK_MAX_PCT,
+    MORNING_PULLBACK_MIN_BARS,
+    MORNING_PULLBACK_MIN_PCT,
+    MORNING_PULLBACK_VOLUME_RATIO_MAX,
     PIVOT_WINDOW,
     PULLBACK_MAX_PCT,
     PULLBACK_MIN_BARS,
@@ -36,7 +45,14 @@ from .config import (
     PULLBACK_VOLUME_RATIO_MAX,
 )
 from .exits import load_exits
-from .patterns import analyze_breakout, analyze_pullback, find_last_swing_high
+from .patterns import (
+    analyze_breakout,
+    analyze_morning_breakout,
+    analyze_morning_pullback,
+    analyze_pullback,
+    find_last_swing_high,
+    find_morning_high,
+)
 
 _KST = pytz_tz("Asia/Seoul")
 
@@ -63,6 +79,15 @@ CHART_PARAMS = {
     "breakout_buffer_pct": BREAKOUT_BUFFER_PCT,
     "breakout_volume_ratio_min": BREAKOUT_VOLUME_RATIO_MIN,
     "breakout_volume_avg_bars": BREAKOUT_VOLUME_AVG_BARS,
+    "morning_min_bars": MORNING_MIN_BARS,
+    "morning_lookback_bars": MORNING_LOOKBACK_BARS,
+    "morning_peak_min_rise_pct": MORNING_PEAK_MIN_RISE_PCT,
+    "morning_pullback_min_bars": MORNING_PULLBACK_MIN_BARS,
+    "morning_pullback_max_bars": MORNING_PULLBACK_MAX_BARS,
+    "morning_pullback_min_pct": MORNING_PULLBACK_MIN_PCT,
+    "morning_pullback_max_pct": MORNING_PULLBACK_MAX_PCT,
+    "morning_pullback_volume_ratio_max": MORNING_PULLBACK_VOLUME_RATIO_MAX,
+    "morning_breakout_volume_ratio_min": MORNING_BREAKOUT_VOLUME_RATIO_MIN,
 }
 
 
@@ -181,8 +206,12 @@ def _geometry(bars: list[dict], signal, checked: datetime) -> dict | None:
         return None
 
     window, swing, verified = found
-    pullback = analyze_pullback(window, swing)
-    breakout = analyze_breakout(window, swing, signal.price)
+    if len(window) < ENTRY_MIN_BARS:
+        pullback = analyze_morning_pullback(window, swing)
+        breakout = analyze_morning_breakout(window, swing, signal.price)
+    else:
+        pullback = analyze_pullback(window, swing)
+        breakout = analyze_breakout(window, swing, signal.price)
 
     pullback_bars = window[swing.index + 1 : len(window) - 1]
     rise_bars = window[max(0, swing.index - len(pullback_bars)) : swing.index + 1]
@@ -231,11 +260,20 @@ def _best_window(
     for offset in CUTOFF_OFFSETS_MIN:
         cutoff = _chart_time(minute + timedelta(minutes=offset))
         visible = [bar for bar in bars if bar["time"] < cutoff]
-        if len(visible) < ENTRY_MIN_BARS:
+        if len(visible) < MORNING_MIN_BARS:
             continue
 
-        window = visible[-ENTRY_LOOKBACK_BARS:]
-        swing = find_last_swing_high(window)
+        if len(visible) < ENTRY_MIN_BARS:
+            window = visible
+            swing = find_morning_high(window)
+        else:
+            window = visible[-ENTRY_LOOKBACK_BARS:]
+            swing = find_last_swing_high(window)
+            if swing is None and len(visible) <= 60:
+                swing = find_morning_high(visible)
+                if swing is not None:
+                    window = visible
+
         if swing is None:
             continue
 

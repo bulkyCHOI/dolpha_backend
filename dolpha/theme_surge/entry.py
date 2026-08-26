@@ -20,9 +20,18 @@ from .config import (
     ENTRY_MAX_BAR_AGE_MIN,
     ENTRY_MIN_BARS,
     FOREIGN_REQUIRE_INCREASING,
+    MORNING_LOOKBACK_BARS,
+    MORNING_MIN_BARS,
 )
 from .foreign_flow import ForeignFlow, get_foreign_flow
-from .patterns import analyze_breakout, analyze_pullback, find_last_swing_high
+from .patterns import (
+    analyze_breakout,
+    analyze_morning_breakout,
+    analyze_morning_pullback,
+    analyze_pullback,
+    find_last_swing_high,
+    find_morning_high,
+)
 
 
 @dataclass(frozen=True)
@@ -62,10 +71,10 @@ def check_theme_surge_entry(
     """
     minute_bars = bars if bars is not None else load_today_minute_bars(stock_code)
 
-    if len(minute_bars) < ENTRY_MIN_BARS:
+    if len(minute_bars) < MORNING_MIN_BARS:
         return EntryDecision(
             passed=False,
-            reason=f"분봉 부족 ({len(minute_bars)}봉 < {ENTRY_MIN_BARS}봉)",
+            reason=f"분봉 부족 ({len(minute_bars)}봉 < {MORNING_MIN_BARS}봉)",
         )
 
     stale_min = _bar_age_minutes(minute_bars[-1])
@@ -79,14 +88,34 @@ def check_theme_surge_entry(
             ),
         )
 
-    window = minute_bars[-ENTRY_LOOKBACK_BARS:]
+    # 세션 분기: 모닝 세션 vs 레귤러 세션
+    if len(minute_bars) < ENTRY_MIN_BARS:
+        # 모닝 세션(6~44봉): 당일 시초가(09:00 Open) 무결성을 위해 전체 minute_bars 사용
+        window = minute_bars
+        swing = find_morning_high(window)
+        if swing is None:
+            return EntryDecision(passed=False, reason="전고점(모닝 고점) 미탐지")
 
-    swing = find_last_swing_high(window)
-    if swing is None:
-        return EntryDecision(passed=False, reason="전고점(스윙 고점) 미탐지")
+        pullback = analyze_morning_pullback(window, swing)
+        breakout = analyze_morning_breakout(window, swing, current_price)
+    else:
+        window = minute_bars[-ENTRY_LOOKBACK_BARS:]
+        swing = find_last_swing_high(window)
 
-    pullback = analyze_pullback(window, swing)
-    breakout = analyze_breakout(window, swing, current_price)
+        # 세션 전환기(45~60봉, 09:45~10:00)에 스윙 고점이 우측 20봉 미충족으로 미탐지 시 모닝 고점으로 완충 폴백
+        if swing is None and len(minute_bars) <= 60:
+            morning_swing = find_morning_high(minute_bars)
+            if morning_swing is not None:
+                swing = morning_swing
+                pullback = analyze_morning_pullback(minute_bars, swing)
+                breakout = analyze_morning_breakout(minute_bars, swing, current_price)
+            else:
+                return EntryDecision(passed=False, reason="전고점(스윙 고점) 미탐지")
+        elif swing is None:
+            return EntryDecision(passed=False, reason="전고점(스윙 고점) 미탐지")
+        else:
+            pullback = analyze_pullback(window, swing)
+            breakout = analyze_breakout(window, swing, current_price)
 
     # 눌림목 없이 그냥 오른 것은 추격 매수이므로 진입하지 않는다
     if not pullback.is_valid:

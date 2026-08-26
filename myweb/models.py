@@ -239,6 +239,9 @@ class StockFinancialStatement(models.Model):
 class User(AbstractUser):
     google_id = models.CharField(max_length=100, unique=True, null=True, blank=True)
     profile_picture = models.URLField(null=True, blank=True)
+    # 구글 로그인만으로는 서비스를 쓸 수 없다. 관리자가 승인해야 API 접근이 열린다.
+    is_approved = models.BooleanField(default=False)
+    approved_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -246,6 +249,11 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.username
+
+    @property
+    def has_service_access(self) -> bool:
+        """서비스 이용 권한. 슈퍼유저는 승인 절차 없이 통과한다."""
+        return bool(self.is_superuser or self.is_approved)
 
 
 class UserProfile(models.Model):
@@ -881,3 +889,95 @@ class DailyAccountSnapshot(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.date} 총잔고:{self.total_money:,}"
+
+
+class KisAccount(models.Model):
+    """사용자별 KIS(한국투자증권) 계좌.
+
+    앱키·시크릿은 dolpha.crypto로 암호화해 저장한다. 평문 접근은
+    decrypted_app_key / decrypted_app_secret 프로퍼티만 사용한다.
+    """
+
+    ACCOUNT_TYPES = [
+        ("REAL", "실계좌"),
+        ("VIRTUAL", "가상계좌"),
+    ]
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="kis_accounts"
+    )
+    name = models.CharField(max_length=50)  # 사용자가 붙이는 별칭 (예: "메인 실계좌")
+    account_type = models.CharField(
+        max_length=10, choices=ACCOUNT_TYPES, default="VIRTUAL"
+    )
+    account_no = models.CharField(max_length=20)          # 계좌번호 앞 8자리 (CANO)
+    account_cd = models.CharField(max_length=4, default="01")  # 상품코드 (ACNT_PRDT_CD)
+    encrypted_app_key = models.TextField()                # 암호화된 앱키
+    encrypted_app_secret = models.TextField()             # 암호화된 앱시크릿
+    is_default = models.BooleanField(default=False)       # 전략 미지정 시 사용할 계좌
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "kis_account"
+        unique_together = [("user", "name")]
+        ordering = ["-is_default", "account_type", "name"]
+
+    def __str__(self):
+        return f"{self.user.username} - {self.name} ({self.account_type})"
+
+    @property
+    def is_virtual(self) -> bool:
+        return self.account_type == "VIRTUAL"
+
+    @property
+    def decrypted_app_key(self) -> str:
+        from dolpha.crypto import decrypt
+
+        return decrypt(self.encrypted_app_key)
+
+    @property
+    def decrypted_app_secret(self) -> str:
+        from dolpha.crypto import decrypt
+
+        return decrypt(self.encrypted_app_secret)
+
+    def set_app_key(self, app_key: str) -> None:
+        from dolpha.crypto import encrypt
+
+        self.encrypted_app_key = encrypt(app_key)
+
+    def set_app_secret(self, app_secret: str) -> None:
+        from dolpha.crypto import encrypt
+
+        self.encrypted_app_secret = encrypt(app_secret)
+
+
+class StrategyAccount(models.Model):
+    """전략별 거래 계좌 지정.
+
+    행이 없는 전략은 사용자의 기본 계좌(KisAccount.is_default)를 따른다.
+    """
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="strategy_accounts"
+    )
+    strategy_type = models.CharField(
+        max_length=20, choices=TradingConfig.STRATEGY_TYPES
+    )
+    account = models.ForeignKey(
+        KisAccount, on_delete=models.CASCADE, related_name="strategy_assignments"
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "strategy_account"
+        unique_together = [("user", "strategy_type")]
+        ordering = ["strategy_type"]
+
+    def __str__(self):
+        return f"{self.user.username} - {self.strategy_type} → {self.account.name}"

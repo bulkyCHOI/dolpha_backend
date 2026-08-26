@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import time
 
 from .config import (
     LEADER_MAX_CHANGE_RATE_PCT,
@@ -25,6 +26,7 @@ from .config import (
     LEADER_STORE_COUNT,
     LEADER_WEIGHT_CHANGE_RATE,
     LEADER_WEIGHT_TRADING_VALUE,
+    get_leader_min_trading_value,
 )
 from .toss_client import ThemeStock
 
@@ -42,19 +44,31 @@ def select_leaders(
     stocks: list[ThemeStock],
     top_n: int = LEADER_STORE_COUNT,
     listed_codes: set[str] | None = None,
+    slot: time | None = None,
+    min_trading_value: int | None = None,
 ) -> list[LeaderCandidate]:
     """테마 구성 종목 중 주도주 상위 N개를 점수순으로 반환한다.
 
     Args:
-        stocks:       테마 구성 종목
-        top_n:        반환할 상위 후보 수
-        listed_codes: 국내 상장 종목코드 집합. 주어지면 여기 없는 코드를 제외한다.
+        stocks:            테마 구성 종목
+        top_n:             반환할 상위 후보 수
+        listed_codes:      국내 상장 종목코드 집합. 주어지면 여기 없는 코드를 제외한다.
+        slot:              현재 슬롯 시각 (동적 최소 거래대금 산출용)
+        min_trading_value: 최소 거래대금(원). None 이면 slot 기준 동적 값 적용
 
     Returns:
         점수 내림차순 LeaderCandidate 리스트 (rank_in_theme 은 1부터).
         조건을 만족하는 종목이 없으면 빈 리스트.
     """
-    eligible = [s for s in stocks if _is_eligible(s, listed_codes)]
+    effective_min_trading_value = (
+        min_trading_value
+        if min_trading_value is not None
+        else get_leader_min_trading_value(slot)
+    )
+    eligible = [
+        s for s in stocks
+        if _is_eligible(s, listed_codes, min_trading_value=effective_min_trading_value)
+    ]
     if not eligible:
         return []
 
@@ -78,7 +92,11 @@ def select_leaders(
     ]
 
 
-def _is_eligible(stock: ThemeStock, listed_codes: set[str] | None) -> bool:
+def _is_eligible(
+    stock: ThemeStock,
+    listed_codes: set[str] | None,
+    min_trading_value: int = LEADER_MIN_TRADING_VALUE,
+) -> bool:
     """후보 자격 필터."""
     if listed_codes is not None and stock.code not in listed_codes:
         return False
@@ -86,7 +104,7 @@ def _is_eligible(stock: ThemeStock, listed_codes: set[str] | None) -> bool:
         return False
     if stock.change_rate > LEADER_MAX_CHANGE_RATE_PCT:
         return False
-    if stock.trading_value < LEADER_MIN_TRADING_VALUE:
+    if stock.trading_value < min_trading_value:
         return False
     if stock.market_cap < LEADER_MIN_MARKET_CAP:
         return False

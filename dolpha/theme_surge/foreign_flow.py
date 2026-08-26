@@ -49,10 +49,16 @@ def get_foreign_flow(stock_code: str, prev_net_buy: int | None = None) -> Foreig
         return ForeignFlow(False, 0, False, "none", "회원사 응답에 외국계 합계 없음")
 
     net_buy = int(foreign["ntby_qty"])
-    # 직전 기록이 없으면 추세를 알 수 없으므로 증가로 단정하지 않는다
-    is_increasing = prev_net_buy is not None and net_buy > prev_net_buy
+    # 직전 기록이 없더라도 당일 순매수가 양수(하한 초과)이면 당일 초기 매수세로 인정 (콜드 스타트 지원)
+    is_increasing = (prev_net_buy is not None and net_buy > prev_net_buy) or (
+        prev_net_buy is None and net_buy > FOREIGN_MIN_NET_BUY_QTY
+    )
 
-    trend = f"직전 {net_buy - prev_net_buy:+,}주" if prev_net_buy is not None else "직전 기록 없음"
+    trend = (
+        f"직전 {net_buy - prev_net_buy:+,}주"
+        if prev_net_buy is not None
+        else ("당일 초기 순매수" if net_buy > FOREIGN_MIN_NET_BUY_QTY else "직전 기록 없음")
+    )
     return ForeignFlow(
         available=True,
         net_buy_qty=net_buy,

@@ -125,13 +125,11 @@ def my_cron_task_getAndSave_index_list():
 def run_all_trading_cycles():
     """
     활성 TradingConfig가 있는 모든 유저의 트레이딩 사이클을 실행합니다.
-    KIS_APP_KEY 환경변수가 없으면 즉시 반환합니다.
-    """
-    kis_mode = os.environ.get("KIS_MODE", "VIRTUAL")
-    key_var = "KIS_REAL_APP_KEY" if kis_mode == "REAL" else "KIS_VIRTUAL_APP_KEY"
-    if not os.environ.get(key_var, ""):
-        return  # KIS 미설정 → 자동매매 비활성
 
+    각 유저·전략이 사용할 KIS 계좌는 마이페이지에 등록한 사용자별 KisAccount를
+    따른다 (dolpha.strategy_account). 계좌가 없는 전략은 TradingEngine이
+    해당 종목만 건너뛰고 나머지는 계속 진행한다.
+    """
     try:
         from myweb.models import TradingConfig
         from dolpha.trading_engine import TradingEngine
@@ -217,15 +215,13 @@ def my_cron_task_getAndSave_index_data():
 
 
 def save_daily_account_snapshots():
-    """모든 활성 유저의 계좌 잔고 스냅샷을 저장합니다 (장 마감 후 호출)."""
-    kis_mode = os.environ.get("KIS_MODE", "VIRTUAL")
-    key_var = "KIS_REAL_APP_KEY" if kis_mode == "REAL" else "KIS_VIRTUAL_APP_KEY"
-    if not os.environ.get(key_var, ""):
-        return
-
+    """활성 TradingConfig가 있는 모든 유저의 기본 계좌 잔고 스냅샷을 저장합니다 (장 마감 후 호출)."""
     try:
         from datetime import date
+        from dolpha.kis.auth import KisCredentialError
+        from dolpha.kis.credentials import credential_for_account
         from dolpha.kis.trade import GetBalance
+        from dolpha.strategy_account import get_default_account
         from myweb.models import User, DailyAccountSnapshot, TradingConfig
 
         user_ids = (
@@ -235,12 +231,17 @@ def save_daily_account_snapshots():
             .distinct()
         )
 
-        balance = GetBalance()
         today = date.today()
 
         for user_id in user_ids:
             try:
                 user = User.objects.get(pk=user_id)
+                account = get_default_account(user)
+                if account is None:
+                    _slog(f"[계좌스냅샷] 유저 {user.email} — 등록된 KIS 계좌 없음, 건너뜀")
+                    continue
+
+                balance = GetBalance(credential_for_account(account))
                 DailyAccountSnapshot.objects.update_or_create(
                     user=user,
                     date=today,
@@ -253,6 +254,8 @@ def save_daily_account_snapshots():
                     },
                 )
                 _slog(f"[계좌스냅샷] 유저 {user.email} {today} 저장 완료")
+            except KisCredentialError as e:
+                _slog(f"[계좌스냅샷] 유저 {user_id} 계좌 오류: {e}")
             except Exception as e:
                 _slog(f"[계좌스냅샷] 유저 {user_id} 저장 오류: {e}")
 
@@ -487,21 +490,21 @@ def start():
     )
     print("Scheduled job 'shares_outstanding_weekly' at Monday 08:00 - 상장주식수 갱신 (약 8분)")
 
-    # ── 자동매매 사이클 (KIS 설정 시에만 등록) ──────────────────────
-    _kis_mode = os.environ.get("KIS_MODE", "VIRTUAL")
-    _key_var = "KIS_REAL_APP_KEY" if _kis_mode == "REAL" else "KIS_VIRTUAL_APP_KEY"
-    if os.environ.get(_key_var, ""):
-        scheduler.add_job(
-            run_all_trading_cycles,
-            trigger="cron",
-            day_of_week="mon-fri",   # 평일만
-            hour="9-15",             # 9시~15시 (is_market_open이 15:30 이후 차단)
-            minute="*",              # 매 분
-            id="auto_trading_cycle",
-            max_instances=1,         # 중복 실행 방지
-            replace_existing=True,
-        )
-        print("Scheduled job 'auto_trading_cycle' at every minute (09:00-15:59 Mon-Fri)")
+    # ── 자동매매 사이클 ────────────────────────────────────────────
+    # KIS 계좌는 이제 사용자별 DB(KisAccount)에서 관리되므로 서버 재시작 없이
+    # 마이페이지에서 언제든 추가될 수 있다. 작업은 항상 등록하고, 활성
+    # TradingConfig나 계좌가 없는 경우는 run_all_trading_cycles가 조용히 건너뛴다.
+    scheduler.add_job(
+        run_all_trading_cycles,
+        trigger="cron",
+        day_of_week="mon-fri",   # 평일만
+        hour="9-15",             # 9시~15시 (is_market_open이 15:30 이후 차단)
+        minute="*",              # 매 분
+        id="auto_trading_cycle",
+        max_instances=1,         # 중복 실행 방지
+        replace_existing=True,
+    )
+    print("Scheduled job 'auto_trading_cycle' at every minute (09:00-15:59 Mon-Fri)")
 
     # ── 급등테마주 테마 스캔 (평일 09:00~15:30, 1분 주기) ───────────
     scheduler.add_job(

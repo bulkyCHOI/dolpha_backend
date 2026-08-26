@@ -20,9 +20,13 @@ from myweb.models import User, UserProfile, TradingConfig, TradingDefaults, Favo
 mypage_router = Router()
 
 # JWT 인증을 위한 헬퍼 함수
-def get_authenticated_user(request):
+def get_authenticated_user(request, require_approval: bool = True):
     """
     JWT 토큰을 사용하여 사용자 인증
+
+    Args:
+        require_approval: True면 관리자 승인을 받지 않은 사용자를 거부한다.
+            승인 상태 자체를 조회하는 엔드포인트만 False로 호출한다.
     """
     try:
         # Authorization 헤더 확인
@@ -36,10 +40,13 @@ def get_authenticated_user(request):
             
         user, token = auth_result
         
-        if user and user.is_authenticated:
-            return user
-        else:
+        if not (user and user.is_authenticated):
             return None
+
+        if require_approval and not user.has_service_access:
+            return None
+
+        return user
             
     except (InvalidToken, TokenError) as e:
         return None
@@ -574,13 +581,18 @@ def delete_trading_config_by_stock_code(request, stock_code: str, strategy_type:
         try:
             from dolpha.trading_engine import TradingEngine
             from dolpha.kis.trade import GetMyStockList, GetCurrentPrice
+            from dolpha.strategy_account import resolve_credential
+
+            # 이 설정의 전략에 지정된 계좌에서 조회한다. 다른 계좌를 보고 판단하면
+            # 실제로는 보유 중인데 "보유 없음"으로 잘못 판정해 매도를 건너뛸 수 있다.
+            credential = resolve_credential(user, config.strategy_type)
 
             # KIS에서 실제 보유 수량을 조회하여 holding_info 구성
             # holding_info를 넘기지 않으면 execute_sell_order가 수량을 0으로 처리해
             # 매도를 스킵한 채 config만 삭제되는 버그가 있음
             holding_info = None
             try:
-                kis_stocks = GetMyStockList()
+                kis_stocks = GetMyStockList(credential)
                 matched = next((s for s in kis_stocks if s["StockCode"] == stock_code), None)
                 if matched:
                     holding_info = {
@@ -594,7 +606,7 @@ def delete_trading_config_by_stock_code(request, stock_code: str, strategy_type:
             current_price = 0.0
             if holding_info:
                 try:
-                    current_price = float(GetCurrentPrice(stock_code))
+                    current_price = float(GetCurrentPrice(stock_code, credential))
                 except Exception:
                     pass
 

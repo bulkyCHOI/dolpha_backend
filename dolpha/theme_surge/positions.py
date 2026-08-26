@@ -44,7 +44,7 @@ def build_positions(user, target_date: date_cls | None = None) -> dict:
         return _empty()
 
     codes = [c.stock_code for c in configs]
-    holdings = _kis_holdings(codes)
+    holdings = _kis_holdings(user, codes)
     themes = _theme_by_code(day, codes)
     signals = _latest_signal_by_code(user, day, codes)
     entries = _entry_stats(user, codes)
@@ -156,12 +156,16 @@ def _signal_reason(signal) -> str:
 # 소스 조회
 # ──────────────────────────────────────────────────────────────
 
-def _kis_holdings(codes: list[str]) -> dict[str, dict]:
-    """KIS 실계좌 보유 현황을 {code: {...}} 로 반환. 조회 실패 시 빈 dict."""
+def _kis_holdings(user, codes: list[str]) -> dict[str, dict]:
+    """KIS 계좌 보유 현황을 {code: {...}} 로 반환. 조회 실패 시 빈 dict.
+
+    급등테마주 전략에 지정된 계좌(마이페이지 계좌 설정)를 사용한다.
+    """
     try:
         from dolpha.kis.trade import GetMyStockList
+        from dolpha.strategy_account import resolve_credential
 
-        rows = GetMyStockList()
+        rows = GetMyStockList(resolve_credential(user, STRATEGY))
     except Exception as e:
         print(f"[급등테마] 보유 현황 조회 실패: {e}")
         return {}

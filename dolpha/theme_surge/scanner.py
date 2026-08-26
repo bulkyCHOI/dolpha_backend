@@ -79,7 +79,13 @@ def run_theme_scan(now: datetime | None = None, force: bool = False) -> dict:
         print(f"[급등테마] 랭킹 조회 실패: {e}")
         return _empty_result(slot, errors=[str(e)])
 
-    verdicts = detect_surge_themes(themes, prev_rates=_previous_rates(today, slot))
+    today_max = _today_max_rates(today, slot)
+    verdicts = detect_surge_themes(
+        themes,
+        prev_rates=_previous_rates(today, slot),
+        slot=slot,
+        today_max_rates=today_max,
+    )
     snapshots = _save_snapshots(today, slot, verdicts)
 
     surging = [v for v in verdicts if v.is_surge]
@@ -96,7 +102,9 @@ def run_theme_scan(now: datetime | None = None, force: bool = False) -> dict:
             errors.append(f"{verdict.theme.name} 구성종목 조회 실패: {e}")
             continue
 
-        leaders = select_leaders(stocks, top_n=LEADER_STORE_COUNT, listed_codes=listed_codes)
+        leaders = select_leaders(
+            stocks, top_n=LEADER_STORE_COUNT, listed_codes=listed_codes, slot=slot
+        )
         if not leaders:
             continue
 
@@ -181,6 +189,23 @@ def _previous_rates(today: date_cls, slot: time_cls) -> dict[int, float]:
             "tics_id", "fluctuation_rate"
         )
     )
+
+
+def _today_max_rates(today: date_cls, slot: time_cls) -> dict[int, float]:
+    """당일 현재 슬롯 이전까지의 테마별 최고 등락률(%) — 눌림목 모멘텀 보존용."""
+    from django.db.models import Max
+    from myweb.models import ThemeSnapshot
+
+    rows = (
+        ThemeSnapshot.objects.filter(date=today, slot_time__lt=slot)
+        .values("tics_id")
+        .annotate(max_rate=Max("fluctuation_rate"))
+    )
+    return {
+        row["tics_id"]: float(row["max_rate"])
+        for row in rows
+        if row["max_rate"] is not None
+    }
 
 
 def _save_snapshots(

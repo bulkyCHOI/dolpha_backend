@@ -3,44 +3,50 @@ KIS 국내주식 거래 API 모듈
 
 원본 autobot/tradingBot/KIS_API_Helper_KR.py 에서 필요 함수만 Django 환경으로 포팅.
 - Common.* 대신 dolpha.kis.auth 함수 사용
-- 환경변수 기반 인증 (YAML 파일 불필요)
+- 계좌 자격증명 기반 인증 (YAML 파일 불필요)
+
+모든 함수의 마지막 인자 account는 호출할 계좌를 지정합니다.
+    KisCredential    → 그 계좌 (사용자별 계좌: dolpha.kis.credentials 참고)
+    "REAL"/"VIRTUAL" → 서버 환경변수 계좌
+    None             → KIS_MODE 환경변수 계좌
 
 공개 API:
-    GetHashKey(data)               주문 바디 해시키 발급
-    GetBalance()                   계좌 잔고 조회
-    GetMyStockList()               보유 주식 목록 조회 (페이지 처리 포함)
-    GetCurrentPrice(stock_code)    현재가 조회
-    MakeBuyMarketOrder(stock_code, qty)   시장가 매수
-    MakeSellMarketOrder(stock_code, qty)  시장가 매도
+    GetHashKey(data, account)              주문 바디 해시키 발급
+    GetBalance(account)                    계좌 잔고 조회
+    GetMyStockList(account)                보유 주식 목록 조회 (페이지 처리 포함)
+    GetCurrentPrice(stock_code, account)   현재가 조회
+    MakeBuyMarketOrder(stock_code, qty, account)   시장가 매수
+    MakeSellMarketOrder(stock_code, qty, account)  시장가 매도
 """
 
 import time
 import json
 import requests
 
-from .auth import GetHeaders, get_url_base, get_account_no, get_account_cd, get_mode
+from .auth import GetHeaders, resolve_credential
 
 
 # ─────────────────────────────────────────────────────────────
 # 내부 헬퍼
 # ─────────────────────────────────────────────────────────────
 
-def _is_virtual() -> bool:
-    return get_mode() == "VIRTUAL"
+def _is_virtual(account=None) -> bool:
+    return resolve_credential(account).is_virtual
 
 
-def _sleep():
+def _sleep(account=None) -> None:
     """API Rate Limit 대응 (실계좌 초당 5건 / 모의 초당 2건 제한)"""
     time.sleep(0.21)
-    if _is_virtual():
+    if _is_virtual(account):
         time.sleep(0.31)
 
 
-def _account_params() -> dict:
+def _account_params(account=None) -> dict:
     """계좌 공통 파라미터"""
+    cred = resolve_credential(account)
     return {
-        "CANO": get_account_no(),
-        "ACNT_PRDT_CD": get_account_cd(),
+        "CANO": cred.account_no,
+        "ACNT_PRDT_CD": cred.account_cd,
     }
 
 
@@ -48,7 +54,7 @@ def _account_params() -> dict:
 # GetHashKey
 # ─────────────────────────────────────────────────────────────
 
-def GetHashKey(data: dict) -> str:
+def GetHashKey(data: dict, account=None) -> str:
     """
     주문 요청 body 데이터에 대한 해시키를 발급합니다.
     KIS 주문 API의 hashkey 헤더에 사용됩니다.
@@ -58,12 +64,12 @@ def GetHashKey(data: dict) -> str:
     Returns:
         hashkey 문자열 (실패 시 "")
     """
-    from .auth import get_app_key, get_app_secret
-    url = f"{get_url_base()}/uapi/hashkey"
+    cred = resolve_credential(account)
+    url = f"{cred.url_base}/uapi/hashkey"
     headers = {
         "content-type": "application/json",
-        "appkey": get_app_key(),
-        "appsecret": get_app_secret(),
+        "appkey": cred.app_key,
+        "appsecret": cred.app_secret,
     }
     try:
         res = requests.post(url, headers=headers, json=data, timeout=10, verify=False)
@@ -78,7 +84,7 @@ def GetHashKey(data: dict) -> str:
 # 잔고 조회
 # ─────────────────────────────────────────────────────────────
 
-def GetBalance() -> dict:
+def GetBalance(account=None) -> dict:
     """
     계좌 잔고를 조회합니다.
 
@@ -92,15 +98,16 @@ def GetBalance() -> dict:
     Raises:
         RuntimeError: API 호출 실패 시
     """
-    _sleep()
+    cred = resolve_credential(account)
+    _sleep(cred)
 
-    tr_id = "VTTC8434R" if _is_virtual() else "TTTC8434R"
+    tr_id = "VTTC8434R" if cred.is_virtual else "TTTC8434R"
     path = "uapi/domestic-stock/v1/trading/inquire-balance"
-    url = f"{get_url_base()}/{path}"
+    url = f"{cred.url_base}/{path}"
 
-    headers = GetHeaders(tr_id=tr_id, custtype="P")
+    headers = GetHeaders(tr_id=tr_id, custtype="P", account=cred)
     params = {
-        **_account_params(),
+        **_account_params(cred),
         "AFHR_FLPR_YN": "N",
         "OFL_YN": "",
         "INQR_DVSN": "02",   # 02: 종합집계 (output2 에 총합 있음)
@@ -149,7 +156,7 @@ def GetBalance() -> dict:
 # 보유 주식 목록
 # ─────────────────────────────────────────────────────────────
 
-def GetMyStockList() -> list:
+def GetMyStockList(account=None) -> list:
     """
     계좌에서 보유 중인 주식 목록을 조회합니다. (연속조회 지원)
 
@@ -166,9 +173,10 @@ def GetMyStockList() -> list:
             "StockRevenueMoney": str, # 수익금액
         }
     """
-    tr_id = "VTTC8434R" if _is_virtual() else "TTTC8434R"
+    cred  = resolve_credential(account)
+    tr_id = "VTTC8434R" if cred.is_virtual else "TTTC8434R"
     path  = "uapi/domestic-stock/v1/trading/inquire-balance"
-    url   = f"{get_url_base()}/{path}"
+    url   = f"{cred.url_base}/{path}"
 
     stock_list: list = []
     fk_key = ""
@@ -178,12 +186,12 @@ def GetMyStockList() -> list:
     fail_count = 0
 
     while True:
-        _sleep()
-        headers = GetHeaders(tr_id=tr_id, custtype="P")
+        _sleep(cred)
+        headers = GetHeaders(tr_id=tr_id, custtype="P", account=cred)
         headers["tr_cont"] = tr_cont
 
         params = {
-            **_account_params(),
+            **_account_params(cred),
             "AFHR_FLPR_YN": "N",
             "OFL_YN": "",
             "INQR_DVSN": "01",   # 01: 종목별 상세
@@ -240,7 +248,7 @@ def GetMyStockList() -> list:
 # 현재가 조회
 # ─────────────────────────────────────────────────────────────
 
-def GetCurrentPrice(stock_code: str) -> int:
+def GetCurrentPrice(stock_code: str, account=None) -> int:
     """
     국내 주식의 현재가를 조회합니다.
 
@@ -251,12 +259,13 @@ def GetCurrentPrice(stock_code: str) -> int:
     Raises:
         RuntimeError: API 호출 실패 시
     """
-    _sleep()
+    cred = resolve_credential(account)
+    _sleep(cred)
 
     path = "uapi/domestic-stock/v1/quotations/inquire-price"
-    url  = f"{get_url_base()}/{path}"
+    url  = f"{cred.url_base}/{path}"
 
-    headers = GetHeaders(tr_id="FHKST01010100")
+    headers = GetHeaders(tr_id="FHKST01010100", account=cred)
     params = {
         "FID_COND_MRKT_DIV_CODE": "J",
         "FID_INPUT_ISCD": stock_code,
@@ -277,7 +286,7 @@ def GetCurrentPrice(stock_code: str) -> int:
 LAST_ORDER_ERROR: dict[str, str] = {}
 
 
-def MakeBuyMarketOrder(stock_code: str, qty: int) -> dict | None:
+def MakeBuyMarketOrder(stock_code: str, qty: int, account=None) -> dict | None:
     """
     시장가 매수 주문을 접수합니다.
 
@@ -288,22 +297,23 @@ def MakeBuyMarketOrder(stock_code: str, qty: int) -> dict | None:
         성공: {"OrderNum": str, "OrderNum2": str, "OrderTime": str}
         실패: None
     """
-    _sleep()
+    cred = resolve_credential(account)
+    _sleep(cred)
 
-    tr_id = "VTTC0012U" if _is_virtual() else "TTTC0012U"
+    tr_id = "VTTC0012U" if cred.is_virtual else "TTTC0012U"
     path  = "uapi/domestic-stock/v1/trading/order-cash"
-    url   = f"{get_url_base()}/{path}"
+    url   = f"{cred.url_base}/{path}"
 
     data = {
-        **_account_params(),
+        **_account_params(cred),
         "PDNO":     stock_code,
         "ORD_DVSN": "01",          # 시장가
         "ORD_QTY":  str(int(qty)),
         "ORD_UNPR": "0",
     }
 
-    headers = GetHeaders(tr_id=tr_id, custtype="P")
-    headers["hashkey"] = GetHashKey(data)
+    headers = GetHeaders(tr_id=tr_id, custtype="P", account=cred)
+    headers["hashkey"] = GetHashKey(data, cred)
 
     res = requests.post(url, headers=headers, data=json.dumps(data), timeout=10, verify=False)
     if res.status_code == 200 and res.json().get("rt_cd") == "0":
@@ -325,7 +335,7 @@ def MakeBuyMarketOrder(stock_code: str, qty: int) -> dict | None:
 # 시장가 매도
 # ─────────────────────────────────────────────────────────────
 
-def MakeSellMarketOrder(stock_code: str, qty: int) -> dict | None:
+def MakeSellMarketOrder(stock_code: str, qty: int, account=None) -> dict | None:
     """
     시장가 매도 주문을 접수합니다.
 
@@ -336,22 +346,23 @@ def MakeSellMarketOrder(stock_code: str, qty: int) -> dict | None:
         성공: {"OrderNum": str, "OrderNum2": str, "OrderTime": str}
         실패: None
     """
-    _sleep()
+    cred = resolve_credential(account)
+    _sleep(cred)
 
-    tr_id = "VTTC0011U" if _is_virtual() else "TTTC0011U"
+    tr_id = "VTTC0011U" if cred.is_virtual else "TTTC0011U"
     path  = "uapi/domestic-stock/v1/trading/order-cash"
-    url   = f"{get_url_base()}/{path}"
+    url   = f"{cred.url_base}/{path}"
 
     data = {
-        **_account_params(),
+        **_account_params(cred),
         "PDNO":     stock_code,
         "ORD_DVSN": "01",          # 시장가
         "ORD_QTY":  str(int(qty)),
         "ORD_UNPR": "0",
     }
 
-    headers = GetHeaders(tr_id=tr_id, custtype="P")
-    headers["hashkey"] = GetHashKey(data)
+    headers = GetHeaders(tr_id=tr_id, custtype="P", account=cred)
+    headers["hashkey"] = GetHashKey(data, cred)
 
     res = requests.post(url, headers=headers, data=json.dumps(data), timeout=10, verify=False)
     if res.status_code == 200 and res.json().get("rt_cd") == "0":
@@ -373,7 +384,7 @@ def MakeSellMarketOrder(stock_code: str, qty: int) -> dict | None:
 # 해외주식 시장가 매수
 # ─────────────────────────────────────────────────────────────
 
-def MakeBuyMarketOrderUS(stock_code: str, qty: int, exchange: str = "NASD") -> dict | None:
+def MakeBuyMarketOrderUS(stock_code: str, qty: int, exchange: str = "NASD", account=None) -> dict | None:
     """
     해외주식 시장가 매수 주문.
 
@@ -385,17 +396,18 @@ def MakeBuyMarketOrderUS(stock_code: str, qty: int, exchange: str = "NASD") -> d
         성공: {"OrderNum": str, "OrderTime": str}
         실패: None
     """
-    _sleep()
+    cred = resolve_credential(account)
+    _sleep(cred)
 
-    tr_id = "VTTT1002U" if _is_virtual() else "TTTT1002U"
+    tr_id = "VTTT1002U" if cred.is_virtual else "TTTT1002U"
     path  = "uapi/overseas-stock/v1/trading/order"
-    url   = f"{get_url_base()}/{path}"
+    url   = f"{cred.url_base}/{path}"
 
     # 거래소별 시장가 주문 코드: NASD/NYSE/AMEX="32", 그 외="00"(지정가 0원)
     mkt_dvsn = "32" if exchange in ("NASD", "NYSE", "AMEX") else "00"
 
     data = {
-        **_account_params(),
+        **_account_params(cred),
         "OVRS_EXCG_CD":    exchange,
         "PDNO":            stock_code,
         "ORD_DVSN":        mkt_dvsn,
@@ -404,8 +416,8 @@ def MakeBuyMarketOrderUS(stock_code: str, qty: int, exchange: str = "NASD") -> d
         "ORD_SVR_DVSN_CD": "0",
     }
 
-    headers = GetHeaders(tr_id=tr_id, custtype="P")
-    headers["hashkey"] = GetHashKey(data)
+    headers = GetHeaders(tr_id=tr_id, custtype="P", account=cred)
+    headers["hashkey"] = GetHashKey(data, cred)
 
     res = requests.post(url, headers=headers, data=json.dumps(data), timeout=10, verify=False)
     if res.status_code == 200 and res.json().get("rt_cd") == "0":

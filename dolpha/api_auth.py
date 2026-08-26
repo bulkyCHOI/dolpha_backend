@@ -105,7 +105,16 @@ def google_oauth_callback(request):
         # 사용자 프로필 생성 (존재하지 않는 경우)
         from myweb.models import UserProfile
         profile, _ = UserProfile.objects.get_or_create(user=user)
-        
+
+        # 관리자 승인을 받지 않은 계정은 토큰을 발급하지 않는다.
+        # 승인 없이 로그인만으로 서비스(특히 실계좌 매매)에 접근하는 것을 막는다.
+        if not user.has_service_access:
+            return JsonResponse({
+                'error': '관리자 승인 대기 중인 계정입니다. 승인 후 이용할 수 있습니다.',
+                'code': 'APPROVAL_PENDING',
+                'email': user.email,
+            }, status=403)
+
         # JWT 토큰 생성
         refresh = RefreshToken.for_user(user)
         access_token = refresh.access_token
@@ -119,6 +128,7 @@ def google_oauth_callback(request):
                 'email': user.email,
                 'first_name': user.first_name,
                 'profile_picture': user.profile_picture,
+                'is_approved': user.has_service_access,
                 'created_at': user.created_at.isoformat() if user.created_at else None,
             }
         })
@@ -143,6 +153,15 @@ def refresh_token(request):
         
         # 토큰 갱신
         refresh = RefreshToken(refresh_token)
+
+        # 승인이 취소된 계정이 기존 refresh 토큰으로 계속 접근하는 것을 막는다
+        user = User.objects.filter(pk=refresh.get('user_id')).first()
+        if user is None or not user.has_service_access:
+            return JsonResponse({
+                'error': '관리자 승인 대기 중인 계정입니다.',
+                'code': 'APPROVAL_PENDING',
+            }, status=403)
+
         access_token = refresh.access_token
         
         return JsonResponse({
@@ -189,6 +208,11 @@ def get_user_profile(request):
         # 여기서는 단순히 사용자 정보 반환
         if hasattr(request, 'user') and request.user.is_authenticated:
             user = request.user
+            if not user.has_service_access:
+                return JsonResponse({
+                    'error': '관리자 승인 대기 중인 계정입니다.',
+                    'code': 'APPROVAL_PENDING',
+                }, status=403)
             return JsonResponse({
                 'user': {
                     'id': user.id,
@@ -196,6 +220,7 @@ def get_user_profile(request):
                     'email': user.email,
                     'first_name': user.first_name,
                     'profile_picture': user.profile_picture,
+                    'is_approved': user.has_service_access,
                     'created_at': user.created_at.isoformat() if user.created_at else None,
                 }
             })

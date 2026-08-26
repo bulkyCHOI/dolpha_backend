@@ -17,16 +17,45 @@ trading_status_router = Router()
 
 
 @trading_status_router.get("/account-balance")
-def get_account_balance(request):
-    """KIS 계좌 잔고 조회 (총 평가금액, 예수금, 주식 평가금액, 평가손익)"""
+def get_account_balance(request, account_id: int = None):
+    """
+    KIS 계좌 잔고 조회 (총 평가금액, 예수금, 주식 평가금액, 평가손익)
+
+    account_id 미지정 시 사용자의 기본 계좌를 조회합니다.
+    """
     try:
         user = get_authenticated_user(request)
         if not user:
             return JsonResponse({"error": "인증이 필요합니다."}, status=401)
         try:
+            from dolpha.kis.auth import KisCredentialError
+            from dolpha.kis.credentials import credential_for_account
             from dolpha.kis.trade import GetBalance
-            balance = GetBalance()
-            return JsonResponse({"success": True, "data": balance})
+            from dolpha.strategy_account import get_default_account
+            from myweb.models import KisAccount
+
+            if account_id is not None:
+                account = KisAccount.objects.filter(
+                    user=user, pk=account_id, is_active=True
+                ).first()
+            else:
+                account = get_default_account(user)
+
+            if account is None:
+                return JsonResponse({
+                    "success": False,
+                    "error": "등록된 KIS 계좌가 없습니다. 마이페이지에서 계좌를 먼저 등록하세요.",
+                }, status=404)
+
+            credential = credential_for_account(account)
+            balance = GetBalance(credential)
+            return JsonResponse({
+                "success": True,
+                "data": balance,
+                "account": {"id": account.pk, "name": account.name, "account_type": account.account_type},
+            })
+        except KisCredentialError as e:
+            return JsonResponse({"success": False, "error": str(e)}, status=400)
         except Exception as e:
             return JsonResponse({"success": False, "error": str(e)}, status=503)
     except Exception as e:
@@ -58,20 +87,31 @@ def get_trading_status(request):
         if not user:
             return JsonResponse({"error": "인증이 필요합니다."}, status=401)
 
-        # KIS 실계좌 보유 현황 조회 (avg_price 정확도 향상)
+        # KIS 계좌 보유 현황 조회 (avg_price 정확도 향상)
+        # 전략마다 계좌가 다를 수 있으므로, 사용자가 실제 쓰는 계좌들을 모두 모아 합친다.
         kis_holdings = {}
         try:
+            from dolpha.kis.credentials import credential_for_account
             from dolpha.kis.trade import GetMyStockList
-            for s in GetMyStockList():
-                code = s["StockCode"]
-                kis_holdings[code] = {
-                    "qty": int(s["StockAmt"]),
-                    "avg_price": round(float(s["StockAvgPrice"])),
-                    "current_price": round(float(s["StockNowPrice"])),
-                    "profit_loss_amount": round(float(s["StockRevenueMoney"])),
-                    "profit_loss_rate": float(s["StockRevenueRate"]),
-                    "stock_name": s["StockName"],
-                }
+            from dolpha.strategy_account import get_active_accounts
+
+            for account in get_active_accounts(user):
+                try:
+                    credential = credential_for_account(account)
+                    stocks = GetMyStockList(credential)
+                except Exception as account_err:
+                    print(f"[거래상태] 계좌 '{account.name}' 조회 실패: {account_err}")
+                    continue
+                for s in stocks:
+                    code = s["StockCode"]
+                    kis_holdings[code] = {
+                        "qty": int(s["StockAmt"]),
+                        "avg_price": round(float(s["StockAvgPrice"])),
+                        "current_price": round(float(s["StockNowPrice"])),
+                        "profit_loss_amount": round(float(s["StockRevenueMoney"])),
+                        "profit_loss_rate": float(s["StockRevenueRate"]),
+                        "stock_name": s["StockName"],
+                    }
         except Exception:
             pass  # KIS 조회 실패 시 DB 계산값으로 fallback
 
@@ -384,8 +424,22 @@ def save_today_snapshot(request):
         if not user:
             return JsonResponse({"error": "인증이 필요합니다."}, status=401)
 
+        from dolpha.kis.auth import KisCredentialError
+        from dolpha.kis.credentials import credential_for_account
         from dolpha.kis.trade import GetBalance
-        balance = GetBalance()
+        from dolpha.strategy_account import get_default_account
+
+        account = get_default_account(user)
+        if account is None:
+            return JsonResponse({
+                "success": False,
+                "error": "등록된 KIS 계좌가 없습니다. 마이페이지에서 계좌를 먼저 등록하세요.",
+            }, status=404)
+
+        try:
+            balance = GetBalance(credential_for_account(account))
+        except KisCredentialError as e:
+            return JsonResponse({"success": False, "error": str(e)}, status=400)
 
         snapshot, created = DailyAccountSnapshot.objects.update_or_create(
             user=user,
@@ -424,22 +478,44 @@ def reconcile_positions(request):
         if not user:
             return JsonResponse({"error": "인증이 필요합니다."}, status=401)
 
+        from dolpha.kis.auth import KisCredentialError
+        from dolpha.kis.credentials import credential_for_account
         from dolpha.kis.trade import GetMyStockList, GetCurrentPrice
         from dolpha.stockCommon import GetOhlcv, GetNowDateStr
+        from dolpha.strategy_account import resolve_account
 
-        try:
-            my_stocks = GetMyStockList()
-        except Exception as e:
-            return JsonResponse({"success": False, "error": f"KIS 잔고 조회 실패: {e}"}, status=500)
+        # 설정마다 전략이 다르고 전략마다 계좌가 다를 수 있으므로,
+        # "그 설정의 계좌"에서 조회한 보유 목록으로만 대조한다.
+        # 계좌별로 한 번씩만 조회하도록 credential 캐시를 둔다.
+        _credential_cache: dict[str, object] = {}
+        _held_map_cache: dict[str, dict] = {}
 
-        if not my_stocks:
-            return JsonResponse({"success": True, "message": "KIS 보유 종목 없음 — 복구 불필요", "recovered": []})
+        def _account_key_for(config: TradingConfig) -> str | None:
+            try:
+                account = resolve_account(user, config.strategy_type)
+                credential = credential_for_account(account)
+            except (KisCredentialError, ValueError):
+                return None
+            key = credential.token_cache_key
+            _credential_cache[key] = credential
+            return key
 
-        held_map = {s["StockCode"]: s for s in my_stocks}
+        def _held_map_for(account_key: str) -> dict:
+            if account_key not in _held_map_cache:
+                try:
+                    stocks = GetMyStockList(_credential_cache[account_key])
+                except Exception as e:
+                    print(f"[복구] 계좌 보유 종목 조회 실패: {e}")
+                    stocks = []
+                _held_map_cache[account_key] = {s["StockCode"]: s for s in stocks}
+            return _held_map_cache[account_key]
+
         recovered = []
         peak_fixed = []
 
-        def _resolve_peak_price(stock_code: str, config: TradingConfig) -> float | None:
+        def _resolve_peak_price(
+            stock_code: str, config: TradingConfig, held_map: dict, credential
+        ) -> float | None:
             """
             매수 첫 체결일 이후 OHLCV High 최대값을 peak로 반환합니다.
             OHLCV 조회 실패 시 현재가 → KIS 평균단가 순으로 fallback합니다.
@@ -470,7 +546,7 @@ def reconcile_positions(request):
 
             # 2순위: 현재가 (장 중이면 사용 가능)
             try:
-                price = float(GetCurrentPrice(stock_code))
+                price = float(GetCurrentPrice(stock_code, credential))
                 if price > 0:
                     return price
             except Exception:
@@ -489,6 +565,10 @@ def reconcile_positions(request):
         # ── Case 1: KIS에 보유 중이지만 DB에서 비활성화된 종목 복구
         inactive_configs = TradingConfig.objects.filter(user=user, is_active=False)
         for config in inactive_configs:
+            account_key = _account_key_for(config)
+            if account_key is None:
+                continue  # 계좌 미설정 — 대조 불가, 건너뜀
+            held_map = _held_map_for(account_key)
             if config.stock_code not in held_map:
                 continue  # KIS에 없으면 정상 비활성화 — 건너뜀
 
@@ -497,7 +577,9 @@ def reconcile_positions(request):
 
             # 2) trailing_stop_peak_price 복구
             if config.trailing_stop_peak_price is None:
-                config.trailing_stop_peak_price = _resolve_peak_price(config.stock_code, config)
+                config.trailing_stop_peak_price = _resolve_peak_price(
+                    config.stock_code, config, held_map, _credential_cache[account_key]
+                )
 
             config.save(update_fields=["is_active", "trailing_stop_peak_price"])
 
@@ -524,9 +606,15 @@ def reconcile_positions(request):
             trailing_stop_peak_price__isnull=True,
         )
         for config in active_no_peak:
+            account_key = _account_key_for(config)
+            if account_key is None:
+                continue
+            held_map = _held_map_for(account_key)
             if config.stock_code not in held_map:
                 continue  # KIS에 없으면 건너뜀
-            price = _resolve_peak_price(config.stock_code, config)
+            price = _resolve_peak_price(
+                config.stock_code, config, held_map, _credential_cache[account_key]
+            )
             if price is not None:
                 config.trailing_stop_peak_price = price
                 config.save(update_fields=["trailing_stop_peak_price"])

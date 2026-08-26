@@ -2851,7 +2851,7 @@ def getAndSave_shares_outstanding(request, area: str = "KR"):
     """
     import requests as _req
     import time as _time
-    from dolpha.kis.trade import GetHeaders, get_url_base
+    from dolpha.kis.auth import GetHeaders, get_url_base
 
     companies = list(Company.objects.filter(market__in=["KOSPI", "KOSDAQ"]) if area == "KR"
                      else Company.objects.all())

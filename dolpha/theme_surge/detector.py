@@ -15,12 +15,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import time
 
 from .config import (
     SURGE_MIN_FLUCTUATION_PCT,
     SURGE_MIN_MOMENTUM_PCT,
     SURGE_MIN_STOCK_COUNT,
     SURGE_MIN_TRADING_VALUE,
+    THEME_PULLBACK_MOMENTUM_TOLERANCE_PCT,
+    get_theme_min_trading_value,
 )
 from .toss_client import ThemeRank
 
@@ -39,7 +42,9 @@ def detect_surge_themes(
     themes: list[ThemeRank],
     prev_rates: dict[int, float] | None = None,
     min_fluctuation: float = SURGE_MIN_FLUCTUATION_PCT,
-    min_trading_value: int = SURGE_MIN_TRADING_VALUE,
+    min_trading_value: int | None = None,
+    slot: time | None = None,
+    today_max_rates: dict[int, float] | None = None,
 ) -> list[SurgeVerdict]:
     """테마 랭킹에서 급등 테마를 판정한다.
 
@@ -47,19 +52,33 @@ def detect_surge_themes(
         themes:            토스 랭킹 스냅샷
         prev_rates:        비교 시점(5분 전)의 {tics_id: 등락률(%)} — 모멘텀 계산용
         min_fluctuation:   등락률 하한(%)
-        min_trading_value: 거래대금 하한(원). 0 이면 거래대금 조건 미적용
+        min_trading_value: 거래대금 하한(원). None 이면 slot 기준 동적 기준 적용 (0 이면 미적용)
+        slot:              현재 슬롯 시각 (동적 거래대금 산출용)
+        today_max_rates:   당일 테마별 최고 등락률({tics_id: 등락률}) — 눌림목 모멘텀 보존용
 
     Returns:
         입력 순서를 유지한 SurgeVerdict 리스트 (급등/비급등 모두 포함).
         스냅샷 저장 시 전체를 기록하고, 후보 선정은 is_surge 인 것만 사용한다.
     """
+    effective_min_trading_value = (
+        min_trading_value if min_trading_value is not None else get_theme_min_trading_value(slot)
+    )
     previous = prev_rates or {}
+    max_rates = today_max_rates or {}
     verdicts: list[SurgeVerdict] = []
 
     for theme in themes:
         prev_rate = previous.get(theme.tics_id)
+        today_max_rate = max_rates.get(theme.tics_id)
         momentum = theme.fluctuation_rate - prev_rate if prev_rate is not None else 0.0
-        is_surge, reason = _judge(theme, momentum, prev_rate, min_fluctuation, min_trading_value)
+        is_surge, reason = _judge(
+            theme,
+            momentum,
+            prev_rate,
+            min_fluctuation,
+            effective_min_trading_value,
+            today_max_rate=today_max_rate,
+        )
         verdicts.append(
             SurgeVerdict(theme=theme, is_surge=is_surge, momentum=momentum, reason=reason)
         )
@@ -73,6 +92,7 @@ def _judge(
     prev_rate: float | None,
     min_fluctuation: float,
     min_trading_value: int,
+    today_max_rate: float | None = None,
 ) -> tuple[bool, str]:
     """단일 테마 급등 여부와 사유를 반환한다."""
     if theme.fluctuation_rate < min_fluctuation:
@@ -89,6 +109,15 @@ def _judge(
         )
 
     if prev_rate is not None and momentum < SURGE_MIN_MOMENTUM_PCT:
+        if (
+            today_max_rate is not None
+            and theme.fluctuation_rate >= today_max_rate - THEME_PULLBACK_MOMENTUM_TOLERANCE_PCT
+        ):
+            return True, (
+                f"등락률 {theme.fluctuation_rate:+.2f}%, "
+                f"거래대금 {theme.trading_value / 1e8:,.0f}억, "
+                f"모멘텀 {momentum:+.2f}%p (눌림목 모멘텀 유지)"
+            )
         return False, f"모멘텀 둔화 ({momentum:+.2f}%p < {SURGE_MIN_MOMENTUM_PCT:+.2f}%p)"
 
     momentum_text = f", 모멘텀 {momentum:+.2f}%p" if prev_rate is not None else ""

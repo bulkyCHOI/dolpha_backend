@@ -13,13 +13,16 @@ from django.http import JsonResponse
 from django.utils import timezone
 
 from .api_mypage_ninja import get_authenticated_user
+from dolpha.kis.auth import KisCredentialError
+from dolpha.kis.credentials import credential_for_account
 from dolpha.kis.trade import (
     GetMyStockList,
     GetCurrentPrice,
     MakeBuyMarketOrder,
     MakeSellMarketOrder,
 )
-from myweb.models import TradeEntry
+from dolpha.strategy_account import get_default_account
+from myweb.models import KisAccount, TradeEntry
 
 trade_router = Router()
 
@@ -30,6 +33,7 @@ trade_router = Router()
 class SellOrderIn(Schema):
     stock_code: str
     percentage: float   # 매도 비율 1~100 (%)
+    account_id: Optional[int] = None   # 지정하지 않으면 기본 계좌 사용
 
 
 class BuyOrderIn(Schema):
@@ -37,6 +41,7 @@ class BuyOrderIn(Schema):
     stock_name: str = ""
     quantity: Optional[int] = None    # 수량 직접 지정
     amount: Optional[int] = None      # 원화 금액 (quantity 없을 때 현재가로 환산)
+    account_id: Optional[int] = None  # 지정하지 않으면 기본 계좌 사용
 
 
 class OrderOut(Schema):
@@ -66,18 +71,49 @@ class HoldingsOut(Schema):
     error: Optional[str] = None
 
 
+# ── 계좌 해석 ──────────────────────────────────────────────────────────────
+
+
+def _resolve_account_credential(user, account_id):
+    """account_id가 있으면 그 계좌, 없으면 사용자의 기본 계좌 자격증명을 반환한다.
+
+    Returns:
+        (credential, error_response) — 성공 시 error_response는 None
+    """
+    if account_id is not None:
+        account = KisAccount.objects.filter(user=user, pk=account_id, is_active=True).first()
+        if account is None:
+            return None, {"success": False, "error": "계좌를 찾을 수 없습니다."}
+    else:
+        account = get_default_account(user)
+        if account is None:
+            return None, {
+                "success": False,
+                "error": "등록된 KIS 계좌가 없습니다. 마이페이지에서 계좌를 먼저 등록하세요.",
+            }
+
+    try:
+        return credential_for_account(account), None
+    except KisCredentialError as e:
+        return None, {"success": False, "error": str(e)}
+
+
 # ── 엔드포인트 ─────────────────────────────────────────────────────────────
 
 
 @trade_router.get("/holdings", response=HoldingsOut)
-def get_holdings(request):
-    """모의/실계좌 보유 주식 목록을 KIS API로 조회합니다."""
+def get_holdings(request, account_id: Optional[int] = None):
+    """계좌 보유 주식 목록을 KIS API로 조회합니다. account_id 미지정 시 기본 계좌."""
     user = get_authenticated_user(request)
     if not user:
         return JsonResponse({"error": "인증이 필요합니다."}, status=401)
 
+    credential, error = _resolve_account_credential(user, account_id)
+    if error:
+        return error
+
     try:
-        stock_list = GetMyStockList()
+        stock_list = GetMyStockList(credential)
         holdings = [
             {
                 "stock_code":    s["StockCode"],
@@ -112,8 +148,12 @@ def sell_stock(request, data: SellOrderIn):
     if not (1 <= data.percentage <= 100):
         return {"success": False, "error": "percentage는 1~100 사이여야 합니다."}
 
+    credential, error = _resolve_account_credential(user, data.account_id)
+    if error:
+        return error
+
     try:
-        stock_list = GetMyStockList()
+        stock_list = GetMyStockList(credential)
         holding = next(
             (s for s in stock_list if s["StockCode"] == data.stock_code), None
         )
@@ -133,7 +173,7 @@ def sell_stock(request, data: SellOrderIn):
                 "error": f"매도 수량 0주 (보유 {total_qty}주, {data.percentage}%)",
             }
 
-        result = MakeSellMarketOrder(data.stock_code, sell_qty)
+        result = MakeSellMarketOrder(data.stock_code, sell_qty, credential)
         if not result:
             return {"success": False, "error": "KIS API 주문 실패"}
 
@@ -183,17 +223,21 @@ def buy_stock(request, data: BuyOrderIn):
             "error": "quantity 또는 amount 중 하나를 입력해야 합니다.",
         }
 
+    credential, error = _resolve_account_credential(user, data.account_id)
+    if error:
+        return error
+
     try:
         if data.quantity is not None:
             buy_qty = data.quantity
         else:
-            current_price = GetCurrentPrice(data.stock_code)
+            current_price = GetCurrentPrice(data.stock_code, credential)
             buy_qty = data.amount // current_price
 
         if buy_qty <= 0:
             return {"success": False, "error": "매수 수량 0주"}
 
-        result = MakeBuyMarketOrder(data.stock_code, buy_qty)
+        result = MakeBuyMarketOrder(data.stock_code, buy_qty, credential)
         if not result:
             return {"success": False, "error": "KIS API 주문 실패"}
 

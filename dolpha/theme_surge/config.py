@@ -36,6 +36,7 @@ SURGE_MIN_MOMENTUM_PCT = 0.3          # 모멘텀 비교 구간 대비 등락률
 MOMENTUM_LOOKBACK_MINUTES = 5         # 모멘텀 비교 기준 시점(분 전) — 슬롯 주기와 무관하게 고정
 SURGE_TOP_N = 10                      # 스냅샷으로 저장할 상위 테마 수
 SURGE_MAX_THEMES_PER_SLOT = 3         # 한 슬롯에서 후보를 뽑을 최대 테마 수
+THEME_PULLBACK_MOMENTUM_TOLERANCE_PCT = 1.5  # 테마 눌림목 모멘텀 보존 허용 오차(%p)
 
 # ── 1등 종목(주도주) 선정 ───────────────────────────────────
 LEADER_WEIGHT_TRADING_VALUE = 0.5     # 거래대금 가중치
@@ -46,7 +47,45 @@ LEADER_MIN_MARKET_CAP = 50_000_000_000     # 후보 최소 시가총액(원) = 5
 LEADER_MAX_CHANGE_RATE_PCT = 25.0     # 상한가 근접(+25% 초과) 종목은 추격 매수 제외
 LEADER_STORE_COUNT = 3                # 테마당 저장할 후보 수 (1등 + 추적용 2등·3등)
 
-# ── 1분봉 진입 판정 ─────────────────────────────────────────
+# ── 시간대별 동적 최소 거래대금 ──────────────────────────────
+def get_theme_min_trading_value(slot_or_time: time | None = None) -> int:
+    """시간대별 급등 테마 최소 거래대금 기준(원)을 반환한다."""
+    if slot_or_time is None:
+        return SURGE_MIN_TRADING_VALUE
+    if slot_or_time <= time(9, 10):
+        return 10_000_000_000
+    if slot_or_time <= time(9, 20):
+        return 20_000_000_000
+    if slot_or_time <= time(9, 30):
+        return 35_000_000_000
+    return SURGE_MIN_TRADING_VALUE
+
+
+def get_leader_min_trading_value(slot_or_time: time | None = None) -> int:
+    """시간대별 주도주 최소 거래대금 기준(원)을 반환한다."""
+    if slot_or_time is None:
+        return LEADER_MIN_TRADING_VALUE
+    if slot_or_time <= time(9, 10):
+        return 1_000_000_000
+    if slot_or_time <= time(9, 20):
+        return 2_000_000_000
+    if slot_or_time <= time(9, 30):
+        return 3_500_000_000
+    return LEADER_MIN_TRADING_VALUE
+
+
+# ── 모닝 세션 파라미터 (09:00 ~ 09:45 이전 빠른 진입) ────────
+MORNING_MIN_BARS = 6                   # 모닝 판정에 필요한 최소 분봉 개수
+MORNING_LOOKBACK_BARS = 30             # 모닝 탐색 구간(분봉 개수)
+MORNING_PEAK_MIN_RISE_PCT = 2.0        # 시초가 대비 고점 최소 상승폭(%)
+MORNING_PULLBACK_MIN_BARS = 2          # 모닝 눌림 최소 봉 수
+MORNING_PULLBACK_MAX_BARS = 12         # 모닝 눌림 최대 봉 수
+MORNING_PULLBACK_MIN_PCT = 1.0         # 모닝 눌림 최소 깊이(%)
+MORNING_PULLBACK_MAX_PCT = 4.5         # 모닝 눌림 최대 깊이(%)
+MORNING_PULLBACK_VOLUME_RATIO_MAX = 0.85  # 모닝 눌림 거래량 비율 상한
+MORNING_BREAKOUT_VOLUME_RATIO_MIN = 2.0   # 모닝 돌파 거래량 비율 하한
+
+# ── 1분봉 진입 판정 (레귤러 세션) ───────────────────────────
 ENTRY_MAX_BAR_AGE_MIN = 5             # 마지막 분봉이 이보다 낡으면 판정 보류 (낡은 데이터 진입 차단)
 ENTRY_LOOKBACK_BARS = 120             # 전고점 탐색 구간(분봉 개수)
 ENTRY_MIN_BARS = 45                   # 판정에 필요한 최소 분봉 개수 (스윙 고점 확정에 좌우 PIVOT_WINDOW 봉 필요)

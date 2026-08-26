@@ -27,8 +27,11 @@ from django.utils import timezone as tz
 
 from myweb.models import TradingConfig, TradeEntry, TradingSummary, StockMinuteOhlcv
 from dolpha.kis import trade as KIS
+from dolpha.kis.auth import KisCredential, KisCredentialError
+from dolpha.kis.credentials import credential_for_account
 from dolpha.order_log import order_log
 from dolpha.stockCommon import GetOhlcv, GetNowDateStr
+from dolpha.strategy_account import get_active_accounts, resolve_account
 
 # 분봉 백필 정책
 BACKFILL_STALE_MINUTES = 3        # 마지막 분봉이 이 시간보다 낡으면 백필을 다시 시도
@@ -65,6 +68,8 @@ class TradingEngine:
         self.trading_configs: list[TradingConfig] = []
         # 급등테마주 진입 판정 시그널 (매수 성공 시 executed 표시용)
         self._last_theme_signal = None
+        # 전략 → 자격증명 캐시. 사이클 중 계좌 조회·복호화를 반복하지 않는다.
+        self._credential_cache: dict[str, KisCredential] = {}
         self._load_configs()
 
     # ──────────────────────────────────────────────
@@ -80,6 +85,25 @@ class TradingEngine:
             f"[TradingEngine] 활성 설정 {len(self.trading_configs)}개 로드됨"
             f" (유저: {self.user.username})"
         )
+
+    # ──────────────────────────────────────────────
+    # 전략별 거래 계좌
+    # ──────────────────────────────────────────────
+
+    def _credential_for(self, config: TradingConfig) -> KisCredential:
+        """해당 설정의 전략에 지정된 계좌 자격증명을 반환합니다.
+
+        Raises:
+            KisCredentialError: 지정 계좌도 기본 계좌도 없는 경우
+        """
+        strategy_type = config.strategy_type
+        cached = self._credential_cache.get(strategy_type)
+        if cached is not None:
+            return cached
+
+        credential = credential_for_account(resolve_account(self.user, strategy_type))
+        self._credential_cache[strategy_type] = credential
+        return credential
 
     # ──────────────────────────────────────────────
     # DB 기반 매수 이력 조회
@@ -199,7 +223,7 @@ class TradingEngine:
                 atr = self.get_atr(config.stock_code)
                 if atr:
                     if not current_price:
-                        current_price = float(KIS.GetCurrentPrice(config.stock_code))
+                        current_price = float(KIS.GetCurrentPrice(config.stock_code, self._credential_for(config)))
                     if not current_price or current_price <= 0:
                         print(f"[{config.stock_name}] 현재가 조회 실패 — 포지션 계산 불가")
                         return 0.0
@@ -940,7 +964,7 @@ class TradingEngine:
             return None, 0.0, ""
 
         if not current_price:
-            current_price = float(KIS.GetCurrentPrice(config.stock_code))
+            current_price = float(KIS.GetCurrentPrice(config.stock_code, self._credential_for(config)))
 
         for stage_num, period, sell_pct in stages[:max_stage]:
             if stage_num in completed:
@@ -998,7 +1022,7 @@ class TradingEngine:
             return None, 0.0, ""
 
         if not current_price:
-            current_price = float(KIS.GetCurrentPrice(config.stock_code))
+            current_price = float(KIS.GetCurrentPrice(config.stock_code, self._credential_for(config)))
 
         for stage_num, days, sell_pct in stages[:max_stage]:
             if stage_num in completed:
@@ -1089,7 +1113,7 @@ class TradingEngine:
             # 주문 직전 실시간 가용현금 재검증 — 호출부(run_trading_cycle)가 사이클 내
             # 누적 소진액을 추적하지만, 이 함수 자체를 최종 방어선으로 한 번 더 확인한다.
             try:
-                remain_cash = float(KIS.GetBalance()["RemainMoney"])
+                remain_cash = float(KIS.GetBalance(self._credential_for(config))["RemainMoney"])
             except Exception as e:
                 print(f"[{stock_name}] 실시간 잔고 재확인 실패: {e} — 매수 취소")
                 return False
@@ -1119,7 +1143,7 @@ class TradingEngine:
                 entry_type = "INITIAL" if entry_count == 0 else "PYRAMIDING"
 
                 # KIS 시장가 매수 주문
-                result = KIS.MakeBuyMarketOrder(stock_code, buy_qty)
+                result = KIS.MakeBuyMarketOrder(stock_code, buy_qty, self._credential_for(config))
                 if result is None:
                     err_msg = _pop_order_error("buy")
                     order_log(
@@ -1252,7 +1276,7 @@ class TradingEngine:
                 profit_loss_pct = profit_loss / cost * 100.0 if cost > 0 else 0.0
 
             # KIS 시장가 매도 주문
-            result = KIS.MakeSellMarketOrder(stock_code, holding_qty)
+            result = KIS.MakeSellMarketOrder(stock_code, holding_qty, self._credential_for(config))
             if result is None:
                 err_msg = _pop_order_error("sell")
                 order_log(
@@ -1367,7 +1391,7 @@ class TradingEngine:
                 profit_loss     = sell_amount - cost
                 profit_loss_pct = profit_loss / cost * 100.0 if cost > 0 else 0.0
 
-            result = KIS.MakeSellMarketOrder(stock_code, sell_qty)
+            result = KIS.MakeSellMarketOrder(stock_code, sell_qty, self._credential_for(config))
             if result is None:
                 err_msg = _pop_order_error("sell")
                 order_log(
@@ -1749,7 +1773,7 @@ class TradingEngine:
                 return {"qty": int(s["StockAmt"]), "avg_price": float(s["StockAvgPrice"])}
         return {"qty": 0, "avg_price": 0.0}
 
-    def _reconcile_positions(self, my_stocks: list[dict]) -> None:
+    def _reconcile_positions(self, holdings_by_account: dict[str, list[dict]]) -> None:
         """
         실제 계좌 보유 종목과 DB 포지션을 대조하여 불일치 설정을 비활성화합니다.
 
@@ -1757,18 +1781,83 @@ class TradingEngine:
         DB의 is_active 가 True 로 남아 있어도 이 메서드가 정리합니다.
 
         대상: FILLED BUY 기록이 있으나 실제 계좌에 해당 종목이 없는 설정.
+
+        주의: 전략마다 계좌가 다를 수 있으므로 반드시 "그 전략의 계좌" 보유 목록과
+        대조한다. 전 계좌를 합쳐 비교하거나 다른 계좌와 비교하면 멀쩡한 포지션을
+        비활성화하게 된다. 조회에 실패한 계좌의 설정은 건드리지 않는다.
         """
-        held_codes = {s["StockCode"] for s in my_stocks}
+        held_codes_by_account = {
+            key: {s["StockCode"] for s in stocks}
+            for key, stocks in holdings_by_account.items()
+        }
 
         for config in list(TradingConfig.objects.filter(user=self.user, is_active=True)):
             if not self._buy_entries(config.stock_code).exists():
                 continue
+
+            try:
+                account_key = self._credential_for(config).token_cache_key
+            except KisCredentialError as e:
+                print(f"[{config.stock_name}] 계좌 확인 불가 — 재조정 건너뜀: {e}")
+                continue
+
+            held_codes = held_codes_by_account.get(account_key)
+            if held_codes is None:
+                # 해당 계좌의 보유 목록을 못 받았다 — 근거 없이 비활성화하지 않는다
+                continue
+
             if config.stock_code not in held_codes:
                 print(
                     f"[{config.stock_name}] 계좌에 없는 포지션 감지"
                     f" — DB 정리 후 비활성화"
                 )
                 self._deactivate_config(config)
+
+    def _load_account_snapshots(self) -> tuple[dict[str, dict], dict[str, list[dict]]]:
+        """활성 전략들이 사용하는 계좌마다 잔고·보유종목을 1회씩 조회합니다.
+
+        같은 계좌를 여러 전략이 공유하면 호출도 한 번만 이루어집니다.
+
+        Returns:
+            (계좌키 → 잔고, 계좌키 → 보유종목 목록)
+            잔고 조회에 실패했거나 총평가금액이 0 이하인 계좌는 잔고 dict에서 빠집니다.
+        """
+        balances: dict[str, dict] = {}
+        holdings: dict[str, list[dict]] = {}
+
+        for account in get_active_accounts(self.user):
+            try:
+                credential = credential_for_account(account)
+            except KisCredentialError as e:
+                print(f"[TradingEngine] 계좌 '{account.name}' 자격증명 오류: {e}")
+                continue
+
+            key = credential.token_cache_key
+
+            try:
+                balance = KIS.GetBalance(credential)
+                if float(balance["TotalMoney"]) <= 0:
+                    print(f"[TradingEngine] 계좌 '{account.name}' 잔고 부족 — 건너뜀")
+                    continue
+                balances[key] = balance
+                print(
+                    f"[TradingEngine] 계좌 '{account.name}' 잔고:"
+                    f" 총={balance['TotalMoney']:,.0f}원,"
+                    f" 현금={balance['RemainMoney']:,.0f}원"
+                )
+            except Exception as e:
+                print(f"[TradingEngine] 계좌 '{account.name}' 잔고 조회 실패: {e}")
+                continue
+
+            try:
+                holdings[key] = KIS.GetMyStockList(credential)
+            except Exception as e:
+                print(
+                    f"[TradingEngine] 계좌 '{account.name}' 보유 종목 조회 실패: {e}"
+                    " — 포지션 재조정 건너뜀"
+                )
+
+        return balances, holdings
 
     def run_trading_cycle(self):
         """
@@ -1781,37 +1870,27 @@ class TradingEngine:
             print("[TradingEngine] 장 시간 아님 — 종료")
             return
 
-        # 사이클 레벨 캐시: GetBalance, GetMyStockList 각 1회만 호출
-        try:
-            balance = KIS.GetBalance()
-            if float(balance["TotalMoney"]) <= 0:
-                print("[TradingEngine] 잔고 부족 — 종료")
-                return
-            # 실시간 가용 현금 추적용 변수 — calculate_position_size는 ConfirmedCapital
-            # (예수금+보유주식 매수원가)을 기준으로 계산하므로 매수해도 거의 줄지 않는다.
-            # 사이클 내 여러 종목을 연달아 매수할 때 이미 쓴 금액을 반영하기 위해
-            # RemainMoney를 별도로 차감하며 추적한다.
-            available_cash = float(balance["RemainMoney"])
-            print(
-                f"[TradingEngine] 잔고: 총={balance['TotalMoney']:,.0f}원,"
-                f" 현금={balance['RemainMoney']:,.0f}원"
-            )
-        except Exception as e:
-            print(f"[TradingEngine] 잔고 조회 실패: {e}")
+        # 사이클 레벨 캐시: 계좌마다 GetBalance, GetMyStockList 각 1회만 호출
+        balances, holdings_by_account = self._load_account_snapshots()
+        if not balances:
+            print("[TradingEngine] 사용 가능한 계좌 잔고 없음 — 종료")
             return
 
-        try:
-            my_stocks: list[dict] = KIS.GetMyStockList()
-        except Exception as e:
-            print(f"[TradingEngine] 보유 종목 조회 실패: {e} — 포지션 재조정 건너뜀")
-            my_stocks = None  # 조회 실패 시 None으로 설정하여 재조정 방지
+        # 실시간 가용 현금 추적용 — calculate_position_size는 ConfirmedCapital
+        # (예수금+보유주식 매수원가)을 기준으로 계산하므로 매수해도 거의 줄지 않는다.
+        # 사이클 내 여러 종목을 연달아 매수할 때 이미 쓴 금액을 반영하기 위해
+        # RemainMoney를 계좌별로 차감하며 추적한다.
+        available_cash = {
+            key: float(balance["RemainMoney"]) for key, balance in balances.items()
+        }
 
         # 실제 계좌 vs DB 포지션 대조 — 엔진 밖 매도 등으로 생긴 불일치 정리
-        # my_stocks가 None(조회 실패)이거나 빈 리스트이면 재조정을 건너뜀
-        # 빈 리스트로 재조정하면 모든 보유 종목을 잘못 비활성화할 위험이 있음
-        if my_stocks:
+        # 조회에 실패했거나 보유 종목이 없는 계좌는 재조정 대상에서 제외한다.
+        # 빈 목록으로 재조정하면 모든 보유 종목을 잘못 비활성화할 위험이 있다.
+        reconcilable = {k: v for k, v in holdings_by_account.items() if v}
+        if reconcilable:
             try:
-                self._reconcile_positions(my_stocks)
+                self._reconcile_positions(reconcilable)
             except Exception as e:
                 print(f"[TradingEngine] 포지션 재조정 실패 (무시): {e}")
 
@@ -1826,9 +1905,23 @@ class TradingEngine:
             try:
                 print(f"\n[{config.stock_name}] 매매 체크 시작")
 
+                # 이 전략이 쓰는 계좌의 사이클 캐시를 선택한다
+                try:
+                    account_key = self._credential_for(config).token_cache_key
+                except KisCredentialError as e:
+                    print(f"[{config.stock_name}] 계좌 미설정 — 건너뜀: {e}")
+                    continue
+
+                balance = balances.get(account_key)
+                if balance is None:
+                    print(f"[{config.stock_name}] 계좌 잔고 조회 실패 — 건너뜀")
+                    continue
+
                 # 종목 레벨 캐시: GetCurrentPrice 1회 호출 후 재사용
-                current_price = float(KIS.GetCurrentPrice(config.stock_code))
-                holding_info = self._extract_holding_info(config.stock_code, my_stocks)
+                current_price = float(KIS.GetCurrentPrice(config.stock_code, self._credential_for(config)))
+                holding_info = self._extract_holding_info(
+                    config.stock_code, holdings_by_account.get(account_key) or []
+                )
 
                 # D-1 완성 분봉 수집 (현재 분은 미완성이므로 1분 전 봉 저장)
                 self._collect_prev_minute_bar(config.stock_code)
@@ -1867,14 +1960,15 @@ class TradingEngine:
                     if position_amount > 0:
                         entry_amount = self.get_current_entry_amount(config, position_amount)
                         if entry_amount > 0:
-                            if entry_amount > available_cash:
+                            account_cash = available_cash.get(account_key, 0.0)
+                            if entry_amount > account_cash:
                                 print(
                                     f"[{config.stock_name}] 가용 현금 부족 — 필요="
-                                    f"{entry_amount:,.0f}원, 가용={available_cash:,.0f}원"
+                                    f"{entry_amount:,.0f}원, 가용={account_cash:,.0f}원"
                                     " — 매수 스킵"
                                 )
                             elif self.execute_buy_order(config, entry_amount, current_price):
-                                available_cash -= entry_amount
+                                available_cash[account_key] = account_cash - entry_amount
                                 self._mark_theme_signal_executed(config)
                         else:
                             print(f"[{config.stock_name}] 피라미딩 한도 초과")
