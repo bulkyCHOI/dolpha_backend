@@ -31,6 +31,7 @@ from .config import (
     SURGE_TOP_N,
 )
 from .detector import SurgeVerdict, detect_surge_themes
+from .entry_stages import load_entry_stages, to_config_fields
 from .leader import LeaderCandidate, select_leaders
 from .toss_client import TossThemeError, fetch_theme_ranking, fetch_theme_stocks
 
@@ -103,7 +104,11 @@ def run_theme_scan(now: datetime | None = None, force: bool = False) -> dict:
             continue
 
         leaders = select_leaders(
-            stocks, top_n=LEADER_STORE_COUNT, listed_codes=listed_codes, slot=slot
+            stocks,
+            top_n=LEADER_STORE_COUNT,
+            listed_codes=listed_codes,
+            slot=slot,
+            theme_fluctuation=verdict.theme.fluctuation_rate,
         )
         if not leaders:
             continue
@@ -315,17 +320,16 @@ def _exit_defaults(defaults) -> dict:
     """후보 등록 시 복사할 청산 관련 필드를 만든다.
 
     전용 청산(데이 트레이딩)을 쓰면 손절가·1T 폭은 진입 시점의 눌림 저점으로
-    확정되므로 여기서는 비워 두고, 계좌 리스크 비율만 미리 넣는다.
+    확정되므로 여기서는 비워 두고, 계좌 리스크 비율과 사용자 설정 분할 진입을 넣는다.
     전용 청산을 끄면 기존처럼 Manual 기본값을 그대로 복사한다.
     """
     if getattr(defaults, "theme_surge_use_own_exit", True):
+        entry_config = to_config_fields(load_entry_stages(defaults))
         return {
             "max_loss": defaults.theme_surge_max_loss,
             "stop_loss": None,          # 진입 시 눌림 저점으로 확정
             "take_profit": None,        # nT 분할 익절이 대신한다
-            "pyramiding_count": 0,      # 당일 청산 전략이라 피라미딩은 쓰지 않는다
-            "pyramiding_entries": [],
-            "positions": [100],
+            **entry_config,             # pyramiling_count, pyramiling_entries, positions
         }
 
     return {

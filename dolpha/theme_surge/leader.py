@@ -21,6 +21,7 @@ from datetime import time
 from .config import (
     LEADER_MAX_CHANGE_RATE_PCT,
     LEADER_MIN_CHANGE_RATE_PCT,
+    LEADER_MIN_CHANGE_RATE_THEME_RATIO,
     LEADER_MIN_MARKET_CAP,
     LEADER_MIN_TRADING_VALUE,
     LEADER_STORE_COUNT,
@@ -46,6 +47,7 @@ def select_leaders(
     listed_codes: set[str] | None = None,
     slot: time | None = None,
     min_trading_value: int | None = None,
+    theme_fluctuation: float | None = None,
 ) -> list[LeaderCandidate]:
     """테마 구성 종목 중 주도주 상위 N개를 점수순으로 반환한다.
 
@@ -67,7 +69,12 @@ def select_leaders(
     )
     eligible = [
         s for s in stocks
-        if _is_eligible(s, listed_codes, min_trading_value=effective_min_trading_value)
+        if _is_eligible(
+            s,
+            listed_codes,
+            min_trading_value=effective_min_trading_value,
+            theme_fluctuation=theme_fluctuation,
+        )
     ]
     if not eligible:
         return []
@@ -96,11 +103,19 @@ def _is_eligible(
     stock: ThemeStock,
     listed_codes: set[str] | None,
     min_trading_value: int = LEADER_MIN_TRADING_VALUE,
+    theme_fluctuation: float | None = None,
 ) -> bool:
     """후보 자격 필터."""
     if listed_codes is not None and stock.code not in listed_codes:
         return False
     if stock.change_rate < LEADER_MIN_CHANGE_RATE_PCT:
+        return False
+    # 테마는 크게 올랐는데 개별 종목만 미미하게 오른 후행주는 주도주에서 제외
+    if (
+        theme_fluctuation is not None
+        and theme_fluctuation > 0
+        and stock.change_rate < theme_fluctuation * LEADER_MIN_CHANGE_RATE_THEME_RATIO
+    ):
         return False
     if stock.change_rate > LEADER_MAX_CHANGE_RATE_PCT:
         return False

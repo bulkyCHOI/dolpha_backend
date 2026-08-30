@@ -15,6 +15,7 @@ from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from django.contrib.auth.models import AnonymousUser
 
 from myweb.models import User, UserProfile, TradingConfig, TradingDefaults, FavoriteStock, Company, StockAnalysis, StockOHLCV
+from dolpha.theme_surge.entry_stages import normalize_entry_stages
 
 
 mypage_router = Router()
@@ -170,6 +171,8 @@ class TradingDefaultsSchema(Schema):
     # 급등테마주 청산 설정 (데이 트레이딩 전용)
     theme_surge_use_own_exit: bool = True
     theme_surge_max_loss: float = 1.0
+    theme_surge_max_position_pct: float = 20.0
+    theme_surge_entry_stages: List[dict] = [{"t": 0.0, "weight_pct": 100.0}]
     theme_surge_exit_stages: List[dict] = []
     theme_surge_use_trailing: bool = True
     theme_surge_trailing_start_t: float = 2.0
@@ -280,6 +283,8 @@ class TradingDefaultsResponseSchema(Schema):
     # 급등테마주 청산 설정 (데이 트레이딩 전용)
     theme_surge_use_own_exit: bool = True
     theme_surge_max_loss: float = 1.0
+    theme_surge_max_position_pct: float = 20.0
+    theme_surge_entry_stages: List[dict] = [{"t": 0.0, "weight_pct": 100.0}]
     theme_surge_exit_stages: List[dict] = []
     theme_surge_use_trailing: bool = True
     theme_surge_trailing_start_t: float = 2.0
@@ -712,6 +717,8 @@ def get_trading_defaults(request):
             'theme_surge_use_foreign_filter': defaults.theme_surge_use_foreign_filter,
             'theme_surge_use_own_exit': defaults.theme_surge_use_own_exit,
             'theme_surge_max_loss': defaults.theme_surge_max_loss,
+            'theme_surge_max_position_pct': defaults.theme_surge_max_position_pct,
+            'theme_surge_entry_stages': defaults.theme_surge_entry_stages,
             'theme_surge_exit_stages': defaults.theme_surge_exit_stages,
             'theme_surge_use_trailing': defaults.theme_surge_use_trailing,
             'theme_surge_trailing_start_t': defaults.theme_surge_trailing_start_t,
@@ -849,6 +856,8 @@ def save_trading_defaults(request, data: TradingDefaultsSchema):
         # 급등테마주 청산 설정 — 값 검증 후 저장 (잘못된 차수는 버린다)
         defaults.theme_surge_use_own_exit = data.theme_surge_use_own_exit
         defaults.theme_surge_max_loss = _clamp(data.theme_surge_max_loss, 0.1, 100.0)
+        defaults.theme_surge_max_position_pct = _clamp(data.theme_surge_max_position_pct, 1.0, 100.0)
+        defaults.theme_surge_entry_stages = normalize_entry_stages(data.theme_surge_entry_stages)
         defaults.theme_surge_exit_stages = _clean_exit_stages(data.theme_surge_exit_stages)
         defaults.theme_surge_use_trailing = data.theme_surge_use_trailing
         defaults.theme_surge_trailing_start_t = _clamp(data.theme_surge_trailing_start_t, 0.1, 100.0)
