@@ -195,6 +195,51 @@ class TradingEngine:
     # ──────────────────────────────────────────────
 
     def calculate_position_size(self, config: TradingConfig, balance: dict, current_price: float = 0.0) -> float:
+        """매매모드별 포지션 크기(원)를 구한 뒤 전략별 비중 상한을 적용합니다."""
+        pos_amount = self._raw_position_size(config, balance, current_price)
+        try:
+            confirmed_capital = float(balance["ConfirmedCapital"])
+        except (KeyError, TypeError, ValueError):
+            return pos_amount
+        return self._cap_position_amount(config, pos_amount, confirmed_capital)
+
+    def _position_cap_pct(self, config: TradingConfig) -> float | None:
+        """이 설정에 적용할 1종목 최대 비중(%). 상한이 없으면 None."""
+        if config.strategy_type != "theme_surge":
+            return None
+        cap = self._theme_exit_settings().max_position_pct
+        return cap if cap and cap > 0 else None
+
+    def _cap_position_amount(
+        self, config: TradingConfig, pos_amount: float, confirmed_capital: float
+    ) -> float:
+        """1종목 비중이 상한을 넘지 않도록 포지션 금액을 잘라냅니다.
+
+        급등테마주는 손절가가 눌림 저점이라 손절폭이 1~2%로 얕게 잡히는 경우가 많고,
+        "계좌 손실 X% ÷ 손절폭" 공식이 그대로면 한 종목에 계좌의 절반 이상이 실린다.
+        손절이 체결되는 한 손실은 X%로 유지되지만, 갭·거래정지처럼 손절이 밀리는
+        상황에서는 단일 종목 리스크가 그대로 계좌 리스크가 되므로 비중 자체를 막는다.
+        (동시 추적 후보가 여러 개일 때 첫 종목이 현금을 다 소진하는 것도 함께 방지된다.)
+        """
+        if pos_amount <= 0 or confirmed_capital <= 0:
+            return pos_amount
+
+        cap_pct = self._position_cap_pct(config)
+        if cap_pct is None:
+            return pos_amount
+
+        cap_amount = confirmed_capital * cap_pct / 100.0
+        if pos_amount <= cap_amount:
+            return pos_amount
+
+        print(
+            f"[{config.stock_name}] 비중 상한 적용:"
+            f" 산출={pos_amount:,.0f}원({pos_amount / confirmed_capital * 100:.1f}%)"
+            f" → 상한={cap_amount:,.0f}원({cap_pct:.1f}%)"
+        )
+        return cap_amount
+
+    def _raw_position_size(self, config: TradingConfig, balance: dict, current_price: float = 0.0) -> float:
         """
         매매모드에 따른 총 포지션 크기(원)를 계산합니다.
           - manual : 확정원금 × max_loss% ÷ stop_loss%
@@ -203,6 +248,7 @@ class TradingEngine:
         이 값은 매수 체결 후에도 거의 줄지 않으므로(현금이 주식으로 전환될 뿐),
         실제 가용현금(RemainMoney) 부족 여부는 이 함수가 아니라 호출부와
         execute_buy_order()에서 별도로 검증한다.
+        비중 상한은 호출부인 calculate_position_size()가 적용한다.
         """
         try:
             confirmed_capital = float(balance["ConfirmedCapital"])
@@ -400,6 +446,49 @@ class TradingEngine:
             return False
         return self._theme_exit_settings().use_own_exit
 
+    def _theme_entry_stage_allowed(self, config: TradingConfig, now=None) -> bool:
+        """분할 진입 차단 규칙을 확인합니다.
+
+        당일 청산 전략이므로 다음 중 하나라도 참이면 추가 진입을 차단합니다:
+        1. 분할 익절이 이미 시작됨 — 익절된 포지션의 비중을 되돌려 총 리스크를 증가시킴
+        2. 트레일링 추적 시작됨 — 청산 관리 국면에서 재매수는 변동성 확대 위험
+        3. 강제청산 임박 (10분 버퍼) — 직전 진입이 강제청산에 곧바로 걸려 왕복 비용만 남음
+
+        Args:
+            config: TradingConfig 인스턴스
+            now: 기준 시각 (기본: django.utils.timezone.localtime())
+
+        Returns:
+            bool: True면 진입 가능, False면 차단
+        """
+        from dolpha.theme_surge.config import ENTRY_STAGE_CUTOFF_BUFFER_MIN
+
+        settings = self._theme_exit_settings()
+
+        # 1. 분할 익절이 이미 시작됨
+        if config.staged_exit_completed_stages:
+            return False
+
+        # 2. 트레일링 추적 시작됨
+        if config.theme_trailing_started:
+            return False
+
+        # 3. 강제청산 임박
+        if settings.force_exit_enabled:
+            if now is None:
+                now = tz.localtime()
+            # 오늘의 force_exit 시간을 계산한다
+            force_exit_dt = tz.make_aware(
+                datetime.combine(now.date(), settings.force_exit_time),
+                tz.get_current_timezone()
+            )
+            cutoff_dt = force_exit_dt - timedelta(minutes=ENTRY_STAGE_CUTOFF_BUFFER_MIN)
+            # 현재가 오늘의 cutoff 이후인지 확인 (오늘 cutoff 도달 또는 내일 이후)
+            if now >= cutoff_dt:
+                return False
+
+        return True
+
     def _apply_theme_exit_levels(
         self, config: TradingConfig, entry_price: float, decision
     ) -> None:
@@ -585,6 +674,20 @@ class TradingEngine:
                 return False
 
             mode = config.trading_mode
+
+            # T배수 트리거 (급등테마주 분할 진입)
+            if config.strategy_type == "theme_surge" and self._uses_theme_exit(config):
+                if not self._theme_entry_stage_allowed(config):
+                    return False
+                t_value = config.theme_t_value
+                if not t_value or t_value <= 0:
+                    return False
+                threshold_price = base_price + t_value * float(entry_str)
+                print(
+                    f"[{config.stock_name}] 분할진입 체크(T배수):"
+                    f" 목표가={threshold_price:,.0f}, 현재가={current_price:,.0f}"
+                )
+                return current_price >= threshold_price
 
             if mode == "manual":
                 # % 기반 피라미딩

@@ -10,13 +10,28 @@ def default_theme_surge_force_exit_time():
     return dt_time(15, 20)
 
 
+def default_theme_surge_entry_stages():
+    """급등테마주 분할 진입 기본 차수.
+
+    T = 진입 신호의 눌림 저점 → 전고점 돌파가 사이의 상승폭.
+    1차는 항상 t=0.0(돌파 즉시), 2차부터는 최초 체결가 + t×T 도달 시 추가 진입.
+    기본값은 1차만 있으므로 기존 일괄 진입과 동일한 동작.
+    """
+    return [{"t": 0.0, "weight_pct": 100.0}]
+
+
 def default_theme_surge_exit_stages():
     """급등테마주 분할 익절 기본 차수.
 
     T = 진입 신호의 눌림 저점 → 전고점 돌파가 사이의 상승폭.
-    2T 도달 시 50% 청산하고, 나머지는 트레일링 스탑이 담당한다.
+    1.5T 소량 선익절 후 본체를 3T 이후로 이연해 급등 추세의 상방을 남기고,
+    잔여 20% 는 트레일링 스탑이 담당한다.
     """
-    return [{"t": 2.0, "sell_pct": 50.0}]
+    return [
+        {"t": 1.5, "sell_pct": 25.0},
+        {"t": 3.0, "sell_pct": 35.0},
+        {"t": 4.5, "sell_pct": 20.0},
+    ]
 
 
 def default_manual_positions():
@@ -472,7 +487,7 @@ class TradingDefaults(models.Model):
     # 진입만 별도 로직(테마 급등 + 1분봉 눌림목 돌파 + 외국인 수급)을 쓰고,
     # 익절/손절/트레일링스탑/분할익절은 위 Manual 기본값을 그대로 따른다.
     theme_surge_enabled = models.BooleanField(default=False)          # 급등테마주 자동매매 사용
-    theme_surge_max_candidates = models.IntegerField(default=3)       # 동시 추적 최대 후보 종목 수
+    theme_surge_max_candidates = models.IntegerField(default=5)       # 동시 추적 최대 후보 종목 수
     theme_surge_min_fluctuation = models.FloatField(default=3.0)      # 급등 테마 판정 등락률(%)
     theme_surge_min_trading_value = models.BigIntegerField(
         default=50_000_000_000
@@ -484,19 +499,23 @@ class TradingDefaults(models.Model):
     # 시간축이 맞지 않는다. 그래서 청산도 이 전략 전용 값을 따로 둔다.
     theme_surge_use_own_exit = models.BooleanField(default=True)      # 전용 청산 규칙 사용(끄면 기존 Manual 설정)
     theme_surge_max_loss = models.FloatField(default=1.0)             # 손절 시 감수할 계좌 손실(%) — 배팅사이즈 기준
+    theme_surge_max_position_pct = models.FloatField(default=20.0)    # 1종목 최대 비중(계좌 대비 %) — 얕은 손절폭 과배팅 차단
+    theme_surge_entry_stages = models.JSONField(
+        default=default_theme_surge_entry_stages, blank=True
+    )  # 분할 진입 차수 [{"t": T배수, "weight_pct": 비중}] — n차 회차 자유 설정
     theme_surge_exit_stages = models.JSONField(
         default=default_theme_surge_exit_stages, blank=True
     )  # 분할 익절 차수 [{"t": 배수, "sell_pct": 청산비율}] — n차 nT 자유 설정
 
     theme_surge_use_trailing = models.BooleanField(default=True)      # 잔여 물량 트레일링 사용
-    theme_surge_trailing_start_t = models.FloatField(default=2.0)     # 이 배수(T) 초과 시부터 추적 시작
+    theme_surge_trailing_start_t = models.FloatField(default=1.5)     # 이 배수(T) 초과 시부터 추적 시작
     THEME_SURGE_BAR_UNITS = [
         ("1m", "1분봉"),
         ("5m", "5분봉"),
         ("1d", "일봉"),
     ]
     theme_surge_trailing_bar_unit = models.CharField(
-        max_length=4, choices=THEME_SURGE_BAR_UNITS, default="5m"
+        max_length=4, choices=THEME_SURGE_BAR_UNITS, default="1m"
     )  # 최저점 판정에 쓸 봉 단위
     theme_surge_trailing_bar_count = models.IntegerField(default=3)   # 직전 N봉 최저점 이탈 시 청산
 

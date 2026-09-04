@@ -45,6 +45,7 @@ from .config import (
     PULLBACK_VOLUME_RATIO_MAX,
 )
 from .exits import load_exits
+from .exit_rules import derive_entry_levels, load_exit_settings
 from .patterns import (
     analyze_breakout,
     analyze_morning_breakout,
@@ -116,6 +117,7 @@ def build_entry_chart(user, target_date: date_cls, stock_code: str) -> dict:
     signals = _load_signals(user, target_date, code)
     bars = load_minute_bars(code, target_date)
     identity = _identity(signals, target_date, code)
+    exit_settings = _load_exit_settings(user)
 
     return {
         "date": target_date.isoformat(),
@@ -123,7 +125,7 @@ def build_entry_chart(user, target_date: date_cls, stock_code: str) -> dict:
         "stock_name": identity["stock_name"],
         "theme_name": identity["theme_name"],
         "bars": bars,
-        "decisions": [_decision_row(bars, signal) for signal in signals],
+        "decisions": [_decision_row(bars, signal, exit_settings) for signal in signals],
         # 청산은 판정 이력이 없고 체결 기록만 남는다 (exits.py 주석 참고)
         "exits": load_exits(user, target_date, code),
         "params": CHART_PARAMS,
@@ -169,10 +171,63 @@ def load_minute_bars(stock_code: str, target_date: date_cls) -> list[dict]:
 # 판정 행 조립
 # ──────────────────────────────────────────────────────────────
 
-def _decision_row(bars: list[dict], signal) -> dict:
+def _load_exit_settings(user):
+    """유저의 급등테마주 청산 설정을 읽는다. 없으면 config 기본값."""
+    from myweb.models import TradingDefaults
+
+    defaults = TradingDefaults.objects.filter(user=user).first()
+    return load_exit_settings(defaults)
+
+
+def _exit_levels(geometry: dict | None, entry_price, settings) -> dict | None:
+    """진입 신호 좌표 + 유저 청산 설정으로 손절선과 차수별 익절선을 계산한다.
+
+    entry_price 기준(판정가)으로 목표가 = 평단 + n×T 를 그린다. 실제 체결이
+    아니라 판정 시점 좌표이므로 참고선이다.
+    """
+    if not geometry or entry_price is None or entry_price <= 0:
+        return None
+
+    breakout = geometry.get("breakout_threshold")
+    if not breakout:
+        return None
+
+    pullback = geometry.get("pullback_low") or {}
+    derived = derive_entry_levels(pullback.get("price"), breakout, float(entry_price))
+    if derived is None:
+        return None
+
+    stop, t_value = derived
+    targets = [
+        {
+            "stage": index,
+            "t": t_mult,
+            "sell_pct": sell_pct,
+            "price": round(entry_price + t_value * t_mult, 2),
+        }
+        for index, (t_mult, sell_pct) in enumerate(settings.stages, start=1)
+    ]
+
+    return {
+        "entry_price": round(float(entry_price), 2),
+        "stop": round(stop, 2),
+        "t_value": round(t_value, 2),
+        "use_trailing": settings.use_trailing,
+        "trailing_start_t": settings.trailing_start_t,
+        "trailing_start_price": (
+            round(entry_price + t_value * settings.trailing_start_t, 2)
+            if settings.use_trailing
+            else None
+        ),
+        "targets": targets,
+    }
+
+
+def _decision_row(bars: list[dict], signal, exit_settings) -> dict:
     """판정 1건을 차트용 행으로 변환한다."""
     checked = signal.checked_at.astimezone(_KST)
     met = sum([signal.has_pullback, signal.has_breakout, signal.has_foreign_buying])
+    geometry = _geometry(bars, signal, checked)
 
     return {
         "id": signal.id,
@@ -191,7 +246,12 @@ def _decision_row(bars: list[dict], signal) -> dict:
         "passed": signal.passed,
         "executed": signal.executed,
         "reason": signal.reason,
-        "geometry": _geometry(bars, signal, checked),
+        "geometry": geometry,
+        "exit_levels": (
+            _exit_levels(geometry, signal.price, exit_settings)
+            if exit_settings.use_own_exit
+            else None
+        ),
     }
 
 

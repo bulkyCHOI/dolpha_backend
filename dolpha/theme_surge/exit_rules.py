@@ -23,9 +23,12 @@ from .config import (
     DEFAULT_EXIT_STAGES,
     DEFAULT_FORCE_EXIT_TIME,
     DEFAULT_MAX_LOSS_PCT,
+    DEFAULT_MAX_POSITION_PCT,
     DEFAULT_TRAILING_BAR_COUNT,
     DEFAULT_TRAILING_BAR_UNIT,
     DEFAULT_TRAILING_START_T,
+    FORCE_EXIT_PROFIT_GRACE_MIN,
+    FORCE_EXIT_PROFIT_GRACE_T,
     PULLBACK_MAX_PCT,
     TRAILING_BAR_UNIT_MINUTES,
 )
@@ -37,6 +40,7 @@ class ExitSettings:
 
     use_own_exit: bool
     max_loss_pct: float
+    max_position_pct: float                   # 1종목 최대 비중(계좌 대비 %)
     stages: tuple[tuple[float, float], ...]   # ((T배수, 청산비율%), ...) T 오름차순
     use_trailing: bool
     trailing_start_t: float
@@ -100,6 +104,7 @@ def load_exit_settings(defaults) -> ExitSettings:
         return ExitSettings(
             use_own_exit=True,
             max_loss_pct=DEFAULT_MAX_LOSS_PCT,
+            max_position_pct=DEFAULT_MAX_POSITION_PCT,
             stages=stages,
             use_trailing=True,
             trailing_start_t=DEFAULT_TRAILING_START_T,
@@ -118,6 +123,10 @@ def load_exit_settings(defaults) -> ExitSettings:
         use_own_exit=bool(getattr(defaults, "theme_surge_use_own_exit", True)),
         max_loss_pct=float(
             getattr(defaults, "theme_surge_max_loss", None) or DEFAULT_MAX_LOSS_PCT
+        ),
+        max_position_pct=float(
+            getattr(defaults, "theme_surge_max_position_pct", None)
+            or DEFAULT_MAX_POSITION_PCT
         ),
         stages=stages,
         use_trailing=bool(getattr(defaults, "theme_surge_use_trailing", True)),
@@ -193,18 +202,26 @@ def next_stage(
     가장 높은 도달 차수를 골라 그 아래 차수는 함께 완료 처리한다.
 
     Returns:
-        (차수 번호, 청산 비율%, 목표가). 도달한 차수가 없으면 None.
+        (최고 도달 차수, 누적 청산 비율%, 최고 차수 목표가). 도달한 차수가 없으면 None.
+        건너뛴 하위 차수의 청산 비율도 합산해 반환하므로, 호출부는 이 하나의
+        매도로 (하위 차수 포함) 도달분을 한 번에 처리하면 된다.
     """
     if not settings.stages or t_value <= 0 or avg_price <= 0:
         return None
 
-    reached: tuple[int, float, float] | None = None
+    top_index: int | None = None
+    top_target = 0.0
+    cumulative_pct = 0.0
     for index, (t_mult, sell_pct) in enumerate(settings.stages, start=1):
         target = avg_price + t_value * t_mult
         if current_price >= target and index not in completed_stages:
-            reached = (index, sell_pct, target)
+            top_index = index
+            top_target = target
+            cumulative_pct += sell_pct
 
-    return reached
+    if top_index is None:
+        return None
+    return top_index, cumulative_pct, top_target
 
 
 def trailing_stop_line(
@@ -251,9 +268,23 @@ def evaluate_exit(
     if avg_price <= 0 or current_price <= 0:
         return ExitDecision(False)
 
-    # 1. 당일 강제 청산 — 오버나이트 갭 리스크 차단
+    # 1. 당일 강제 청산 — 오버나이트 갭 리스크 차단.
+    #    단, 강제청산 시각에 +1T 이상 수익 중인 포지션은 GRACE_MIN 분만 추격 연장한다
+    #    (손실·소폭 수익 포지션은 예정대로 청산해 갭 리스크를 남기지 않는다).
     if settings.force_exit_enabled and now.time() >= settings.force_exit_time:
-        return ExitDecision(True, 100.0, f"당일 강제청산({settings.force_exit_time:%H:%M})")
+        in_profit = (
+            t_value
+            and t_value > 0
+            and current_price >= avg_price + t_value * FORCE_EXIT_PROFIT_GRACE_T
+        )
+        grace_deadline = (
+            datetime.combine(now.date(), settings.force_exit_time)
+            + timedelta(minutes=FORCE_EXIT_PROFIT_GRACE_MIN)
+        )
+        if not (in_profit and now < grace_deadline):
+            return ExitDecision(
+                True, 100.0, f"당일 강제청산({settings.force_exit_time:%H:%M})"
+            )
 
     # 2. 손절 — 진입 근거(눌림목)가 깨진 지점
     if stop_price and current_price <= stop_price:

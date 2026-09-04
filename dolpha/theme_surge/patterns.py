@@ -23,6 +23,7 @@ from .config import (
     MORNING_PULLBACK_MIN_BARS,
     MORNING_PULLBACK_MIN_PCT,
     MORNING_PULLBACK_VOLUME_RATIO_MAX,
+    PIVOT_MIN_LEFT_BARS,
     PIVOT_WINDOW,
     PULLBACK_MAX_PCT,
     PULLBACK_MIN_BARS,
@@ -71,6 +72,12 @@ def find_last_swing_high(
     스윙 고점으로 본다. 아직 좌우 봉이 채워지지 않은 최근 `exclude_last` 개 봉은
     확정되지 않았으므로 후보에서 제외한다.
 
+    좌측은 장 시작으로 잘려 `window` 개를 채우지 못할 수 있다. 이때 후보에서 빼면
+    장 초반(09:00~09:19)에 만들어진 고점이 그날 내내 전고점이 되지 못하므로,
+    좌측이 `PIVOT_MIN_LEFT_BARS` 개 이상이면 있는 만큼만 비교한다.
+    반면 우측은 시간이 지나면 채워지는 값이라, 다 채워지기 전에 인정하면 아직
+    확정되지 않은 고점을 전고점으로 쓰게 되므로 `window` 개를 그대로 요구한다.
+
     Returns:
         가장 최근 스윙 고점. 없으면 None.
     """
@@ -78,11 +85,11 @@ def find_last_swing_high(
         return None
 
     last_candidate = len(bars) - exclude_last - window
-    for i in range(last_candidate, window - 1, -1):
+    for i in range(last_candidate, PIVOT_MIN_LEFT_BARS - 1, -1):
         high = bars[i]["high"]
-        left = [bars[j]["high"] for j in range(i - window, i)]
+        left = [bars[j]["high"] for j in range(max(0, i - window), i)]
         right = [bars[j]["high"] for j in range(i + 1, i + 1 + window)]
-        if not left or not right:
+        if len(left) < PIVOT_MIN_LEFT_BARS or len(right) < window:
             continue
         if high >= max(left) and high >= max(right) and high > min(left + right):
             return SwingHigh(index=i, price=high)

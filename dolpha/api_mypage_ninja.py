@@ -15,6 +15,7 @@ from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from django.contrib.auth.models import AnonymousUser
 
 from myweb.models import User, UserProfile, TradingConfig, TradingDefaults, FavoriteStock, Company, StockAnalysis, StockOHLCV
+from dolpha.theme_surge.entry_stages import normalize_entry_stages
 
 
 mypage_router = Router()
@@ -110,6 +111,10 @@ class ResponseSchema(Schema):
     message: Optional[str] = None
     error: Optional[str] = None
 
+class ForceExitRequest(Schema):
+    stock_code: str
+    strategy_type: Optional[str] = None
+
 # 자동매매 기본값 설정 스키마
 class TradingDefaultsSchema(Schema):
     trading_mode: str = "turtle"
@@ -170,6 +175,8 @@ class TradingDefaultsSchema(Schema):
     # 급등테마주 청산 설정 (데이 트레이딩 전용)
     theme_surge_use_own_exit: bool = True
     theme_surge_max_loss: float = 1.0
+    theme_surge_max_position_pct: float = 20.0
+    theme_surge_entry_stages: List[dict] = [{"t": 0.0, "weight_pct": 100.0}]
     theme_surge_exit_stages: List[dict] = []
     theme_surge_use_trailing: bool = True
     theme_surge_trailing_start_t: float = 2.0
@@ -280,6 +287,8 @@ class TradingDefaultsResponseSchema(Schema):
     # 급등테마주 청산 설정 (데이 트레이딩 전용)
     theme_surge_use_own_exit: bool = True
     theme_surge_max_loss: float = 1.0
+    theme_surge_max_position_pct: float = 20.0
+    theme_surge_entry_stages: List[dict] = [{"t": 0.0, "weight_pct": 100.0}]
     theme_surge_exit_stages: List[dict] = []
     theme_surge_use_trailing: bool = True
     theme_surge_trailing_start_t: float = 2.0
@@ -641,6 +650,92 @@ def delete_trading_config_by_stock_code(request, stock_code: str, strategy_type:
         }
 
 
+@mypage_router.post("/trading-configs/force-exit")
+def force_exit_trading_config(request, data: ForceExitRequest):
+    """자동매매 설정 종목 강제청산 (시장가 즉시 매도)"""
+    try:
+        user = get_authenticated_user(request)
+        if not user:
+            return JsonResponse({"status": "error", "message": "인증이 필요합니다."}, status=401)
+
+        stock_code = data.stock_code.strip()
+        strategy_type = data.strategy_type.strip() if data.strategy_type else None
+
+        # 활성 설정 우선 조회
+        config_query = TradingConfig.objects.filter(user=user, stock_code=stock_code)
+        if strategy_type:
+            config_query = config_query.filter(strategy_type=strategy_type)
+        config = config_query.order_by("-is_active", "-updated_at").first()
+
+        from dolpha.trading_engine import TradingEngine, LAST_ORDER_ERROR
+        from dolpha.kis.trade import GetMyStockList, GetCurrentPrice
+        from dolpha.strategy_account import resolve_credential
+
+        target_strategy = config.strategy_type if config else (strategy_type or "mtt")
+
+        try:
+            credential = resolve_credential(user, target_strategy)
+        except Exception as cred_err:
+            return JsonResponse(
+                {"status": "error", "message": f"계좌 자격증명 확인 실패: {cred_err}"},
+                status=400,
+            )
+
+        kis_stocks = GetMyStockList(credential)
+        holding = next((s for s in kis_stocks if s.get("StockCode") == stock_code), None)
+        holding_qty = int(holding.get("StockAmt", 0)) if holding else 0
+        avg_price = float(holding.get("StockAvgPrice", 0)) if holding else 0
+
+        stock_name = (
+            (config.stock_name if config and config.stock_name else holding.get("StockName", stock_code))
+            if holding
+            else (config.stock_name if config else stock_code)
+        )
+
+        if holding_qty > 0:
+            if not config:
+                config = TradingConfig.objects.create(
+                    user=user,
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    strategy_type=target_strategy,
+                    trading_mode="manual",
+                    is_active=True,
+                )
+            current_price = float(GetCurrentPrice(stock_code, credential))
+            engine = TradingEngine(user=user)
+            sold = engine.execute_sell_order(
+                config=config,
+                reason="수동 강제청산 (시장가 매도)",
+                current_price=current_price,
+                holding_info={"qty": holding_qty, "avg_price": avg_price},
+            )
+            if not sold:
+                err_detail = LAST_ORDER_ERROR.get("sell", "")
+                err_msg = (
+                    f"시장가 매도 주문 실행 실패: {err_detail}"
+                    if err_detail
+                    else "시장가 매도 주문 실행에 실패했습니다."
+                )
+                return JsonResponse({"status": "error", "message": err_msg}, status=500)
+            return JsonResponse({
+                "status": "OK",
+                "message": f"{stock_name}({stock_code}) {holding_qty}주 시장가 매도 주문이 완료되었습니다.",
+                "sold_qty": holding_qty,
+            })
+        else:
+            if config:
+                engine = TradingEngine(user=user)
+                engine._deactivate_config(config)
+            return JsonResponse({
+                "status": "OK",
+                "message": f"{stock_name}({stock_code}) 보유 수량이 없어 설정을 비활성화했습니다.",
+                "sold_qty": 0,
+            })
+    except Exception as e:
+        return JsonResponse({"status": "error", "message": f"강제청산 처리 중 오류 발생: {str(e)}"}, status=500)
+
+
 # 자동매매 기본값 설정 API
 @mypage_router.get("/trading-defaults", response=TradingDefaultsResponseSchema)
 def get_trading_defaults(request):
@@ -712,6 +807,8 @@ def get_trading_defaults(request):
             'theme_surge_use_foreign_filter': defaults.theme_surge_use_foreign_filter,
             'theme_surge_use_own_exit': defaults.theme_surge_use_own_exit,
             'theme_surge_max_loss': defaults.theme_surge_max_loss,
+            'theme_surge_max_position_pct': defaults.theme_surge_max_position_pct,
+            'theme_surge_entry_stages': defaults.theme_surge_entry_stages,
             'theme_surge_exit_stages': defaults.theme_surge_exit_stages,
             'theme_surge_use_trailing': defaults.theme_surge_use_trailing,
             'theme_surge_trailing_start_t': defaults.theme_surge_trailing_start_t,
@@ -849,6 +946,8 @@ def save_trading_defaults(request, data: TradingDefaultsSchema):
         # 급등테마주 청산 설정 — 값 검증 후 저장 (잘못된 차수는 버린다)
         defaults.theme_surge_use_own_exit = data.theme_surge_use_own_exit
         defaults.theme_surge_max_loss = _clamp(data.theme_surge_max_loss, 0.1, 100.0)
+        defaults.theme_surge_max_position_pct = _clamp(data.theme_surge_max_position_pct, 1.0, 100.0)
+        defaults.theme_surge_entry_stages = normalize_entry_stages(data.theme_surge_entry_stages)
         defaults.theme_surge_exit_stages = _clean_exit_stages(data.theme_surge_exit_stages)
         defaults.theme_surge_use_trailing = data.theme_surge_use_trailing
         defaults.theme_surge_trailing_start_t = _clamp(data.theme_surge_trailing_start_t, 0.1, 100.0)
