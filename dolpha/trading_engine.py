@@ -18,11 +18,14 @@ autobot/tradingBot/autoTrading_Bot.py 를 Django 환경으로 포팅.
 """
 
 import traceback
-from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
+from datetime import date as date_cls, datetime, timedelta
 from dataclasses import replace
 from decimal import Decimal
+from typing import NamedTuple
 
 from django.db import transaction
+from django.db.models import Sum
 from django.utils import timezone as tz
 
 from myweb.models import TradingConfig, TradeEntry, TradingSummary, StockMinuteOhlcv
@@ -33,9 +36,19 @@ from dolpha.order_log import order_log
 from dolpha.stockCommon import GetOhlcv, GetNowDateStr
 from dolpha.strategy_account import get_active_accounts, resolve_account
 
+if TYPE_CHECKING:
+    from dolpha.theme_surge.exit_rules import ExitSettings
+
 # 분봉 백필 정책
 BACKFILL_STALE_MINUTES = 3        # 마지막 분봉이 이 시간보다 낡으면 백필을 다시 시도
 MAX_BACKFILLS_PER_CYCLE = 5       # 한 사이클에서 허용할 풀 백필 횟수 (KIS 호출량 상한)
+
+
+class NetPosition(NamedTuple):
+    """한 전략(TradingConfig)의 장부상 순보유."""
+
+    qty: int          # BUY FILLED - SELL FILLED
+    avg_price: float   # 총 매수 기준 가중평균 (0.0 = 보유 없음)
 
 
 def _pop_order_error(side: str) -> str:
@@ -58,6 +71,12 @@ class TradingEngine:
     # max_instances=1 스케줄러가 나머지 분을 통째로 스킵한다.
     _backfill_done_date: str = ""
     _backfilled_at: dict[str, datetime] = {}
+    # 오버나이트 관련 캐시는 모두 KST 날짜 기준으로 하루 한 번만 계산한다.
+    #  _overnight_decision: (config.id, KST date) → 이월 여부 (매 사이클 재평가·중복 조회 방지)
+    #  _days_held_cache:    (config.id, KST date) → 보유 거래일 수 (달력 루프·휴장일 조회 반복 방지)
+    _overnight_cache_date: str = ""
+    _overnight_decision: dict[int, bool] = {}
+    _days_held_cache: dict[int, int] = {}
 
     def __init__(self, user):
         """
@@ -109,14 +128,50 @@ class TradingEngine:
     # DB 기반 매수 이력 조회
     # ──────────────────────────────────────────────
 
-    def _buy_entries(self, stock_code: str):
-        """해당 종목의 BUY/FILLED TradeEntry 쿼리셋 반환."""
+    def _buy_entries(self, config: TradingConfig):
+        """이 전략(config)의 BUY/FILLED TradeEntry 쿼리셋 반환.
+
+        종목코드가 아니라 trading_config 로 필터한다 — 같은 종목이 여러 전략에
+        동시에 편입돼 있어도 각 전략의 장부는 완전히 분리된다.
+        """
         return TradeEntry.objects.filter(
             user=self.user,
-            stock_code=stock_code,
+            trading_config=config,
             trade_type="BUY",
             status="FILLED",
         ).order_by("filled_at")
+
+    def _config_net_position(self, config: TradingConfig) -> "NetPosition":
+        """이 전략의 장부상 순보유 수량과 평단가를 반환합니다.
+
+        계좌 잔고(GetMyStockList)는 같은 종목을 보유한 모든 전략의 수량이 합산돼
+        오므로, 전략별 청산·분할익절은 반드시 이 장부 기준 수량으로 실행해야 한다.
+
+        net_qty 는 부분매도를 차감한 잔량, avg_price 는 총 매수 기준 가중평균이다
+        (평균원가법상 잔량의 단가와 같으므로 부분매도를 차감하지 않는다).
+
+        Returns:
+            NetPosition(qty, avg_price). 보유가 없으면 NetPosition(0, 0.0).
+        """
+        buys = list(self._buy_entries(config))
+        if not buys:
+            return NetPosition(0, 0.0)
+
+        buy_qty = sum(e.filled_quantity for e in buys)
+        sold_qty = (
+            TradeEntry.objects.filter(
+                user=self.user,
+                trading_config=config,
+                trade_type="SELL",
+                status="FILLED",
+            ).aggregate(total=Sum("filled_quantity"))["total"]
+            or 0
+        )
+        net_qty = max(0, buy_qty - sold_qty)
+
+        total_amount = sum(float(e.filled_price) * e.filled_quantity for e in buys)
+        avg_price = total_amount / buy_qty if buy_qty > 0 else 0.0
+        return NetPosition(net_qty, avg_price)
 
     def _deactivate_config(self, config: TradingConfig) -> None:
         """
@@ -127,7 +182,7 @@ class TradingEngine:
         - is_active → False
         """
         stock_code = config.stock_code
-        self._buy_entries(stock_code).update(status="CANCELLED")
+        self._buy_entries(config).update(status="CANCELLED")
         config.trailing_stop_peak_price = None
         config.staged_exit_completed_stages = []
         # 급등테마주 청산 좌표도 함께 초기화 — 다음 진입은 그때의 눌림 저점으로 다시 잡는다
@@ -148,23 +203,19 @@ class TradingEngine:
         self._backfilled_at.pop(stock_code, None)
         print(f"[{config.stock_name}] 포지션 청산 완료 — 자동매매 비활성화")
 
-    def get_entry_count(self, stock_code: str) -> int:
-        """현재 보유 매수 횟수 (BUY/FILLED 체결 건수)."""
-        return self._buy_entries(stock_code).count()
+    def get_entry_count(self, config: TradingConfig) -> int:
+        """이 전략의 현재 보유 매수 횟수 (BUY/FILLED 체결 건수)."""
+        return self._buy_entries(config).count()
 
-    def get_last_entry_price(self, stock_code: str) -> float | None:
-        """마지막 매수 체결가."""
-        entry = self._buy_entries(stock_code).last()
+    def get_last_entry_price(self, config: TradingConfig) -> float | None:
+        """이 전략의 마지막 매수 체결가."""
+        entry = self._buy_entries(config).last()
         return float(entry.filled_price) if entry else None
 
-    def get_average_price(self, stock_code: str) -> float | None:
-        """가중 평균 매수가."""
-        entries = self._buy_entries(stock_code)
-        if not entries.exists():
-            return None
-        total_amount = sum(float(e.filled_price) * e.filled_quantity for e in entries)
-        total_qty = sum(e.filled_quantity for e in entries)
-        return total_amount / total_qty if total_qty > 0 else None
+    def get_average_price(self, config: TradingConfig) -> float | None:
+        """이 전략의 가중 평균 매수가 (없으면 None)."""
+        pos = self._config_net_position(config)
+        return pos.avg_price if pos.avg_price > 0 else None
 
     # ──────────────────────────────────────────────
     # ATR 계산
@@ -332,7 +383,7 @@ class TradingEngine:
         self, config: TradingConfig, total_amount: float
     ) -> float:
         """현재 진입 차수에 해당하는 증분 금액을 반환합니다."""
-        current_count = self.get_entry_count(config.stock_code)
+        current_count = self.get_entry_count(config)
         amounts = self.calculate_pyramiding_amounts(config, total_amount)
         print(
             f"[{config.stock_name}] 진입 차수={current_count}, 금액 배열={amounts}"
@@ -646,7 +697,7 @@ class TradingEngine:
         try:
             pyramid_count   = config.pyramiding_count or 0
             pyramid_entries = config.pyramiding_entries or []
-            current_count   = self.get_entry_count(config.stock_code)
+            current_count   = self.get_entry_count(config)
 
             if pyramid_count <= 0 or not pyramid_entries:
                 return False
@@ -907,6 +958,148 @@ class TradingEngine:
     # 급등테마주 전용 청산
     # ──────────────────────────────────────────────
 
+    @staticmethod
+    def _roll_overnight_caches(today: date_cls) -> None:
+        """KST 날짜가 바뀌면 보유일·오버나이트 판정 캐시를 비운다."""
+        stamp = today.isoformat()
+        if TradingEngine._overnight_cache_date != stamp:
+            TradingEngine._overnight_cache_date = stamp
+            TradingEngine._overnight_decision = {}
+            TradingEngine._days_held_cache = {}
+
+    def _theme_days_held(self, config: TradingConfig) -> int:
+        """첫 매수 체결일부터 오늘(KST)까지의 보유 거래일 수 (당일 진입이면 1).
+
+        결과는 (config.id, KST date) 단위로 캐시한다 — 매 사이클 달력 루프와
+        휴장일 조회를 반복하지 않도록.
+        """
+        today = tz.localdate()
+        self._roll_overnight_caches(today)
+        cached = TradingEngine._days_held_cache.get(config.id)
+        if cached is not None:
+            return cached
+
+        first = self._buy_entries(config).first()
+        if not first or not first.filled_at:
+            days = 1
+        else:
+            from dolpha.theme_surge.exit_finalizer import count_trading_days
+
+            days = count_trading_days(tz.localtime(first.filled_at).date(), today)
+
+        TradingEngine._days_held_cache[config.id] = days
+        return days
+
+    def _theme_overnight_signal(
+        self, config: TradingConfig, settings: "ExitSettings", now: datetime, days_held: int
+    ):
+        """강제청산 시각의 수급 조건을 실시간 평가한 OvernightSignal 을 반환합니다.
+
+        평가 대상이 아니면(오버나이트 미사용·시각 이전·보유기간 만료) None.
+        하루 한 번만 평가하고 (config.id, KST date)로 캐시한다 — 매 사이클 재평가로
+        결정이 뒤집히거나 KIS 매매동향을 반복 호출하지 않도록.
+        """
+        if not settings.overnight_enabled:
+            return None
+        if now.time() < settings.force_exit_time:
+            return None
+        # 보유기간 상한에 도달했으면 어차피 만료 강제청산 — 조회 불필요
+        if days_held >= settings.overnight_max_days:
+            return None
+
+        self._roll_overnight_caches(tz.localdate())
+        cached = TradingEngine._overnight_decision.get(config.id)
+        if cached is not None:
+            return cached
+
+        from dolpha.theme_surge.overnight import OvernightSignal, evaluate_overnight_signal
+
+        try:
+            signal = evaluate_overnight_signal(
+                config.stock_code,
+                settings.overnight_conditions,
+                settings.overnight_min_count,
+            )
+        except Exception as e:  # noqa: BLE001 — 조회 실패 시 안전하게 청산
+            from types import MappingProxyType
+
+            signal = OvernightSignal(
+                available=False, met=MappingProxyType({}), met_count=0,
+                required=settings.overnight_min_count, should_hold=False,
+                detail=f"판정 오류: {e}",
+            )
+
+        TradingEngine._overnight_decision[config.id] = signal
+        print(
+            f"[{config.stock_name}] 오버나이트 판정({days_held}일차): {signal.detail}"
+            f" → {'익일 이월' if signal.should_hold else '당일 청산'}"
+        )
+        return signal
+
+    @staticmethod
+    def _classify_exit_decision(decision, overnight_signal, days_held: int) -> str:
+        """강제청산 시각의 판정을 타임라인 표시용 카테고리로 분류합니다."""
+        reason = decision.reason or ""
+        if decision.should_exit:
+            if "보유기간 만료" in reason:
+                return "max_days"
+            if "손절" in reason:
+                return "stop_loss"
+            if "트레일링" in reason:
+                return "trailing"
+            if decision.stage is not None or (0 < decision.sell_pct < 100):
+                return "staged"
+            return "force_exit"
+        if overnight_signal is not None and overnight_signal.should_hold:
+            return "overnight"
+        return "hold"
+
+    def _record_theme_exit_signal(
+        self, config: TradingConfig, settings: "ExitSettings", now: datetime,
+        days_held: int, decision, overnight_signal,
+    ) -> None:
+        """강제청산 시각의 청산/이월 판정을 ThemeExitSignal 로 기록합니다 (타임라인용).
+
+        (user, date, stock_code) 당 1행이며 장중 마지막 판정으로 갱신된다.
+        """
+        from myweb.models import ThemeEntrySignal, ThemeExitSignal
+
+        today = tz.localdate()
+        category = self._classify_exit_decision(decision, overnight_signal, days_held)
+
+        meta = (
+            ThemeEntrySignal.objects
+            .filter(user=self.user, stock_code=config.stock_code, date=today)
+            .order_by("-checked_at")
+            .values("tics_id", "theme_name")
+            .first()
+        ) or {}
+
+        fields = {
+            "checked_at": now,
+            "tics_id": meta.get("tics_id", 0),
+            "theme_name": meta.get("theme_name", ""),
+            "stock_name": config.stock_name,
+            "force_exit_time": settings.force_exit_time,
+            "days_held": days_held,
+            "decision": category,
+            "reason": (decision.reason or "")[:300],
+            "overnight_evaluated": overnight_signal is not None,
+            "overnight_available": bool(overnight_signal and overnight_signal.available),
+            "overnight_conditions": list(settings.overnight_conditions),
+            "overnight_met": dict(overnight_signal.met) if overnight_signal else {},
+            "overnight_met_count": overnight_signal.met_count if overnight_signal else 0,
+            "overnight_required": overnight_signal.required if overnight_signal else 0,
+            "overnight_detail": (overnight_signal.detail if overnight_signal else "")[:500],
+        }
+        try:
+            ThemeExitSignal.objects.update_or_create(
+                user=self.user, date=today, stock_code=config.stock_code,
+                defaults=fields,
+            )
+        except Exception as e:  # noqa: BLE001 — 기록 실패가 매매를 막아선 안 된다
+            print(f"[{config.stock_name}] 청산 판정 기록 실패: {e}")
+
     def _evaluate_theme_exit(
         self, config: TradingConfig, current_price: float, holding_info: dict
     ):
@@ -955,6 +1148,14 @@ class TradingEngine:
             except Exception as e:
                 print(f"[{config.stock_name}] 트레일링 최저점 조회 실패: {e}")
 
+        # 오버나이트가 꺼져 있으면 보유일 계산·수급 조회를 아예 건너뛴다 (기존 동작 유지)
+        if settings.overnight_enabled:
+            days_held = self._theme_days_held(config)
+            overnight_signal = self._theme_overnight_signal(config, settings, now, days_held)
+        else:
+            days_held, overnight_signal = 1, None
+        overnight_hold = bool(overnight_signal and overnight_signal.should_hold)
+
         try:
             decision = evaluate_exit(
                 settings,
@@ -967,10 +1168,18 @@ class TradingEngine:
                 trailing_started=config.theme_trailing_started,
                 trailing_line=trailing_line,
                 now=now,
+                days_held=days_held,
+                overnight_hold=overnight_hold,
             )
         except Exception as e:
             print(f"[{config.stock_name}] 급등테마주 청산 판정 오류: {e}")
             decision = ExitDecision(False)
+
+        # 강제청산 시각 이후면 이 사이클의 판정(청산/이월)을 타임라인용으로 기록한다
+        if settings.force_exit_enabled and now.time() >= settings.force_exit_time:
+            self._record_theme_exit_signal(
+                config, settings, now, days_held, decision, overnight_signal
+            )
 
         self._theme_exit_cache = (cache_key, decision)
         return decision
@@ -1235,7 +1444,7 @@ class TradingEngine:
                 config = TradingConfig.objects.select_for_update().get(pk=config.pk)
 
                 # 잠금 후 진입 차수 재확인 — 동시 사이클이 먼저 매수했을 경우를 방어
-                entry_count = self.get_entry_count(stock_code)
+                entry_count = self.get_entry_count(config)
                 max_entries = (config.pyramiding_count or 0) + 1
                 if entry_count >= max_entries:
                     print(
@@ -1368,7 +1577,7 @@ class TradingEngine:
             avg_price = (
                 holding_info["avg_price"]
                 if holding_info and holding_info["avg_price"] > 0
-                else self.get_average_price(stock_code)
+                else self.get_average_price(config)
             )
 
             profit_loss = None
@@ -1484,7 +1693,7 @@ class TradingEngine:
             avg_price   = (
                 holding_info["avg_price"]
                 if holding_info and holding_info["avg_price"] > 0
-                else self.get_average_price(stock_code)
+                else self.get_average_price(config)
             )
 
             profit_loss = None
@@ -1876,6 +2085,37 @@ class TradingEngine:
                 return {"qty": int(s["StockAmt"]), "avg_price": float(s["StockAvgPrice"])}
         return {"qty": 0, "avg_price": 0.0}
 
+    def _resolve_holding_info(self, config: TradingConfig, account_info: dict) -> dict:
+        """계좌 잔고와 이 전략의 장부를 대조해 '이 전략 몫'의 보유 정보를 만듭니다.
+
+        같은 종목을 여러 전략이 보유하면 계좌 잔고에는 합산 수량이 잡히므로,
+        청산·분할익절이 다른 전략 몫까지 팔지 않도록 장부 순보유로 상한을 둔다.
+        계좌에 실제로 존재하는 수량도 넘을 수 없다(외부 매도 방어).
+
+        Returns:
+            {"qty": 이 전략 몫 수량, "avg_price": 이 전략 평단가}
+        """
+        db_qty, db_avg = self._config_net_position(config)  # NetPosition 언팩
+        if db_qty <= 0:
+            return {"qty": 0, "avg_price": 0.0}
+
+        account_qty = account_info["qty"]
+        if account_qty == 0:
+            # 계좌 스냅샷에 이 종목이 없다(다른 서브계좌·조회 실패·페이지 누락 등).
+            # 장부상 보유 중인데 수량을 0으로 깎으면 손절·강제청산이 조용히 스킵되므로,
+            # 장부 수량을 신뢰한다. 실제로 계좌에 없으면 매도 주문이 거부되며 로그가 남는다.
+            print(
+                f"[{config.stock_name}] 계좌 스냅샷에 없음 — 장부 순보유 {db_qty}주로 청산 판정 진행"
+            )
+            return {"qty": db_qty, "avg_price": db_avg or account_info["avg_price"]}
+
+        if account_qty < db_qty:
+            print(
+                f"[{config.stock_name}] 계좌 수량({account_qty})이 장부 순보유({db_qty})보다 적음"
+                " — 계좌 수량으로 제한"
+            )
+        return {"qty": min(db_qty, account_qty), "avg_price": db_avg or account_info["avg_price"]}
+
     def _reconcile_positions(self, holdings_by_account: dict[str, list[dict]]) -> None:
         """
         실제 계좌 보유 종목과 DB 포지션을 대조하여 불일치 설정을 비활성화합니다.
@@ -1888,6 +2128,12 @@ class TradingEngine:
         주의: 전략마다 계좌가 다를 수 있으므로 반드시 "그 전략의 계좌" 보유 목록과
         대조한다. 전 계좌를 합쳐 비교하거나 다른 계좌와 비교하면 멀쩡한 포지션을
         비활성화하게 된다. 조회에 실패한 계좌의 설정은 건드리지 않는다.
+
+        한계: 판정 단위는 여전히 종목코드다. 같은 종목을 두 전략이 보유한 상태에서
+        한 전략 몫만 엔진 밖에서 매도되면(계좌엔 나머지 전략 수량이 남아 있음)
+        여기서는 감지하지 못한다. 이 경우 _resolve_holding_info 가 장부 순보유와
+        계좌 수량 중 작은 값으로 청산 수량을 제한하므로 과매도는 없으나,
+        그 전략의 잔여 장부만큼 과소매도(잔량 방치)가 생길 수 있다.
         """
         held_codes_by_account = {
             key: {s["StockCode"] for s in stocks}
@@ -1895,7 +2141,7 @@ class TradingEngine:
         }
 
         for config in list(TradingConfig.objects.filter(user=self.user, is_active=True)):
-            if not self._buy_entries(config.stock_code).exists():
+            if not self._buy_entries(config).exists():
                 continue
 
             try:
@@ -2022,9 +2268,12 @@ class TradingEngine:
 
                 # 종목 레벨 캐시: GetCurrentPrice 1회 호출 후 재사용
                 current_price = float(KIS.GetCurrentPrice(config.stock_code, self._credential_for(config)))
-                holding_info = self._extract_holding_info(
+                account_info = self._extract_holding_info(
                     config.stock_code, holdings_by_account.get(account_key) or []
                 )
+                # 같은 종목이 다른 전략에도 편입돼 있으면 계좌 수량이 합산돼 오므로,
+                # 이 전략의 장부 순보유로 잘라 낸 값을 사이클 전체에서 사용한다.
+                holding_info = self._resolve_holding_info(config, account_info)
 
                 # D-1 완성 분봉 수집 (현재 분은 미완성이므로 1분 전 봉 저장)
                 self._collect_prev_minute_bar(config.stock_code)

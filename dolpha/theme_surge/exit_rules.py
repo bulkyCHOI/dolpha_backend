@@ -24,6 +24,9 @@ from .config import (
     DEFAULT_FORCE_EXIT_TIME,
     DEFAULT_MAX_LOSS_PCT,
     DEFAULT_MAX_POSITION_PCT,
+    DEFAULT_OVERNIGHT_ENABLED,
+    DEFAULT_OVERNIGHT_MAX_DAYS,
+    DEFAULT_OVERNIGHT_MIN_COUNT,
     DEFAULT_TRAILING_BAR_COUNT,
     DEFAULT_TRAILING_BAR_UNIT,
     DEFAULT_TRAILING_START_T,
@@ -32,6 +35,7 @@ from .config import (
     PULLBACK_MAX_PCT,
     TRAILING_BAR_UNIT_MINUTES,
 )
+from .overnight import normalize_conditions
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,11 @@ class ExitSettings:
     trailing_bar_count: int
     force_exit_enabled: bool
     force_exit_time: time_cls
+    # 오버나이트 보유 — 강제청산 시각의 수급 조건 충족 시 익일로 이월
+    overnight_enabled: bool
+    overnight_conditions: tuple[str, ...]     # 평가할 조건 키 (foreign/institution/program/shinhan_top5)
+    overnight_min_count: int                  # 이월에 필요한 충족 개수
+    overnight_max_days: int                   # 이 보유 거래일차에 도달하면 조건 무관 강제청산
 
 
 @dataclass(frozen=True)
@@ -112,9 +121,16 @@ def load_exit_settings(defaults) -> ExitSettings:
             trailing_bar_count=DEFAULT_TRAILING_BAR_COUNT,
             force_exit_enabled=True,
             force_exit_time=DEFAULT_FORCE_EXIT_TIME,
+            overnight_enabled=DEFAULT_OVERNIGHT_ENABLED,
+            overnight_conditions=tuple(normalize_conditions(None)),
+            overnight_min_count=DEFAULT_OVERNIGHT_MIN_COUNT,
+            overnight_max_days=DEFAULT_OVERNIGHT_MAX_DAYS,
         )
 
     stages = normalize_stages(getattr(defaults, "theme_surge_exit_stages", None))
+    overnight_conditions = tuple(
+        normalize_conditions(getattr(defaults, "theme_surge_overnight_conditions", None))
+    )
     unit = getattr(defaults, "theme_surge_trailing_bar_unit", None)
     if unit not in TRAILING_BAR_UNIT_MINUTES:
         unit = DEFAULT_TRAILING_BAR_UNIT
@@ -141,6 +157,27 @@ def load_exit_settings(defaults) -> ExitSettings:
         force_exit_enabled=bool(getattr(defaults, "theme_surge_force_exit_enabled", True)),
         force_exit_time=getattr(defaults, "theme_surge_force_exit_time", None)
         or DEFAULT_FORCE_EXIT_TIME,
+        overnight_enabled=bool(
+            getattr(defaults, "theme_surge_overnight_enabled", DEFAULT_OVERNIGHT_ENABLED)
+        ),
+        overnight_conditions=overnight_conditions,
+        overnight_min_count=max(
+            1,
+            min(
+                int(
+                    getattr(defaults, "theme_surge_overnight_min_count", None)
+                    or DEFAULT_OVERNIGHT_MIN_COUNT
+                ),
+                len(overnight_conditions),
+            ),
+        ),
+        overnight_max_days=max(
+            1,
+            int(
+                getattr(defaults, "theme_surge_overnight_max_days", None)
+                or DEFAULT_OVERNIGHT_MAX_DAYS
+            ),
+        ),
     )
 
 
@@ -256,35 +293,50 @@ def evaluate_exit(
     trailing_started: bool,
     trailing_line: float | None,
     now: datetime,
+    days_held: int = 1,
+    overnight_hold: bool = False,
 ) -> ExitDecision:
     """급등테마주 포지션의 청산 여부를 판정한다.
 
     우선순위:
-      1. 당일 강제 청산 시각 도달        → 전량
-      2. 손절 (눌림 저점 이탈)           → 전량
-      3. 트레일링 스탑 (nT 초과 후 추적) → 잔량 전량
-      4. 분할 익절 (nT 도달)             → 차수별 비율
+      1. 보유기간 만료 (오버나이트 사용 시, days_held >= overnight_max_days) → 전량
+      2. 당일 강제 청산 시각 도달 (오버나이트 이월 조건 미충족 시)          → 전량
+      3. 손절 (눌림 저점 이탈)                                             → 전량
+      4. 트레일링 스탑 (nT 초과 후 추적)                                   → 잔량 전량
+      5. 분할 익절 (nT 도달)                                               → 차수별 비율
+
+    Args:
+        days_held:      첫 매수 체결일부터 오늘까지의 보유 거래일 수 (당일 진입 = 1)
+        overnight_hold: 강제청산 시각에 수급 조건이 충족돼 익일 이월로 판정됐는가
     """
     if avg_price <= 0 or current_price <= 0:
         return ExitDecision(False)
 
-    # 1. 당일 강제 청산 — 오버나이트 갭 리스크 차단.
-    #    단, 강제청산 시각에 +1T 이상 수익 중인 포지션은 GRACE_MIN 분만 추격 연장한다
-    #    (손실·소폭 수익 포지션은 예정대로 청산해 갭 리스크를 남기지 않는다).
+    # 1·2. 강제 청산 시각 처리 — 오버나이트 갭 리스크 차단.
     if settings.force_exit_enabled and now.time() >= settings.force_exit_time:
-        in_profit = (
-            t_value
-            and t_value > 0
-            and current_price >= avg_price + t_value * FORCE_EXIT_PROFIT_GRACE_T
-        )
-        grace_deadline = (
-            datetime.combine(now.date(), settings.force_exit_time)
-            + timedelta(minutes=FORCE_EXIT_PROFIT_GRACE_MIN)
-        )
-        if not (in_profit and now < grace_deadline):
+        # 1. 보유 거래일이 상한에 도달하면 조건과 무관하게 전량 청산
+        if settings.overnight_enabled and days_held >= settings.overnight_max_days:
             return ExitDecision(
-                True, 100.0, f"당일 강제청산({settings.force_exit_time:%H:%M})"
+                True, 100.0, f"보유기간 만료 강제청산({days_held}일차)"
             )
+
+        # 2. 수급 조건 충족(overnight_hold) → 강제청산 건너뛰고 익일 이월.
+        #    미충족이면 예정대로 청산하되, +1T 이상 수익 중이면 GRACE_MIN 분 추격 연장.
+        holding_overnight = settings.overnight_enabled and overnight_hold
+        if not holding_overnight:
+            in_profit = (
+                t_value
+                and t_value > 0
+                and current_price >= avg_price + t_value * FORCE_EXIT_PROFIT_GRACE_T
+            )
+            grace_deadline = (
+                datetime.combine(now.date(), settings.force_exit_time)
+                + timedelta(minutes=FORCE_EXIT_PROFIT_GRACE_MIN)
+            )
+            if not (in_profit and now < grace_deadline):
+                return ExitDecision(
+                    True, 100.0, f"당일 강제청산({settings.force_exit_time:%H:%M})"
+                )
 
     # 2. 손절 — 진입 근거(눌림목)가 깨진 지점
     if stop_price and current_price <= stop_price:

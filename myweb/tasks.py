@@ -417,6 +417,18 @@ def collect_investor_flow_snapshots():
         traceback.print_exc()
 
 
+def finalize_theme_exit_signals():
+    """장 마감 후 아직 보유 중인 급등테마주 포지션을 '오버나이트'로 확정 기록 (타임라인용)."""
+    from dolpha.theme_surge.exit_finalizer import finalize_theme_exit_signals as _finalize
+
+    try:
+        result = _finalize()
+        _slog(f"[급등테마 청산확정] {result}")
+    except Exception as e:
+        _slog(f"[급등테마 청산확정] 오류: {e}")
+        traceback.print_exc()
+
+
 def _run_pipeline_1535():
     run_data_collection_pipeline("15시")
 
@@ -526,6 +538,14 @@ def start():
         15, 32,
         "theme_surge_cleanup",
         "급등테마주 미진입 후보 비활성화",
+    )
+
+    # ── 급등테마주 청산/오버나이트 확정 (장 마감 직후, 매매동향 스냅샷 15:29 이후) ──
+    add_cron_job(
+        finalize_theme_exit_signals,
+        15, 31,
+        "theme_surge_exit_finalize",
+        "급등테마주 장 마감 시점 보유 포지션 오버나이트 확정",
     )
 
     # ── 매매동향 스냅샷 (KIS REAL 키 설정 시에만 등록, investor_flow API는 REAL 모드 고정) ──

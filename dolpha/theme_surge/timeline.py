@@ -55,17 +55,21 @@ def build_timeline(
     themes = _build_themes(snapshots, labels)
     _attach_leaders(target_date, themes)
     signals = _build_signals(target_date, user) if user is not None else []
+    exits = _build_exits(target_date, user) if user is not None else []
 
     return {
         "date": target_date.isoformat(),
         "slots": labels,
         "themes": themes,
         "signals": signals,
+        "exits": exits,
         "summary": {
             "theme_count": len(themes),
             "surge_theme_count": len(surge_theme_ids),
             "signal_count": len(signals),
             "entry_count": sum(1 for s in signals if s["executed"]),
+            "exit_count": len(exits),
+            "overnight_count": sum(1 for e in exits if e["decision"] == "overnight"),
             "scanned_slots": len({s.slot_time for s in snapshots}),
         },
     }
@@ -182,6 +186,41 @@ def _build_signals(target_date: date_cls, user) -> list[dict]:
             "passed": row.passed,
             "executed": row.executed,
             "reason": row.reason,
+        }
+        for row in rows
+    ]
+
+
+def _build_exits(target_date: date_cls, user) -> list[dict]:
+    """강제청산/오버나이트 이월 판정을 타임라인 마커용으로 변환한다.
+
+    마커는 항상 마지막 슬롯(장 마감)에 찍는다 — 그 시점에 포지션의 당일 운명
+    (청산 완료 / 익일 이월)이 확정되기 때문이다. 실제 판정 시각은 force_exit_time
+    필드로 함께 전달한다.
+    """
+    from myweb.models import ThemeExitSignal
+
+    rows = ThemeExitSignal.objects.filter(user=user, date=target_date).order_by("stock_code")
+    close_slot = _label(MARKET_CLOSE)
+
+    return [
+        {
+            "slot": close_slot,
+            "force_exit_time": row.force_exit_time.strftime("%H:%M"),
+            "tics_id": row.tics_id,
+            "theme_name": row.theme_name,
+            "stock_code": row.stock_code,
+            "stock_name": row.stock_name,
+            "days_held": row.days_held,
+            "decision": row.decision,
+            "reason": row.reason,
+            "overnight_evaluated": row.overnight_evaluated,
+            "overnight_available": row.overnight_available,
+            "overnight_conditions": row.overnight_conditions,
+            "overnight_met": row.overnight_met,
+            "overnight_met_count": row.overnight_met_count,
+            "overnight_required": row.overnight_required,
+            "overnight_detail": row.overnight_detail,
         }
         for row in rows
     ]
