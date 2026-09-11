@@ -34,6 +34,11 @@ def default_theme_surge_exit_stages():
     ]
 
 
+def default_theme_surge_overnight_conditions():
+    """급등테마주 오버나이트 이월 판정에 쓸 수급 조건 키 (기본: 4개 전부)."""
+    return ["foreign", "institution", "program", "shinhan_top5"]
+
+
 def default_manual_positions():
     return [100]
 
@@ -524,6 +529,17 @@ class TradingDefaults(models.Model):
         default=default_theme_surge_force_exit_time
     )  # 강제 청산 시각 (오버나이트 갭 리스크 차단)
 
+    # ── 급등테마주 오버나이트 보유 ───────────────────────────
+    # 강제청산 시각에 아래 수급 조건 중 지정 개수 이상이 충족되면 잔량을 익일로
+    # 이월한다. 다음 날에도 같은 조건을 재평가하고, 보유 거래일이 상한에 도달하면
+    # 조건과 무관하게 전량 청산한다.
+    theme_surge_overnight_enabled = models.BooleanField(default=False)  # 수급 충족 시 익일 이월
+    theme_surge_overnight_conditions = models.JSONField(
+        default=default_theme_surge_overnight_conditions, blank=True
+    )  # 평가할 조건 키 ["foreign","institution","program","shinhan_top5"]
+    theme_surge_overnight_min_count = models.IntegerField(default=2)  # 이월에 필요한 충족 개수
+    theme_surge_overnight_max_days = models.IntegerField(default=3)   # 이 보유 거래일차에 조건 무관 강제청산
+
     # ── 종목 화면 재무 필터 기본값 ───────────────────────────
     # MTT · 52주 신고가 등 종목 목록 화면의 재무 필터 초기값.
     # null 이면 해당 조건을 걸지 않는다(= 전체 표시).
@@ -884,6 +900,63 @@ class ThemeEntrySignal(models.Model):
     def __str__(self):
         status = "진입" if self.executed else ("충족" if self.passed else "대기")
         return f"{self.checked_at:%H:%M} {self.stock_name} [{status}]"
+
+
+class ThemeExitSignal(models.Model):
+    """급등테마주 포지션의 강제 청산 시각 판정 로그.
+
+    강제 청산 시각에 '당일 청산 / 익일 이월(오버나이트)' 중 무엇을 골랐는지와,
+    오버나이트를 평가했다면 그 수급 4조건 분석 결과를 남겨 타임라인에 표시한다.
+    (user, date, stock_code) 당 하나이며 장중 마지막 판정으로 갱신된다.
+    """
+
+    DECISIONS = [
+        ("overnight", "익일 이월"),
+        ("force_exit", "당일 강제청산"),
+        ("max_days", "보유기간 만료 청산"),
+        ("stop_loss", "손절 청산"),
+        ("trailing", "트레일링 청산"),
+        ("staged", "분할 익절"),
+        ("hold", "유예/보류"),
+    ]
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="theme_exit_signals"
+    )
+    date = models.DateField(db_index=True)
+    checked_at = models.DateTimeField()
+    tics_id = models.IntegerField(default=0)
+    theme_name = models.CharField(max_length=100, blank=True)
+    stock_code = models.CharField(max_length=10)
+    stock_name = models.CharField(max_length=100)
+
+    force_exit_time = models.TimeField()
+    days_held = models.IntegerField(default=1)          # 보유 거래일 수 (진입일 = 1)
+    decision = models.CharField(max_length=20, choices=DECISIONS)
+    reason = models.CharField(max_length=300, blank=True)
+
+    # 오버나이트 수급 분석 (평가한 경우에만 채워진다)
+    overnight_evaluated = models.BooleanField(default=False)
+    overnight_available = models.BooleanField(default=False)  # 4조건 조회 성공 여부
+    overnight_conditions = models.JSONField(default=list, blank=True)  # 평가한 조건 키
+    overnight_met = models.JSONField(default=dict, blank=True)         # {조건키: 충족여부}
+    overnight_met_count = models.IntegerField(default=0)
+    overnight_required = models.IntegerField(default=0)
+    overnight_detail = models.CharField(max_length=500, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "theme_exit_signal"
+        ordering = ["-checked_at"]
+        unique_together = ["user", "date", "stock_code"]
+        indexes = [
+            models.Index(fields=["user", "date"], name="idx_txs_user_date"),
+        ]
+
+    def __str__(self):
+        return f"{self.checked_at:%H:%M} {self.stock_name} [{self.get_decision_display()}]"
 
 
 class DailyAccountSnapshot(models.Model):

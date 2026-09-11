@@ -127,6 +127,16 @@ DEFAULT_FORCE_EXIT_TIME = time(15, 20)  # 당일 강제 청산 시각 (오버나
 FORCE_EXIT_PROFIT_GRACE_T = 1.0       # P2: 강제청산 시각에 평단 대비 +이 배수(T) 이상 수익이면
 FORCE_EXIT_PROFIT_GRACE_MIN = 5      #     강제청산을 이 분(分)만큼 연장 (손실 포지션은 즉시 청산)
 
+# ── 오버나이트 보유 (강제청산 시각의 수급 조건 충족 시 익일로 이월) ──
+# 강제청산 시각에 아래 조건 중 유저가 지정한 개수 이상이 충족되면 잔량을 익일로
+# 이월한다. 다음 날에도 강제청산 시각에 같은 조건을 재평가하고, 보유 거래일이
+# OVERNIGHT_MAX_DAYS 에 도달하면 조건과 무관하게 전량 청산한다.
+OVERNIGHT_CONDITION_KEYS = ("foreign", "institution", "program", "shinhan_top5")
+DEFAULT_OVERNIGHT_ENABLED = False
+DEFAULT_OVERNIGHT_CONDITIONS = list(OVERNIGHT_CONDITION_KEYS)
+DEFAULT_OVERNIGHT_MIN_COUNT = 2       # 이월에 필요한 충족 조건 개수
+DEFAULT_OVERNIGHT_MAX_DAYS = 3        # 이 보유 거래일차에 도달하면 조건 무관 강제청산
+
 # ── 분할 진입 설정 ──────────────────────────────────────────
 DEFAULT_ENTRY_STAGES = [{"t": 0.0, "weight_pct": 100.0}]  # 분할 진입 기본값 (1차만, 일괄 진입)
 MAX_ENTRY_STAGES = 5                  # 최대 진입 차수

@@ -127,6 +127,22 @@ def get_investor_flow_snapshot(request, stock_code: str, date: str = ""):
     return JsonResponse({"success": True, "data": _snapshot_to_dict(snapshot)})
 
 
+@investor_flow_router.get("/stock/{stock_code}/investor-flow-dates")
+def get_investor_flow_dates(request, stock_code: str):
+    """해당 종목의 저장된 매매동향 스냅샷 날짜 목록 (최신순). 날짜 네비게이션용."""
+    from myweb.models import InvestorFlowSnapshot
+
+    if not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
+        return JsonResponse({"success": False, "error": "유효한 6자리 종목코드가 필요합니다."}, status=400)
+
+    dates = list(
+        InvestorFlowSnapshot.objects.filter(stock_code=stock_code)
+        .order_by("-date")
+        .values_list("date", flat=True)
+    )
+    return JsonResponse({"success": True, "data": [d.isoformat() for d in dates]})
+
+
 @investor_flow_router.get("/investor-flow-snapshot/list")
 def list_investor_flow_snapshots(request, date: str = ""):
     """자동매매 대상 전 종목의 매매동향 스냅샷 목록 조회 (date 미지정 시 최신 날짜)."""

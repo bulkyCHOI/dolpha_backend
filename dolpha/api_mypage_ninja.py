@@ -184,6 +184,12 @@ class TradingDefaultsSchema(Schema):
     theme_surge_trailing_bar_count: int = 3
     theme_surge_force_exit_enabled: bool = True
     theme_surge_force_exit_time: str = "15:20"
+    theme_surge_overnight_enabled: bool = False
+    theme_surge_overnight_conditions: List[str] = [
+        "foreign", "institution", "program", "shinhan_top5"
+    ]
+    theme_surge_overnight_min_count: int = 2
+    theme_surge_overnight_max_days: int = 3
 
 # 즐겨찾기 관련 스키마
 class FavoriteStockSchema(Schema):
@@ -296,6 +302,12 @@ class TradingDefaultsResponseSchema(Schema):
     theme_surge_trailing_bar_count: int = 3
     theme_surge_force_exit_enabled: bool = True
     theme_surge_force_exit_time: str = "15:20"
+    theme_surge_overnight_enabled: bool = False
+    theme_surge_overnight_conditions: List[str] = [
+        "foreign", "institution", "program", "shinhan_top5"
+    ]
+    theme_surge_overnight_min_count: int = 2
+    theme_surge_overnight_max_days: int = 3
     created_at: str
     updated_at: str
 
@@ -816,6 +828,10 @@ def get_trading_defaults(request):
             'theme_surge_trailing_bar_count': defaults.theme_surge_trailing_bar_count,
             'theme_surge_force_exit_enabled': defaults.theme_surge_force_exit_enabled,
             'theme_surge_force_exit_time': defaults.theme_surge_force_exit_time.strftime('%H:%M'),
+            'theme_surge_overnight_enabled': defaults.theme_surge_overnight_enabled,
+            'theme_surge_overnight_conditions': defaults.theme_surge_overnight_conditions,
+            'theme_surge_overnight_min_count': defaults.theme_surge_overnight_min_count,
+            'theme_surge_overnight_max_days': defaults.theme_surge_overnight_max_days,
             'created_at': defaults.created_at.isoformat(),
             'updated_at': defaults.updated_at.isoformat(),
         }
@@ -842,6 +858,16 @@ def _parse_hhmm(value: str, fallback: dt_time) -> dt_time:
     except (TypeError, ValueError):
         return fallback
     return parsed
+
+
+# 강제 청산·오버나이트 판정은 KIS 매매동향 API 조회 가능 시간(장중 ~15:30) 안에서
+# 이뤄져야 하므로, 조회 실패 여유를 두고 강제 청산 시각의 상한을 15:25 로 잡는다.
+_FORCE_EXIT_LATEST = dt_time(15, 25)
+
+
+def _clamp_force_exit_time(value: str) -> dt_time:
+    parsed = _parse_hhmm(value, fallback=dt_time(15, 20))
+    return min(parsed, _FORCE_EXIT_LATEST)
 
 
 def _clean_exit_stages(raw: list) -> list:
@@ -960,8 +986,23 @@ def save_trading_defaults(request, data: TradingDefaultsSchema):
             _clamp(data.theme_surge_trailing_bar_count, 1, 200)
         )
         defaults.theme_surge_force_exit_enabled = data.theme_surge_force_exit_enabled
-        defaults.theme_surge_force_exit_time = _parse_hhmm(
-            data.theme_surge_force_exit_time, fallback=dt_time(15, 20)
+        defaults.theme_surge_force_exit_time = _clamp_force_exit_time(
+            data.theme_surge_force_exit_time
+        )
+        # 오버나이트 보유 설정 — 유효한 조건 키만 남긴다.
+        # 조건을 하나도 선택하지 않으면 이월이 불가능하므로 기능 자체를 끈다.
+        from dolpha.theme_surge.overnight import normalize_conditions
+
+        overnight_conditions = normalize_conditions(data.theme_surge_overnight_conditions)
+        defaults.theme_surge_overnight_enabled = bool(
+            data.theme_surge_overnight_enabled and overnight_conditions
+        )
+        defaults.theme_surge_overnight_conditions = overnight_conditions
+        defaults.theme_surge_overnight_min_count = int(
+            _clamp(data.theme_surge_overnight_min_count, 1, max(1, len(overnight_conditions)))
+        )
+        defaults.theme_surge_overnight_max_days = int(
+            _clamp(data.theme_surge_overnight_max_days, 1, 10)
         )
 
         defaults.save()
