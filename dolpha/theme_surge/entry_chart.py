@@ -44,6 +44,7 @@ from .config import (
     PULLBACK_MIN_PCT,
     PULLBACK_VOLUME_RATIO_MAX,
 )
+from .exit_signals import load_overnight_holds
 from .exits import load_exits
 from .exit_rules import derive_entry_levels, load_exit_settings
 from .patterns import (
@@ -128,6 +129,8 @@ def build_entry_chart(user, target_date: date_cls, stock_code: str) -> dict:
         "decisions": [_decision_row(bars, signal, exit_settings) for signal in signals],
         # 청산은 판정 이력이 없고 체결 기록만 남는다 (exits.py 주석 참고)
         "exits": load_exits(user, target_date, code),
+        # 익일 이월(오버나이트) — 체결이 남지 않는 강제청산 시각 판정 (exit_signals.py)
+        "overnight": load_overnight_holds(user, target_date, code),
         "params": CHART_PARAMS,
     }
 
