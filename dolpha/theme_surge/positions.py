@@ -8,6 +8,7 @@
     KIS GetMyStockList()        실계좌 수량·평단·현재가·손익
     ThemeLeaderCandidate        종목이 속한 테마명·선정 점수
     ThemeEntrySignal            진입 사유 / 미진입 사유(3조건 충족 현황)
+    ThemeExitSignal             익일 이월(오버나이트) 판정 — 며칠째 들고 있는지
 
 기존 /api/mypage/trading-status 로는 테마명·진입 사유를 알 수 없어 전용으로 만든다.
 """
@@ -48,6 +49,7 @@ def build_positions(user, target_date: date_cls | None = None) -> dict:
     themes = _theme_by_code(day, codes)
     signals = _latest_signal_by_code(user, day, codes)
     entries = _entry_stats(user, codes)
+    overnights = _overnight_by_code(user, day, codes)
 
     positions: list[dict] = []
     watching: list[dict] = []
@@ -58,7 +60,12 @@ def build_positions(user, target_date: date_cls | None = None) -> dict:
         entry = entries.get(code, {})
 
         if holding and holding["quantity"] > 0:
-            positions.append(_position_row(config, holding, entry, themes.get(code), signals.get(code)))
+            positions.append(
+                _position_row(
+                    config, holding, entry, themes.get(code),
+                    signals.get(code), overnights.get(code),
+                )
+            )
         else:
             watching.append(_watching_row(config, themes.get(code), signals.get(code)))
 
@@ -76,7 +83,9 @@ def build_positions(user, target_date: date_cls | None = None) -> dict:
 # 행 조립
 # ──────────────────────────────────────────────────────────────
 
-def _position_row(config, holding: dict, entry: dict, theme: dict | None, signal) -> dict:
+def _position_row(
+    config, holding: dict, entry: dict, theme: dict | None, signal, overnight: dict | None
+) -> dict:
     """보유 중인 포지션 1행."""
     avg_price = holding["avg_price"]
     stop_pct = config.stop_loss or 0
@@ -97,6 +106,9 @@ def _position_row(config, holding: dict, entry: dict, theme: dict | None, signal
         "stop_price": round(avg_price * (1 - stop_pct / 100)) if stop_pct else None,
         "target_price": round(avg_price * (1 + take_pct / 100)) if take_pct else None,
         "entered_at": entry.get("first_at"),
+        # 익일 이월(오버나이트) — 전일 강제청산 시각에 수급 조건으로 넘긴 포지션
+        "is_overnight": bool(overnight),
+        "overnight": overnight,
     }
 
 
@@ -129,6 +141,7 @@ def _summary(positions: list[dict], watching: list[dict]) -> dict:
     total_cost = sum(p["avg_price"] * p["quantity"] for p in positions)
     return {
         "position_count": len(positions),
+        "overnight_count": sum(1 for p in positions if p["is_overnight"]),
         "watching_count": len(watching),
         "total_profit_loss": total_pl,
         "total_profit_rate": round(total_pl / total_cost * 100, 2) if total_cost else 0.0,
@@ -141,6 +154,7 @@ def _empty() -> dict:
         "watching": [],
         "summary": {
             "position_count": 0,
+            "overnight_count": 0,
             "watching_count": 0,
             "total_profit_loss": 0,
             "total_profit_rate": 0.0,
@@ -225,6 +239,44 @@ def _latest_signal_by_code(user, day: date_cls, codes: list[str]) -> dict:
         if row.stock_code in result:
             continue
         result[row.stock_code] = row
+
+    return result
+
+
+def _overnight_by_code(user, day: date_cls, codes: list[str]) -> dict[str, dict]:
+    """종목별 가장 최근 '익일 이월' 판정.
+
+    오늘 보유 중인 포지션이 오버나이트인지는 **직전 거래일 장 마감** 판정으로
+    결정되므로 당일(day)로 한정하지 않고 day 이하에서 가장 최근 판정을 본다.
+    마지막 판정이 청산(force_exit 등)이면 그 종목은 오버나이트가 아니다.
+    """
+    from myweb.models import ThemeExitSignal
+
+    rows = ThemeExitSignal.objects.filter(
+        user=user, stock_code__in=codes, date__lte=day
+    ).order_by("stock_code", "-date", "-checked_at")
+
+    result: dict[str, dict] = {}
+    seen: set[str] = set()
+    for row in rows:
+        if row.stock_code in seen:
+            continue  # 종목별 첫 행이 가장 최근 판정
+        seen.add(row.stock_code)
+        if row.decision != "overnight":
+            continue
+        result[row.stock_code] = {
+            "held_since": row.date.isoformat(),
+            "days_held": row.days_held,
+            "decided_at": row.force_exit_time.strftime("%H:%M"),
+            "reason": row.reason,
+            "evaluated": row.overnight_evaluated,
+            "available": row.overnight_available,
+            "conditions": row.overnight_conditions or [],
+            "met": row.overnight_met or {},
+            "met_count": row.overnight_met_count,
+            "required": row.overnight_required,
+            "detail": row.overnight_detail,
+        }
 
     return result
 

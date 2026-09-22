@@ -377,7 +377,7 @@ def _load_signals(user, target_date: date_cls, stock_code: str) -> list:
 
 
 def _identity(signals: list, target_date: date_cls, stock_code: str) -> dict:
-    """종목명·테마명. 판정 이력이 없으면 주도주 후보에서 찾는다."""
+    """종목명·테마명. 판정 이력이 없으면 주도주 후보 → 청산/이월 판정에서 찾는다."""
     if signals:
         latest = signals[-1]
         if latest.stock_name:
@@ -392,6 +392,20 @@ def _identity(signals: list, target_date: date_cls, stock_code: str) -> dict:
     )
     if candidate:
         return {"stock_name": candidate.stock_name, "theme_name": candidate.theme_name}
+
+    # 전일 이월된 종목은 당일 진입 판정도 주도주 후보도 없을 수 있다.
+    from myweb.models import ThemeExitSignal
+
+    exit_signal = (
+        ThemeExitSignal.objects.filter(date=target_date, stock_code=stock_code)
+        .order_by("-checked_at")
+        .first()
+    )
+    if exit_signal:
+        return {
+            "stock_name": exit_signal.stock_name or stock_code,
+            "theme_name": exit_signal.theme_name or "",
+        }
 
     return {"stock_name": stock_code, "theme_name": ""}
 
