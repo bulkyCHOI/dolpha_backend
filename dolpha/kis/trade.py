@@ -17,6 +17,7 @@ KIS 국내주식 거래 API 모듈
     GetCurrentPrice(stock_code, account)   현재가 조회
     MakeBuyMarketOrder(stock_code, qty, account)   시장가 매수
     MakeSellMarketOrder(stock_code, qty, account)  시장가 매도
+    GetOrderFill(order_no, account, ...)           주문번호별 체결 현황 조회
 """
 
 import time
@@ -236,10 +237,21 @@ def GetMyStockList(account=None) -> list:
 
         else:
             fail_count += 1
-            err_code = res.json().get("msg_cd", "")
+            try:
+                err_code = res.json().get("msg_cd", "")
+            except ValueError:  # 에러 응답이 JSON 이 아닌 경우(502/504 HTML 등)
+                err_code = f"HTTP {res.status_code}"
             print(f"[KIS] GetMyStockList 오류: {err_code}")
+            # 연속조회 도중 실패했는데 여기까지 모은 목록을 그대로 돌려주면,
+            # 호출부는 그것을 '완전한 계좌 스냅샷'으로 믿는다. 그 결과 아직
+            # 보유 중인 종목이 '계좌에 없음'으로 오판되어 포지션이 청산된 것처럼
+            # 정리된다(_reconcile_positions). 불완전한 스냅샷은 절대 반환하지 않고
+            # 예외로 알린다 — 호출부는 조회 실패한 계좌를 건드리지 않는다.
             if fail_count >= 3 or err_code == "EGW00123":
-                break
+                raise RuntimeError(
+                    f"보유종목 조회 실패({err_code}) — 불완전한 목록"
+                    f"({len(stock_list)}종목)이라 반환하지 않음"
+                )
 
     return stock_list
 
@@ -284,6 +296,42 @@ def GetCurrentPrice(stock_code: str, account=None) -> int:
 # ─────────────────────────────────────────────────────────────
 
 LAST_ORDER_ERROR: dict[str, str] = {}
+
+
+def format_user_friendly_order_error(raw_error: str) -> str:
+    """
+    KIS 증권사 API 응답 에러 코드 및 메시지를 일반 사용자가 이해하기 쉬운 안내 문구로 변환합니다.
+    """
+    if not raw_error:
+        return "증권사 주문 처리에 실패했습니다. 잠시 후 다시 시도해주세요."
+
+    raw = raw_error.strip()
+
+    # 1. 장 운영 시간 관련
+    if any(k in raw for k in ["APBK0933", "APBK0939", "주문 가능 시간", "장마감", "장종료", "장운영시간", "주문불가시간", "장개시전", "주문불가"]):
+        return "현재 정규장 운영 시간(09:00~15:30)이 아니어서 시장가 주문을 접수할 수 없습니다."
+
+    # 2. 주문 가능 수량 부족 / 잔고 부족 / 미체결 주문 대기
+    if any(k in raw for k in ["APBK0937", "주문수량", "매도가능수량", "잔고", "수량초과", "잔고부족"]):
+        return "매도 가능한 보유 수량이 부족하거나 이미 다른 주문(미체결)이 대기 중입니다. 증권사 계좌의 미체결 내역을 확인해주세요."
+
+    # 3. 초당 요청 제한 / TPS 초과
+    if any(k in raw for k in ["40010000", "EGW00201", "초당", "건수초과", "TPS", "호출제한", "거래건수"]):
+        return "증권사 API 요청 한도를 일시적으로 초과했습니다. 잠시 후(몇 초 뒤) 다시 시도해주세요."
+
+    # 4. 토큰 / 인증 / 계좌 자격증명
+    if any(k in raw for k in ["EGW00123", "IGW00121", "토큰", "인증", "SecretKey", "AppKey", "유효하지 않은"]):
+        return "증권사 계좌 인증 정보(AppKey/SecretKey)가 유효하지 않거나 만료되었습니다. 마이페이지에서 계좌 설정을 확인해주세요."
+
+    # 5. 호가 / 가격 범위 오류
+    if any(k in raw for k in ["APBK1091", "호가", "가격범위", "상한가", "하한가"]):
+        return "현재 호가 범위를 벗어나 주문을 접수할 수 없습니다. 잠시 후 다시 시도해주세요."
+
+    # 6. 모의투자 관련 제한
+    if "모의투자" in raw:
+        return f"모의투자 주문 제한: {raw}"
+
+    return f"증권사 주문 실패: {raw}"
 
 
 def MakeBuyMarketOrder(stock_code: str, qty: int, account=None) -> dict | None:
@@ -430,3 +478,120 @@ def MakeBuyMarketOrderUS(stock_code: str, qty: int, exchange: str = "NASD", acco
         d = res.json()
         print(f"[KIS] MakeBuyMarketOrderUS({stock_code}) 실패: {d.get('msg_cd')} — {d.get('msg1', res.text[:200])}")
         return None
+
+
+# ─────────────────────────────────────────────────────────────
+# 체결 현황 조회
+# ─────────────────────────────────────────────────────────────
+
+def GetOrderFill(
+    order_no: str,
+    account=None,
+    stock_code: str = "",
+    order_date: str = "",
+) -> dict | None:
+    """주문번호로 당일 체결 현황을 조회합니다 (주식일별주문체결조회).
+
+    주문 접수(rt_cd=0)는 '접수'일 뿐 체결이 아니다. 시장가 주문도 호가를
+    소진하며 나눠 체결되므로, 실제 체결 수량·평균가는 이 조회로만 알 수 있다.
+
+    Args:
+        order_no:   주문번호(ODNO). MakeBuy/SellMarketOrder 의 "OrderNum2"
+        stock_code: 종목코드로 한 번 더 좁히고 싶을 때 (선택)
+        order_date: 주문 일자 YYYYMMDD. 기본은 오늘(KST)
+
+    Returns:
+        조회 성공: {
+            "order_no", "stock_code", "ordered_qty", "filled_qty",
+            "remain_qty", "avg_price", "filled_amount",
+        }
+        조회 실패·응답 이상: None
+        — None 은 '체결 0' 이 아니라 '알 수 없음' 이다. 호출부는 절대 0 으로
+          단정하면 안 된다(그랬다가 미체결을 전량체결로 기록해 왔다).
+    """
+    if not order_no:
+        return None
+
+    cred = resolve_credential(account)
+    _sleep(cred)
+
+    if not order_date:
+        from datetime import datetime
+
+        from pytz import timezone as pytz_tz
+
+        order_date = datetime.now(pytz_tz("Asia/Seoul")).strftime("%Y%m%d")
+
+    tr_id = "VTTC0081R" if cred.is_virtual else "TTTC0081R"  # 3개월 이내
+    url = f"{cred.url_base}/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+
+    params = {
+        **_account_params(cred),
+        "INQR_STRT_DT": order_date,
+        "INQR_END_DT": order_date,
+        "SLL_BUY_DVSN_CD": "00",   # 전체
+        "PDNO": stock_code or "",
+        "CCLD_DVSN": "00",         # 전체(체결 + 미체결)
+        "INQR_DVSN": "00",         # 역순
+        "INQR_DVSN_3": "00",       # 전체
+        "ORD_GNO_BRNO": "",
+        "ODNO": order_no,
+        "INQR_DVSN_1": "",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+    }
+
+    try:
+        res = requests.get(
+            url,
+            headers=GetHeaders(tr_id=tr_id, custtype="P", account=cred),
+            params=params,
+            timeout=10,
+            verify=False,
+        )
+        body = res.json()
+    except Exception as e:  # noqa: BLE001 — 네트워크·JSON 오류 모두 '알 수 없음'
+        print(f"[KIS] GetOrderFill({order_no}) 조회 오류: {e}")
+        return None
+
+    if res.status_code != 200 or body.get("rt_cd") != "0":
+        print(
+            f"[KIS] GetOrderFill({order_no}) 실패:"
+            f" {body.get('msg_cd', '')} {body.get('msg1', '')}".rstrip()
+        )
+        return None
+
+    rows = [
+        row for row in (body.get("output1") or [])
+        if str(row.get("odno", "")).lstrip("0") == str(order_no).lstrip("0")
+    ]
+    if not rows:
+        # 접수 직후라 아직 조회에 잡히지 않는 경우도 여기로 온다 — 0 이 아니라 미상.
+        return None
+
+    ordered = filled = amount = 0
+    for row in rows:
+        ordered += _int(row.get("ord_qty"))
+        filled += _int(row.get("tot_ccld_qty"))
+        amount += _int(row.get("tot_ccld_amt"))
+
+    # 잔여수량은 응답 값을 우선하되, 없으면 주문-체결로 유도한다.
+    remain = sum(_int(row.get("rmn_qty")) for row in rows) or max(ordered - filled, 0)
+
+    return {
+        "order_no": order_no,
+        "stock_code": rows[0].get("pdno", stock_code),
+        "ordered_qty": ordered,
+        "filled_qty": filled,
+        "remain_qty": remain,
+        "avg_price": round(amount / filled) if filled else 0,
+        "filled_amount": amount,
+    }
+
+
+def _int(value) -> int:
+    """KIS 응답의 숫자 문자열을 int 로. 빈 값·이상값은 0."""
+    try:
+        return int(float(str(value).replace(",", "").strip() or 0))
+    except (TypeError, ValueError):
+        return 0

@@ -20,6 +20,7 @@ from .trade import (
     GetHashKey,
     GetBalance,
     GetMyStockList,
+    GetOrderFill,
     GetCurrentPrice,
     MakeBuyMarketOrder,
     MakeSellMarketOrder,
@@ -31,6 +32,6 @@ __all__ = [
     "GetOhlcvKR",
     "GetMinuteOhlcvKR", "_iter_minute_pages",
     "GetHashKey",
-    "GetBalance", "GetMyStockList", "GetCurrentPrice",
+    "GetBalance", "GetMyStockList", "GetCurrentPrice", "GetOrderFill",
     "MakeBuyMarketOrder", "MakeSellMarketOrder",
 ]

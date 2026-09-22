@@ -17,6 +17,7 @@ autobot/tradingBot/autoTrading_Bot.py 를 Django 환경으로 포팅.
     engine.run_trading_cycle()
 """
 
+import time
 import traceback
 from typing import TYPE_CHECKING
 from datetime import date as date_cls, datetime, timedelta
@@ -35,6 +36,11 @@ from dolpha.kis.credentials import credential_for_account
 from dolpha.order_log import order_log
 from dolpha.stockCommon import GetOhlcv, GetNowDateStr
 from dolpha.strategy_account import get_active_accounts, resolve_account
+
+# 주문 접수 후 실제 체결을 확인할 때의 재시도 횟수·간격.
+# 접수 직후에는 체결 조회에 아직 잡히지 않는 경우가 있어 몇 번 더 본다.
+FILL_CONFIRM_RETRIES = 3
+FILL_CONFIRM_INTERVAL_SEC = 1.0
 
 if TYPE_CHECKING:
     from dolpha.theme_surge.exit_rules import ExitSettings
@@ -87,6 +93,8 @@ class TradingEngine:
         self.trading_configs: list[TradingConfig] = []
         # 급등테마주 진입 판정 시그널 (매수 성공 시 executed 표시용)
         self._last_theme_signal = None
+        # 직전 매도 실패 에러 메시지
+        self.last_sell_error: str = ""
         # 전략 → 자격증명 캐시. 사이클 중 계좌 조회·복호화를 반복하지 않는다.
         self._credential_cache: dict[str, KisCredential] = {}
         self._load_configs()
@@ -990,6 +998,60 @@ class TradingEngine:
         TradingEngine._days_held_cache[config.id] = days
         return days
 
+    def _pending_force_exit_failure(self, config: TradingConfig, now: datetime) -> bool:
+        """이번 보유 기간 중 강제청산이 가격조회 실패로 무산된 기록이 남아있는가.
+
+        exit_finalizer 가 이 기록을 오버나이트로 덮어쓰지 않고 보존하므로,
+        장 마감 실패가 발생한 다음 거래일부터 이 함수가 True 를 반환해
+        복구 청산을 강제한다.
+        """
+        from myweb.models import ThemeExitSignal
+
+        first = self._buy_entries(config).first()
+        if not first or not first.filled_at:
+            return False
+        start = tz.localtime(first.filled_at).date()
+        today = now.date()
+        if today <= start:
+            return False
+        return ThemeExitSignal.objects.filter(
+            user=self.user, stock_code=config.stock_code,
+            decision="force_exit_failed", date__gte=start, date__lt=today,
+        ).exists()
+
+    def _handle_price_fetch_failure(self, config: TradingConfig, error: Exception) -> None:
+        """현재가 조회 실패를 처리한다.
+
+        급등테마주 전략이 강제청산 시각 이후라면, 청산 판정 자체가 이번 사이클에
+        실행되지 않고 조용히 넘어가므로 별도로 기록을 남겨야 다음 거래일에
+        복구 청산(_pending_force_exit_failure)이 동작하고, exit_finalizer 가
+        이를 정상 오버나이트로 오인해 덮어쓰지 않는다.
+        """
+        print(f"[{config.stock_name}] 현재가 조회 실패 — 건너뜀: {error}")
+        if not self._uses_theme_exit(config):
+            return
+
+        settings = self._theme_exit_settings()
+        now = tz.localtime()
+        if not (settings.force_exit_enabled and now.time() >= settings.force_exit_time):
+            return
+
+        from myweb.models import ThemeExitSignal
+
+        try:
+            ThemeExitSignal.objects.update_or_create(
+                user=self.user, date=now.date(), stock_code=config.stock_code,
+                defaults={
+                    "checked_at": now,
+                    "stock_name": config.stock_name,
+                    "force_exit_time": settings.force_exit_time,
+                    "decision": "force_exit_failed",
+                    "reason": f"강제청산 시각 현재가 조회 실패: {error}"[:300],
+                },
+            )
+        except Exception as e:  # noqa: BLE001 — 기록 실패가 매매를 막아선 안 된다
+            print(f"[{config.stock_name}] 강제청산 실패 기록 오류: {e}")
+
     def _theme_overnight_signal(
         self, config: TradingConfig, settings: "ExitSettings", now: datetime, days_held: int
     ):
@@ -1124,6 +1186,13 @@ class TradingEngine:
         avg_price = holding_info["avg_price"]
         settings = self._theme_exit_settings()
         now = tz.localtime()
+
+        # 이 보유 기간 중 강제청산이 가격조회 실패로 무산된 적이 있으면, 다른 판정보다
+        # 우선해서 즉시 전량 청산한다 — 의도된 오버나이트가 아니라 사고로 남은 포지션이므로.
+        if self._pending_force_exit_failure(config, now):
+            decision = ExitDecision(True, 100.0, "전일 강제청산 실패 복구청산(가격조회 오류)")
+            self._theme_exit_cache = (cache_key, decision)
+            return decision
 
         # 보유 중이면 항상 고점을 갱신해야 트레일링 발동 판정이 성립한다
         self._update_peak_price(config, current_price)
@@ -1454,6 +1523,10 @@ class TradingEngine:
                     return False
                 entry_type = "INITIAL" if entry_count == 0 else "PYRAMIDING"
 
+                # ATR 은 주문 '전에' 구한다. 주문 뒤에 DB 조회를 하면 그 조회가 실패했을 때
+                # 이미 체결된 주문까지 롤백에 휩쓸려 기록이 통째로 사라진다.
+                atr_val = self.get_atr(stock_code)
+
                 # KIS 시장가 매수 주문
                 result = KIS.MakeBuyMarketOrder(stock_code, buy_qty, self._credential_for(config))
                 if result is None:
@@ -1473,8 +1546,13 @@ class TradingEngine:
                     )
                     return False
 
-                # DB에 TradeEntry 저장
-                atr_val   = self.get_atr(stock_code)
+                # 체결은 되돌릴 수 없다. DB 기록보다 먼저 파일 로그를 남겨 두어야
+                # 이후 트랜잭션이 롤백되더라도 "주문이 나갔다"는 사실이 보존된다.
+                order_log(
+                    f"[매수접수] {stock_name}({stock_code}) {buy_qty}주"
+                    f" @ {current_price:,.0f}원 유형={entry_type}"
+                    f" 주문번호={result.get('OrderNum2')}"
+                )
 
                 # 손절 참고가 계산
                 if config.trading_mode == "manual":
@@ -1486,7 +1564,7 @@ class TradingEngine:
                 else:
                     stop_price = None
 
-                TradeEntry.objects.create(
+                entry = TradeEntry.objects.create(
                     user            = self.user,
                     trading_config  = config,
                     stock_code      = stock_code,
@@ -1506,26 +1584,46 @@ class TradingEngine:
                     filled_at       = tz.now(),
                 )
 
-                # 트레일링 스탑 고점: 신규 진입이면 초기화, 피라미딩이면 현재가로 갱신
-                # (피라미딩으로 평균가가 올라가므로 고점도 최신 진입가 기준으로 유지)
-                if config.trailing_stop_peak_price is None or (
-                    entry_type == "PYRAMIDING" and current_price > config.trailing_stop_peak_price
-                ):
-                    config.trailing_stop_peak_price = current_price
-                    config.save(update_fields=["trailing_stop_peak_price"])
+                # 아래 부가 작업은 실패해도 '체결 기록'을 무효로 만들면 안 된다.
+                # 예외가 atomic 블록을 빠져나가면 방금 만든 TradeEntry 까지 롤백되어
+                # 실제로는 보유 중인데 장부에 없는 유령 포지션이 된다.
+                try:
+                    # 트레일링 스탑 고점: 신규 진입이면 초기화, 피라미딩이면 현재가로 갱신
+                    # (피라미딩으로 평균가가 올라가므로 고점도 최신 진입가 기준으로 유지)
+                    if config.trailing_stop_peak_price is None or (
+                        entry_type == "PYRAMIDING"
+                        and current_price > config.trailing_stop_peak_price
+                    ):
+                        config.trailing_stop_peak_price = current_price
+                        config.save(update_fields=["trailing_stop_peak_price"])
 
-                # TradingSummary HOLDING 레코드 생성/갱신 (매수 시점에도 호출해야 _update_peak_stats가 동작함)
-                self._update_trading_summary(config, stock_code, stock_name)
+                    # TradingSummary HOLDING 레코드 생성/갱신
+                    # (매수 시점에도 호출해야 _update_peak_stats가 동작함)
+                    self._update_trading_summary(config, stock_code, stock_name)
+                except Exception as e:  # noqa: BLE001
+                    order_log(
+                        f"[매수후처리실패] {stock_name}({stock_code}) — 체결 기록은 유지: {e}"
+                    )
 
             order_log(
                 f"[매수완료] {stock_name}({stock_code}) {buy_qty}주 @ {current_price:,.0f}원"
                 f" 유형={entry_type} 주문번호={result['OrderNum2']}"
             )
+
+            # 커밋된 뒤에 실제 체결을 확인해 장부를 실측값으로 보정한다.
+            # 확인을 트랜잭션 안에서 하면 조회 지연·실패가 체결 기록까지 롤백시킨다.
+            self._apply_fill_to_entry(config, entry, result["OrderNum2"], buy_qty)
             return True
 
         except Exception as e:
             print(f"[{stock_name}] 매수 주문 오류: {e}")
             traceback.print_exc()
+            # 주문 접수 이후에 터진 예외라면 체결은 살아 있고 DB 기록만 롤백됐을 수 있다.
+            # 조용히 넘어가면 장부에 없는 유령 포지션이 되므로 파일 로그로 남긴다.
+            order_log(
+                f"[매수오류] {stock_name}({stock_code}) — 체결 여부 확인 필요"
+                f" (기록 롤백 가능성): {e}"
+            )
             return False
 
     # ──────────────────────────────────────────────
@@ -1559,6 +1657,7 @@ class TradingEngine:
 
             if holding_qty <= 0:
                 print(f"[{stock_name}] 보유 수량 없음 — 매도 스킵")
+                self.last_sell_error = "보유 수량이 없습니다."
                 return False
 
             # 매도 사유 → entry_type 매핑
@@ -1591,6 +1690,7 @@ class TradingEngine:
             result = KIS.MakeSellMarketOrder(stock_code, holding_qty, self._credential_for(config))
             if result is None:
                 err_msg = _pop_order_error("sell")
+                self.last_sell_error = err_msg or "증권사 매도 주문 접수 실패"
                 order_log(
                     f"[매도실패] {stock_name}({stock_code}) {holding_qty}주"
                     f" @ {current_price:,.0f}원 ({reason}) — {err_msg or '사유 미상'}"
@@ -1606,11 +1706,19 @@ class TradingEngine:
                 )
                 return False
 
+            self.last_sell_error = ""
             now = tz.now()
+
+            # 매수와 같은 이유로, DB 기록 전에 체결 사실부터 파일에 남긴다.
+            order_log(
+                f"[매도접수] {stock_name}({stock_code}) {holding_qty}주"
+                f" @ {current_price:,.0f}원 ({reason})"
+                f" 주문번호={result.get('OrderNum2')}"
+            )
 
             with transaction.atomic():
                 # SELL TradeEntry 생성
-                TradeEntry.objects.create(
+                entry = TradeEntry.objects.create(
                     user            = self.user,
                     trading_config  = config,
                     stock_code      = stock_code,
@@ -1631,11 +1739,39 @@ class TradingEngine:
                     filled_at       = now,
                 )
 
-                # 포지션 청산 — BUY 엔트리 CANCELLED, 상태 리셋, 비활성화
-                self._deactivate_config(config)
-
                 # TradingSummary 업데이트
                 self._update_trading_summary(config, stock_code, stock_name)
+
+            # 실제 체결을 확인해 장부를 보정한다. 접수 수량 그대로 '전량 청산'으로
+            # 단정하면, 부분체결로 잔량이 남았는데도 설정이 비활성화되어 손절·강제청산이
+            # 멈춘 채 방치된다(실제로 그렇게 유령 포지션이 생겼다).
+            fill = self._apply_fill_to_entry(config, entry, result["OrderNum2"], holding_qty)
+            fully_exited = fill is not None and fill["remain_qty"] == 0 and fill["filled_qty"] > 0
+
+            # 손익도 실체결 수량·평균가로 다시 계산한다 (추정 체결가로 남기지 않는다)
+            if fill and fill["filled_qty"] > 0 and avg_price:
+                sold_qty = fill["filled_qty"]
+                sold_amount = fill["filled_amount"] or fill["avg_price"] * sold_qty
+                cost = avg_price * sold_qty
+                profit_loss = sold_amount - cost
+                profit_loss_pct = profit_loss / cost * 100.0 if cost > 0 else 0.0
+                entry.profit_loss = Decimal(str(profit_loss))
+                entry.profit_loss_percent = profit_loss_pct
+                entry.save(update_fields=["profit_loss", "profit_loss_percent"])
+                holding_qty = sold_qty
+                current_price = fill["avg_price"] or current_price
+
+            if fully_exited:
+                with transaction.atomic():
+                    # 포지션 청산 — BUY 엔트리 CANCELLED, 상태 리셋, 비활성화
+                    self._deactivate_config(config)
+                    self._update_trading_summary(config, stock_code, stock_name)
+            else:
+                remain = fill["remain_qty"] if fill else holding_qty
+                order_log(
+                    f"[청산미완료] {stock_name}({stock_code}) 잔여 {remain}주"
+                    f" — 설정을 활성 상태로 유지합니다(다음 사이클에서 재시도)"
+                )
 
             print(
                 f"[{stock_name}] 매도 완료: {holding_qty}주 @ {current_price:,.0f}원"
@@ -1648,6 +1784,11 @@ class TradingEngine:
         except Exception as e:
             print(f"[{stock_name}] 매도 주문 오류: {e}")
             traceback.print_exc()
+            self.last_sell_error = str(e)
+            order_log(
+                f"[매도오류] {stock_name}({stock_code}) — 체결 여부 확인 필요"
+                f" (기록 롤백 가능성): {e}"
+            )
             return False
 
     # ──────────────────────────────────────────────
@@ -1722,7 +1863,11 @@ class TradingEngine:
                 return False
 
             now = tz.now()
-            TradeEntry.objects.create(
+            order_log(
+                f"[분할매도접수] {stock_name}({stock_code}) {sell_qty}주"
+                f" @ {current_price:,.0f}원 ({reason}) 주문번호={result.get('OrderNum2')}"
+            )
+            entry = TradeEntry.objects.create(
                 user                = self.user,
                 trading_config      = config,
                 stock_code          = stock_code,
@@ -1742,6 +1887,20 @@ class TradingEngine:
                 ordered_at          = now,
                 filled_at           = now,
             )
+
+            # 분할 매도도 실체결로 보정 — 추정 수량·가격이 익절 이력에 남지 않게 한다
+            fill = self._apply_fill_to_entry(config, entry, result["OrderNum2"], sell_qty)
+            if fill and fill["filled_qty"] > 0 and avg_price:
+                sold_qty = fill["filled_qty"]
+                sold_amount = fill["filled_amount"] or fill["avg_price"] * sold_qty
+                cost = avg_price * sold_qty
+                profit_loss = sold_amount - cost
+                profit_loss_pct = profit_loss / cost * 100.0 if cost > 0 else 0.0
+                entry.profit_loss = Decimal(str(profit_loss))
+                entry.profit_loss_percent = profit_loss_pct
+                entry.save(update_fields=["profit_loss", "profit_loss_percent"])
+                sell_qty = sold_qty
+                current_price = fill["avg_price"] or current_price
 
             print(
                 f"[{stock_name}] 분할 매도 완료: {sell_qty}주({sell_pct:.0f}%) @ {current_price:,.0f}원"
@@ -2085,6 +2244,78 @@ class TradingEngine:
                 return {"qty": int(s["StockAmt"]), "avg_price": float(s["StockAvgPrice"])}
         return {"qty": 0, "avg_price": 0.0}
 
+    def _confirm_fill(
+        self, config: TradingConfig, order_no: str, stock_code: str, expected_qty: int
+    ) -> dict | None:
+        """주문번호로 실제 체결 현황을 확인한다.
+
+        접수(rt_cd=0)는 체결이 아니다. 시장가 주문도 호가를 소진하며 나눠 체결되므로
+        실제 수량·평균가는 조회로만 알 수 있다. 접수 직후에는 조회에 아직 안 잡히는
+        경우가 있어 몇 번 재시도한다.
+
+        Returns:
+            체결 현황 dict, 또는 끝내 확인하지 못했으면 None('체결 0' 이 아니라 '미상').
+        """
+        for attempt in range(FILL_CONFIRM_RETRIES):
+            if attempt:
+                time.sleep(FILL_CONFIRM_INTERVAL_SEC)
+            try:
+                fill = KIS.GetOrderFill(
+                    order_no, self._credential_for(config), stock_code=stock_code
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[{config.stock_name}] 체결 조회 오류: {e}")
+                continue
+            if fill and fill["filled_qty"] > 0:
+                if fill["filled_qty"] < expected_qty:
+                    order_log(
+                        f"[부분체결] {config.stock_name}({stock_code})"
+                        f" {fill['filled_qty']}/{expected_qty}주 체결"
+                        f" @ {fill['avg_price']:,}원 (잔여 {fill['remain_qty']}주)"
+                    )
+                return fill
+
+        order_log(
+            f"[체결미확인] {config.stock_name}({stock_code}) 주문 {order_no}"
+            f" — 체결 수량을 확인하지 못했습니다(주문수량 {expected_qty}주 기준으로 기록)"
+        )
+        return None
+
+    def _apply_fill_to_entry(
+        self, config: TradingConfig, entry: TradeEntry, order_no: str, expected_qty: int
+    ) -> dict | None:
+        """접수 수량으로 기록해 둔 TradeEntry 를 실제 체결값으로 보정한다.
+
+        체결을 확인하지 못하면(None) 기록을 그대로 둔다 — 접수 수량 기준 추정치이며,
+        note 에 그 사실을 남겨 나중에 사람이 구분할 수 있게 한다.
+        """
+        fill = self._confirm_fill(config, order_no, entry.stock_code, expected_qty)
+        if fill is None:
+            entry.note = (f"{entry.note} " if entry.note else "") + "체결 미확인(주문수량 기준 추정)"
+            entry.save(update_fields=["note"])
+            return None
+
+        filled = fill["filled_qty"]
+        price = fill["avg_price"] or float(entry.filled_price or 0)
+        entry.filled_quantity = filled
+        entry.filled_price = Decimal(str(price))
+        entry.filled_amount = Decimal(str(fill["filled_amount"] or price * filled))
+
+        # 부분체결도 status 는 FILLED 로 둔다. 장부 집계 다수가 status="FILLED" 로
+        # 거르므로 PARTIAL 을 쓰면 그 포지션이 집계에서 통째로 사라진다.
+        # 진실은 filled_quantity 가 들고, 부분체결 사실은 note 와 order_log 에 남긴다.
+        if filled == 0:
+            entry.status = "SUBMITTED"
+        elif filled < expected_qty:
+            entry.note = (f"{entry.note} " if entry.note else "") + (
+                f"부분체결 {filled}/{expected_qty}주"
+            )
+        entry.save(
+            update_fields=["filled_quantity", "filled_price", "filled_amount",
+                           "status", "note"]
+        )
+        return fill
+
     def _resolve_holding_info(self, config: TradingConfig, account_info: dict) -> dict:
         """계좌 잔고와 이 전략의 장부를 대조해 '이 전략 몫'의 보유 정보를 만듭니다.
 
@@ -2161,6 +2392,36 @@ class TradingEngine:
                     f" — DB 정리 후 비활성화"
                 )
                 self._deactivate_config(config)
+
+        self._warn_orphan_positions(held_codes_by_account)
+
+    def _warn_orphan_positions(self, held_codes_by_account: dict[str, set]) -> None:
+        """계좌엔 남아 있는데 설정이 비활성인 '고아 포지션'을 경고한다.
+
+        _reconcile_positions 는 활성 설정만 훑으므로 반대 방향 — 매수 체결 기록이
+        유실돼 미진입 후보로 정리됐거나, 계좌 조회 실패로 청산된 것처럼 처리된
+        종목 — 은 아무 흔적 없이 방치된다. 실제로 며칠간 손절·강제청산이 한 번도
+        돌지 않은 사례가 있어, 최소한 사이클마다 눈에 띄게 남긴다.
+
+        상태를 바꾸지는 않는다. 복구는 /trading-status/reconcile-positions 가 한다.
+        """
+        inactive = TradingConfig.objects.filter(user=self.user, is_active=False)
+        for config in list(inactive):
+            try:
+                account_key = self._credential_for(config).token_cache_key
+            except KisCredentialError:
+                continue
+
+            held_codes = held_codes_by_account.get(account_key)
+            if held_codes is None:
+                continue  # 조회 못한 계좌는 판단하지 않는다
+
+            if config.stock_code in held_codes:
+                order_log(
+                    f"[고아포지션] {config.stock_name}({config.stock_code})"
+                    f" 전략={config.strategy_type} — 계좌엔 보유 중인데 설정이 비활성이라"
+                    f" 손절·강제청산이 돌지 않습니다. 포지션 복구가 필요합니다."
+                )
 
     def _load_account_snapshots(self) -> tuple[dict[str, dict], dict[str, list[dict]]]:
         """활성 전략들이 사용하는 계좌마다 잔고·보유종목을 1회씩 조회합니다.
@@ -2267,7 +2528,13 @@ class TradingEngine:
                     continue
 
                 # 종목 레벨 캐시: GetCurrentPrice 1회 호출 후 재사용
-                current_price = float(KIS.GetCurrentPrice(config.stock_code, self._credential_for(config)))
+                try:
+                    current_price = float(
+                        KIS.GetCurrentPrice(config.stock_code, self._credential_for(config))
+                    )
+                except Exception as e:
+                    self._handle_price_fetch_failure(config, e)
+                    continue
                 account_info = self._extract_holding_info(
                     config.stock_code, holdings_by_account.get(account_key) or []
                 )

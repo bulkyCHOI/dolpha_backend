@@ -563,14 +563,57 @@ def reconcile_positions(request):
             return None
 
         # ── Case 1: KIS에 보유 중이지만 DB에서 비활성화된 종목 복구
-        inactive_configs = TradingConfig.objects.filter(user=user, is_active=False)
+        #
+        # 같은 종목에 비활성 설정이 여러 개 쌓여 있다(재진입할 때마다 새로 만들어진다).
+        # 전부 되살리면 이미 정상 청산된 과거 포지션의 CANCELLED BUY 까지 FILLED 로
+        # 부활해 장부 수량이 실제 보유량의 몇 배가 된다. 전략·종목당 '가장 최근 설정'
+        # 하나만 복구 대상으로 삼는다.
+        inactive_configs = TradingConfig.objects.filter(
+            user=user, is_active=False
+        ).order_by("-created_at")
+
+        newest_by_position: dict[tuple[str, str], TradingConfig] = {}
         for config in inactive_configs:
+            key = (config.strategy_type, config.stock_code)
+            newest_by_position.setdefault(key, config)  # created_at 내림차순 → 첫 행이 최신
+
+        skipped = []
+        for config in newest_by_position.values():
             account_key = _account_key_for(config)
             if account_key is None:
                 continue  # 계좌 미설정 — 대조 불가, 건너뜀
             held_map = _held_map_for(account_key)
             if config.stock_code not in held_map:
                 continue  # KIS에 없으면 정상 비활성화 — 건너뜀
+
+            # 되살릴 BUY 엔트리가 하나도 없으면 활성화하지 않는다.
+            # 장부가 빈 채로 활성화하면 엔진이 '미진입'으로 보고 다시 매수해
+            # 실제 보유량이 두 배가 된다. 사람이 수량·평단을 확인해 복구해야 한다.
+            restorable = TradeEntry.objects.filter(
+                user=user, trading_config=config, trade_type="BUY", status="CANCELLED"
+            )
+            if not restorable.exists():
+                held_qty = int(held_map[config.stock_code].get("StockAmt", 0) or 0)
+                skipped.append({
+                    "stock_code": config.stock_code,
+                    "stock_name": config.stock_name,
+                    "account_qty": held_qty,
+                    "reason": "되살릴 매수 기록이 없습니다 — 체결 기록 유실로 보이며 수동 복구가 필요합니다.",
+                })
+                print(
+                    f"[복구] {config.stock_name} — 계좌 {held_qty}주 보유하나 복구할 BUY 엔트리 없음,"
+                    " 활성화하지 않음(수동 확인 필요)"
+                )
+                continue
+
+            # 복구할 장부 수량이 실제 보유량과 다르면 알린다(그대로 두면 과매도·과소매도)
+            restore_qty = sum(e.filled_quantity or 0 for e in restorable)
+            account_qty = int(held_map[config.stock_code].get("StockAmt", 0) or 0)
+            if restore_qty != account_qty:
+                print(
+                    f"[복구] {config.stock_name} — 장부 복구 수량({restore_qty})과"
+                    f" 계좌 수량({account_qty})이 다릅니다. 확인이 필요합니다."
+                )
 
             # 1) is_active 복구
             config.is_active = True
@@ -584,18 +627,15 @@ def reconcile_positions(request):
             config.save(update_fields=["is_active", "trailing_stop_peak_price"])
 
             # 3) CANCELLED BUY 엔트리 FILLED로 복구
-            cancelled_count = TradeEntry.objects.filter(
-                user=user,
-                trading_config=config,
-                trade_type="BUY",
-                status="CANCELLED",
-            ).update(status="FILLED")
+            cancelled_count = restorable.update(status="FILLED")
 
             recovered.append({
                 "stock_code": config.stock_code,
                 "stock_name": config.stock_name,
                 "trailing_stop_peak_price": config.trailing_stop_peak_price,
                 "cancelled_entries_restored": cancelled_count,
+                "account_qty": account_qty,
+                "restored_qty": restore_qty,
             })
             print(f"[복구] {config.stock_name} — is_active 복구, peak={config.trailing_stop_peak_price}, BUY 엔트리 {cancelled_count}건 FILLED 복구")
 
@@ -625,11 +665,16 @@ def reconcile_positions(request):
                 })
                 print(f"[고점보정] {config.stock_name} — peak={price}")
 
+        message = f"{len(recovered)}개 종목 복구, {len(peak_fixed)}개 고점 보정 완료"
+        if skipped:
+            message += f", {len(skipped)}개 종목은 수동 확인 필요"
+
         return JsonResponse({
             "success": True,
-            "message": f"{len(recovered)}개 종목 복구, {len(peak_fixed)}개 고점 보정 완료",
+            "message": message,
             "recovered": recovered,
             "peak_fixed": peak_fixed,
+            "needs_manual_review": skipped,
         })
 
     except Exception as e:
