@@ -24,9 +24,11 @@ from .config import (
     DEFAULT_FORCE_EXIT_TIME,
     DEFAULT_MAX_LOSS_PCT,
     DEFAULT_MAX_POSITION_PCT,
+    DEFAULT_OVERNIGHT_BREAKEVEN_STOP,
     DEFAULT_OVERNIGHT_ENABLED,
     DEFAULT_OVERNIGHT_MAX_DAYS,
     DEFAULT_OVERNIGHT_MIN_COUNT,
+    DEFAULT_OVERNIGHT_MIN_PROFIT_R,
     DEFAULT_TRAILING_BAR_COUNT,
     DEFAULT_TRAILING_BAR_UNIT,
     DEFAULT_TRAILING_START_T,
@@ -57,6 +59,8 @@ class ExitSettings:
     overnight_conditions: tuple[str, ...]     # 평가할 조건 키 (foreign/institution/program/shinhan_top5)
     overnight_min_count: int                  # 이월에 필요한 충족 개수
     overnight_max_days: int                   # 이 보유 거래일차에 도달하면 조건 무관 강제청산
+    overnight_min_profit_r: float = DEFAULT_OVERNIGHT_MIN_PROFIT_R  # 평가손익 ≥ 이 R 일 때만 이월
+    overnight_breakeven_stop: bool = DEFAULT_OVERNIGHT_BREAKEVEN_STOP  # 이월 확정 시 손절가 → 평단
 
 
 @dataclass(frozen=True)
@@ -101,6 +105,14 @@ def normalize_stages(raw: object) -> tuple[tuple[float, float], ...]:
         cleaned.append((t_mult, sell_pct))
 
     return tuple(sorted(cleaned, key=lambda pair: pair[0]))
+
+
+def _float_or(value, fallback: float) -> float:
+    """None·형식 오류만 기본값으로 대체한다 (0·음수는 유효한 설정값)."""
+    try:
+        return float(value) if value is not None else fallback
+    except (TypeError, ValueError):
+        return fallback
 
 
 def load_exit_settings(defaults) -> ExitSettings:
@@ -177,6 +189,13 @@ def load_exit_settings(defaults) -> ExitSettings:
                 getattr(defaults, "theme_surge_overnight_max_days", None)
                 or DEFAULT_OVERNIGHT_MAX_DAYS
             ),
+        ),
+        overnight_min_profit_r=_float_or(
+            getattr(defaults, "theme_surge_overnight_min_profit_r", None),
+            DEFAULT_OVERNIGHT_MIN_PROFIT_R,
+        ),
+        overnight_breakeven_stop=bool(
+            getattr(defaults, "theme_surge_overnight_breakeven_stop", DEFAULT_OVERNIGHT_BREAKEVEN_STOP)
         ),
     )
 
@@ -295,6 +314,7 @@ def evaluate_exit(
     now: datetime,
     days_held: int = 1,
     overnight_hold: bool = False,
+    stop_label: str = "눌림저점",
 ) -> ExitDecision:
     """급등테마주 포지션의 청산 여부를 판정한다.
 
@@ -308,6 +328,7 @@ def evaluate_exit(
     Args:
         days_held:      첫 매수 체결일부터 오늘까지의 보유 거래일 수 (당일 진입 = 1)
         overnight_hold: 강제청산 시각에 수급 조건이 충족돼 익일 이월로 판정됐는가
+        stop_label:     손절 사유에 표시할 손절가 이름 (이월 포지션의 본전 손절 등)
     """
     if avg_price <= 0 or current_price <= 0:
         return ExitDecision(False)
@@ -341,7 +362,7 @@ def evaluate_exit(
     # 2. 손절 — 진입 근거(눌림목)가 깨진 지점
     if stop_price and current_price <= stop_price:
         loss_pct = (current_price - avg_price) / avg_price * 100.0
-        return ExitDecision(True, 100.0, f"손절(눌림저점 {stop_price:,.0f} 이탈, {loss_pct:+.2f}%)")
+        return ExitDecision(True, 100.0, f"손절({stop_label} {stop_price:,.0f} 이탈, {loss_pct:+.2f}%)")
 
     # 3. 트레일링 스탑 — nT 초과 후부터 직전 N봉 최저점 추적
     if settings.use_trailing and t_value and t_value > 0:

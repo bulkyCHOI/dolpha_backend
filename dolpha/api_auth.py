@@ -69,12 +69,13 @@ def google_oauth_callback(request):
             warnings.simplefilter("ignore")
             flow.fetch_token(code=code)
         
-        # ID 토큰에서 사용자 정보 추출
+        # ID 토큰에서 사용자 정보 추출 (서버 간 시계 오차 허용: 60초)
         credentials = flow.credentials
         id_info = id_token.verify_oauth2_token(
             credentials.id_token, 
             google_requests.Request(), 
-            settings.GOOGLE_OAUTH2_CLIENT_ID
+            settings.GOOGLE_OAUTH2_CLIENT_ID,
+            clock_skew_in_seconds=60
         )
         
         # 사용자 정보 추출
@@ -136,6 +137,8 @@ def google_oauth_callback(request):
     except json.JSONDecodeError as e:
         return JsonResponse({'error': 'Invalid JSON in request body'}, status=400)
     except Exception as e:
+        import traceback
+        print(f"[Google Auth Error] {traceback.format_exc()}")
         return JsonResponse({'error': f'인증 처리 중 오류가 발생했습니다: {str(e)}'}, status=500)
 
 

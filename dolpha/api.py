@@ -1,4 +1,5 @@
 # standard library
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 # third-party
@@ -127,9 +128,12 @@ def get_stock_prices_batch(request, body: BatchPriceRequest):
     if len(stock_codes) > 50:
         return JsonResponse({"success": False, "error": "한 번에 최대 50개까지 조회 가능합니다."}, status=400)
 
-    results = {}
-    for code in stock_codes:
-        result = _fetch_naver_price(code)
-        results[code] = result if result else {"success": False, "error": "현재가 조회 실패"}
+    with ThreadPoolExecutor(max_workers=min(len(stock_codes), 20)) as executor:
+        fetched = executor.map(_fetch_naver_price, stock_codes)
+
+    results = {
+        code: (result if result else {"success": False, "error": "현재가 조회 실패"})
+        for code, result in zip(stock_codes, fetched)
+    }
 
     return JsonResponse({"success": True, "prices": results})

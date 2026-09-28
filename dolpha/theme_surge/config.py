@@ -136,6 +136,26 @@ DEFAULT_OVERNIGHT_ENABLED = False
 DEFAULT_OVERNIGHT_CONDITIONS = list(OVERNIGHT_CONDITION_KEYS)
 DEFAULT_OVERNIGHT_MIN_COUNT = 2       # 이월에 필요한 충족 조건 개수
 DEFAULT_OVERNIGHT_MAX_DAYS = 3        # 이 보유 거래일차에 도달하면 조건 무관 강제청산
+# 수급 조건과 별개로, 평가손익이 +이 배수(R) 이상인 포지션만 이월한다 (docs/13 Phase 1-3).
+# 실측: 장 마감 평가손실 상태로 이월한 7건 평균 −1.49%, 평가수익 상태 6건 평균 +2.26%.
+DEFAULT_OVERNIGHT_MIN_PROFIT_R = 0.5
+# 이월 확정 시 손절가를 평단(본전)으로 올려 익일 갭다운 손실을 제한한다 (Phase 1-4).
+DEFAULT_OVERNIGHT_BREAKEVEN_STOP = True
+
+# ── 신규 진입 리스크 게이트 (docs/13 Phase 1) ─────────────────
+# 실측: 당일 직전 거래가 손실이면 다음 거래 승률 1/6·평균 −2.71%,
+#       14시 이후 진입 승률 25%. 게이트는 '신규 진입'만 막고 보유 포지션 청산은 그대로.
+DEFAULT_DAILY_MAX_LOSSES = 1          # 당일 손실로 끝난 라운드가 이 수에 도달하면 신규 진입 중단 (0=미사용)
+DEFAULT_DAILY_MAX_LOSS_PCT = 1.5      # 당일 실현손실 합계가 계좌의 이 %에 도달하면 신규 진입 중단 (0=미사용)
+DEFAULT_ENTRY_CUTOFF_TIME = time(14, 0)   # 이 시각 이후 신규 진입 금지 (2차 이후 분할 진입은 별도 규칙)
+
+# ── 진입 품질 섀도 필터 (docs/13 Phase 0-3 / Phase 2) ─────────
+# "shadow": 판정만 ThemeEntrySignal.gate_flags 에 기록하고 진입은 막지 않는다.
+# "enforce": 필터에 걸리면 진입하지 않는다. 20거래일 섀도 검증 후 필터별로 전환한다.
+ENTRY_FILTER_MODE = "enforce"
+FILTER_THEME_MIN_FLUCTUATION_PCT = 4.0   # 진입 시점 테마 등락률 하한(%)
+FILTER_BREAKOUT_VOLUME_RATIO_MAX = 4.0   # 돌파봉 거래량비 상한 (클라이맥스 돌파 배제)
+FILTER_CHASE_MAX_PCT = 2.0               # 현재가가 전고점보다 이 % 이상 위면 추격으로 간주
 
 # ── 분할 진입 설정 ──────────────────────────────────────────
 DEFAULT_ENTRY_STAGES = [{"t": 0.0, "weight_pct": 100.0}]  # 분할 진입 기본값 (1차만, 일괄 진입)

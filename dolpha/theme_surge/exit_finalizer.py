@@ -30,6 +30,43 @@ def count_trading_days(start: date_cls, end: date_cls) -> int:
     return max(1, days)
 
 
+def _closing_profit_r(config, today: date_cls) -> float | None:
+    """장 마감 시점 평가손익(R). 매수 평단 vs 당일 마지막 1분봉 종가, 손절가는 진입 시 확정값.
+
+    산출할 수 없으면 None (호출부는 이월 조건 미충족으로 본다).
+    """
+    from datetime import datetime, time as time_cls
+
+    from django.utils import timezone as tz
+
+    from myweb.models import StockMinuteOhlcv, TradeEntry
+    from dolpha.theme_surge.overnight import unrealized_r
+
+    buys = TradeEntry.objects.filter(
+        trading_config=config, trade_type="BUY", filled_quantity__gt=0
+    ).values_list("filled_price", "filled_quantity")
+    qty = sum(int(q) for _, q in buys)
+    if qty <= 0:
+        return None
+    avg_price = sum(float(p) * int(q) for p, q in buys) / qty
+
+    # __date lookup 은 MySQL 타임존 테이블 문제로 쓰지 않고 KST 하루 범위로 자른다
+    start = tz.make_aware(datetime.combine(today, time_cls.min))
+    last_bar = (
+        StockMinuteOhlcv.objects.filter(
+            stock_code=config.stock_code,
+            bar_datetime__gte=start,
+            bar_datetime__lt=start + timedelta(days=1),
+        )
+        .order_by("-bar_datetime")
+        .values_list("close", flat=True)
+        .first()
+    )
+    if not last_bar:
+        return None
+    return unrealized_r(avg_price, float(last_bar), config.theme_pullback_low)
+
+
 # 라이브 엔진이 이미 '청산됨'으로 남긴 판정은 장 마감 확정이 건드리지 않는다.
 _LIQUIDATED_DECISIONS = {"force_exit", "max_days", "stop_loss", "trailing", "staged"}
 
@@ -50,7 +87,10 @@ def finalize_theme_exit_signals() -> dict:
         TradingConfig,
     )
     from dolpha.theme_surge.exit_rules import load_exit_settings
-    from dolpha.theme_surge.overnight import evaluate_overnight_signal_from_snapshot
+    from dolpha.theme_surge.overnight import (
+        apply_profit_cushion,
+        evaluate_overnight_signal_from_snapshot,
+    )
 
     today = tz.localdate()
     from dolpha.kis.holiday import is_trading_day
@@ -88,6 +128,14 @@ def finalize_theme_exit_signals() -> dict:
             skipped += 1
             continue
 
+        # 강제청산이 가격조회 실패로 무산된 기록은 '오버나이트'로 덮어쓰지 않고 보존한다.
+        # 정상적인 이월 판단처럼 보이면 다음 거래일 복구 청산(트레이딩 엔진의
+        # _pending_force_exit_failure)이 이 기록을 찾지 못해 사고가 의도된 전략으로
+        # 둔갑해버린다.
+        if existing and existing.decision == "force_exit_failed":
+            skipped += 1
+            continue
+
         settings = load_exit_settings(getattr(config.user, "trading_defaults", None))
         meta = (
             ThemeEntrySignal.objects
@@ -112,10 +160,16 @@ def finalize_theme_exit_signals() -> dict:
                 snapshot, settings.overnight_conditions,
                 settings.overnight_min_count, today,
             )
+            supply_met = signal.should_hold
+            signal = apply_profit_cushion(
+                signal, _closing_profit_r(config, today), settings.overnight_min_profit_r
+            )
             if not settings.overnight_enabled:
                 reason = "장 마감 시점 보유 지속 (오버나이트 미사용 — 강제청산 누락 가능)"
             elif signal.should_hold:
                 reason = f"수급 조건 충족(장 마감 스냅샷) {signal.met_count}/{signal.required}"
+            elif supply_met:
+                reason = "장 마감 시점 보유 지속 — 수익쿠션 부족(규칙상 청산 대상)"
             else:
                 reason = (
                     f"장 마감 시점 보유 지속 — 수급 {signal.met_count}/{signal.required}"

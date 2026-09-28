@@ -10,6 +10,11 @@ def default_theme_surge_force_exit_time():
     return dt_time(15, 20)
 
 
+def default_theme_surge_entry_cutoff():
+    """급등테마주 신규 진입 마감 시각 (14시 이후 진입 승률 25% 실측)."""
+    return dt_time(14, 0)
+
+
 def default_theme_surge_entry_stages():
     """급등테마주 분할 진입 기본 차수.
 
@@ -539,6 +544,15 @@ class TradingDefaults(models.Model):
     )  # 평가할 조건 키 ["foreign","institution","program","shinhan_top5"]
     theme_surge_overnight_min_count = models.IntegerField(default=2)  # 이월에 필요한 충족 개수
     theme_surge_overnight_max_days = models.IntegerField(default=3)   # 이 보유 거래일차에 조건 무관 강제청산
+    theme_surge_overnight_min_profit_r = models.FloatField(default=0.5)   # 평가손익이 +이 R 이상일 때만 이월
+    theme_surge_overnight_breakeven_stop = models.BooleanField(default=True)  # 이월 시 손절가를 평단으로 상향
+
+    # ── 급등테마주 신규 진입 리스크 게이트 (docs/13 Phase 1) ──
+    theme_surge_daily_max_losses = models.IntegerField(default=1)     # 당일 손실 라운드 수 한도 (0=미사용)
+    theme_surge_daily_max_loss_pct = models.FloatField(default=1.5)   # 당일 실현손실 한도(계좌 대비 %, 0=미사용)
+    theme_surge_entry_cutoff = models.TimeField(
+        default=default_theme_surge_entry_cutoff
+    )  # 이 시각 이후 신규 진입 금지
 
     # ── 종목 화면 재무 필터 기본값 ───────────────────────────
     # MTT · 52주 신고가 등 종목 목록 화면의 재무 필터 초기값.
@@ -886,6 +900,12 @@ class ThemeEntrySignal(models.Model):
     passed = models.BooleanField(default=False)        # 3단 조건 모두 충족
     executed = models.BooleanField(default=False)      # 실제 매수 주문 실행
     reason = models.CharField(max_length=300, blank=True)  # 판정 사유
+
+    # ── 진입 맥락 (성과 분해·섀도 필터 검증용, docs/13 Phase 0) ──
+    theme_fluctuation = models.FloatField(null=True, blank=True)   # 판정 시점 테마 등락률(%)
+    day_trade_seq = models.IntegerField(null=True, blank=True)     # 이 판정이 진입하면 당일 몇 번째 라운드인지
+    day_realized_losses = models.IntegerField(null=True, blank=True)  # 판정 시점까지 당일 손실 라운드 수
+    gate_flags = models.JSONField(default=dict, blank=True)        # 리스크 게이트·섀도 필터 판정 결과
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -918,6 +938,7 @@ class ThemeExitSignal(models.Model):
         ("trailing", "트레일링 청산"),
         ("staged", "분할 익절"),
         ("hold", "유예/보류"),
+        ("force_exit_failed", "강제청산 실패(가격조회 오류)"),
     ]
 
     user = models.ForeignKey(

@@ -190,6 +190,12 @@ class TradingDefaultsSchema(Schema):
     ]
     theme_surge_overnight_min_count: int = 2
     theme_surge_overnight_max_days: int = 3
+    theme_surge_overnight_min_profit_r: float = 0.5
+    theme_surge_overnight_breakeven_stop: bool = True
+    # 급등테마주 신규 진입 리스크 게이트
+    theme_surge_daily_max_losses: int = 1
+    theme_surge_daily_max_loss_pct: float = 1.5
+    theme_surge_entry_cutoff: str = "14:00"
 
 # 즐겨찾기 관련 스키마
 class FavoriteStockSchema(Schema):
@@ -308,6 +314,12 @@ class TradingDefaultsResponseSchema(Schema):
     ]
     theme_surge_overnight_min_count: int = 2
     theme_surge_overnight_max_days: int = 3
+    theme_surge_overnight_min_profit_r: float = 0.5
+    theme_surge_overnight_breakeven_stop: bool = True
+    # 급등테마주 신규 진입 리스크 게이트
+    theme_surge_daily_max_losses: int = 1
+    theme_surge_daily_max_loss_pct: float = 1.5
+    theme_surge_entry_cutoff: str = "14:00"
     created_at: str
     updated_at: str
 
@@ -640,9 +652,13 @@ def delete_trading_config_by_stock_code(request, stock_code: str, strategy_type:
             if sold:
                 sell_message = f" ({config.stock_name} 전량 매도 및 매매복기 기록 완료)"
             else:
-                sell_message = " (보유 수량 없음 또는 매도 실패)"
+                from dolpha.kis.trade import format_user_friendly_order_error
+                raw_err = engine.last_sell_error or ""
+                friendly_err = format_user_friendly_order_error(raw_err) if raw_err else "보유 수량 없음 또는 매도 실패"
+                sell_message = f" ({friendly_err} — 설정만 삭제됨)"
         except Exception as sell_err:
-            sell_message = f" (매도 중 오류: {sell_err} — 설정만 삭제됨)"
+            from dolpha.kis.trade import format_user_friendly_order_error
+            sell_message = f" (매도 실패: {format_user_friendly_order_error(str(sell_err))} — 설정만 삭제됨)"
 
         config.delete()
 
@@ -723,13 +739,15 @@ def force_exit_trading_config(request, data: ForceExitRequest):
                 holding_info={"qty": holding_qty, "avg_price": avg_price},
             )
             if not sold:
-                err_detail = LAST_ORDER_ERROR.get("sell", "")
-                err_msg = (
-                    f"시장가 매도 주문 실행 실패: {err_detail}"
-                    if err_detail
-                    else "시장가 매도 주문 실행에 실패했습니다."
-                )
-                return JsonResponse({"status": "error", "message": err_msg}, status=500)
+                from dolpha.kis.trade import format_user_friendly_order_error
+                err_detail = engine.last_sell_error or LAST_ORDER_ERROR.get("sell", "")
+                err_msg = format_user_friendly_order_error(err_detail)
+                return JsonResponse({
+                    "status": "error",
+                    "message": err_msg,
+                    "error": err_msg,
+                    "raw_error": err_detail,
+                }, status=400)
             return JsonResponse({
                 "status": "OK",
                 "message": f"{stock_name}({stock_code}) {holding_qty}주 시장가 매도 주문이 완료되었습니다.",
@@ -745,7 +763,9 @@ def force_exit_trading_config(request, data: ForceExitRequest):
                 "sold_qty": 0,
             })
     except Exception as e:
-        return JsonResponse({"status": "error", "message": f"강제청산 처리 중 오류 발생: {str(e)}"}, status=500)
+        from dolpha.kis.trade import format_user_friendly_order_error
+        err_msg = format_user_friendly_order_error(str(e))
+        return JsonResponse({"status": "error", "message": f"강제청산 처리 중 오류 발생: {err_msg}", "error": err_msg}, status=500)
 
 
 # 자동매매 기본값 설정 API
@@ -832,6 +852,11 @@ def get_trading_defaults(request):
             'theme_surge_overnight_conditions': defaults.theme_surge_overnight_conditions,
             'theme_surge_overnight_min_count': defaults.theme_surge_overnight_min_count,
             'theme_surge_overnight_max_days': defaults.theme_surge_overnight_max_days,
+            'theme_surge_overnight_min_profit_r': defaults.theme_surge_overnight_min_profit_r,
+            'theme_surge_overnight_breakeven_stop': defaults.theme_surge_overnight_breakeven_stop,
+            'theme_surge_daily_max_losses': defaults.theme_surge_daily_max_losses,
+            'theme_surge_daily_max_loss_pct': defaults.theme_surge_daily_max_loss_pct,
+            'theme_surge_entry_cutoff': defaults.theme_surge_entry_cutoff.strftime('%H:%M'),
             'created_at': defaults.created_at.isoformat(),
             'updated_at': defaults.updated_at.isoformat(),
         }
@@ -868,6 +893,16 @@ _FORCE_EXIT_LATEST = dt_time(15, 25)
 def _clamp_force_exit_time(value: str) -> dt_time:
     parsed = _parse_hhmm(value, fallback=dt_time(15, 20))
     return min(parsed, _FORCE_EXIT_LATEST)
+
+
+# 신규 진입 마감은 장 시작 이후 ~ 장 마감 사이여야 의미가 있다.
+_ENTRY_CUTOFF_EARLIEST = dt_time(9, 30)
+_ENTRY_CUTOFF_LATEST = dt_time(15, 30)
+
+
+def _clamp_entry_cutoff(value: str) -> dt_time:
+    parsed = _parse_hhmm(value, fallback=dt_time(14, 0))
+    return min(max(parsed, _ENTRY_CUTOFF_EARLIEST), _ENTRY_CUTOFF_LATEST)
 
 
 def _clean_exit_stages(raw: list) -> list:
@@ -1004,6 +1039,15 @@ def save_trading_defaults(request, data: TradingDefaultsSchema):
         defaults.theme_surge_overnight_max_days = int(
             _clamp(data.theme_surge_overnight_max_days, 1, 10)
         )
+        # 이월 수익쿠션: -1R(=원래 손절가) ~ +5R. 본전 손절은 이월 포지션에만 적용된다.
+        defaults.theme_surge_overnight_min_profit_r = _clamp(
+            data.theme_surge_overnight_min_profit_r, -1.0, 5.0
+        )
+        defaults.theme_surge_overnight_breakeven_stop = data.theme_surge_overnight_breakeven_stop
+        # 신규 진입 리스크 게이트 (0 = 해당 한도 미사용)
+        defaults.theme_surge_daily_max_losses = int(_clamp(data.theme_surge_daily_max_losses, 0, 20))
+        defaults.theme_surge_daily_max_loss_pct = _clamp(data.theme_surge_daily_max_loss_pct, 0.0, 100.0)
+        defaults.theme_surge_entry_cutoff = _clamp_entry_cutoff(data.theme_surge_entry_cutoff)
 
         defaults.save()
         

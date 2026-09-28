@@ -311,7 +311,12 @@ def _start_sleep_watchdog(get_scheduler_fn, restart_fn):
                 try:
                     scheduler = get_scheduler_fn()
                     if scheduler and scheduler.running:
-                        scheduler.shutdown(wait=False)
+                        # pause()로 트리거 계산 루프를 먼저 멈춰야 한다.
+                        # shutdown()만 호출하면 이미 진행 중이던 트리거 계산 스레드가
+                        # 종료 직후의 executor에 뒤늦게 작업을 제출하며
+                        # "cannot schedule new futures after shutdown" 에러를 낸다.
+                        scheduler.pause()
+                        scheduler.shutdown(wait=True)
                 except Exception as e:
                     _slog(f"[워치독] 기존 스케줄러 종료 실패: {e}")
                 try:

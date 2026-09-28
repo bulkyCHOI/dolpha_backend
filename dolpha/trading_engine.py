@@ -39,8 +39,10 @@ from dolpha.strategy_account import get_active_accounts, resolve_account
 
 # 주문 접수 후 실제 체결을 확인할 때의 재시도 횟수·간격.
 # 접수 직후에는 체결 조회에 아직 잡히지 않는 경우가 있어 몇 번 더 본다.
-FILL_CONFIRM_RETRIES = 3
-FILL_CONFIRM_INTERVAL_SEC = 1.0
+# 강제청산 시각(여러 포지션이 동시에 시장가로 몰리는 구간)엔 호가 소진에 3초보다
+# 오래 걸려 부분체결로 오판·방치되는 사례가 있었다 — 재시도 폭을 넉넉히 둔다.
+FILL_CONFIRM_RETRIES = 8
+FILL_CONFIRM_INTERVAL_SEC = 2.0
 
 if TYPE_CHECKING:
     from dolpha.theme_surge.exit_rules import ExitSettings
@@ -480,11 +482,21 @@ class TradingEngine:
                     reason=f"이미 진입한 전고점 ({decision.prev_high:,.0f}) — 중복 진입 방지",
                 )
 
+            # 패턴 신호가 떠도 리스크 게이트(마감 시각·서킷브레이커)·품질 필터에 걸리면
+            # 진입하지 않는다. 막힌 신호도 passed 판정 전 사유와 함께 남겨 사후 검증에 쓴다.
+            context = self._theme_entry_context(config, current_price, decision)
+            if decision.passed and context["block_reason"]:
+                decision = replace(
+                    decision,
+                    passed=False,
+                    reason=f"{context['block_reason']} | 신호: {decision.reason}",
+                )
+
             print(
                 f"[{config.stock_name}] 급등테마주 진입 판정:"
                 f" {'충족' if decision.passed else '미충족'} — {decision.reason}"
             )
-            self._save_theme_entry_signal(config, current_price, decision)
+            self._save_theme_entry_signal(config, current_price, decision, context)
             if decision.passed:
                 self._apply_theme_exit_levels(config, current_price, decision)
             return decision.passed
@@ -646,28 +658,95 @@ class TradingEngine:
             print(f"[{config.stock_name}] 중복 진입 확인 오류: {e}")
             return True
 
-    def _save_theme_entry_signal(
+    def _cycle_confirmed_capital(self, config: TradingConfig) -> float | None:
+        """이번 사이클에 조회한 이 전략 계좌의 확정원금. 없으면 None."""
+        balances = getattr(self, "_cycle_balances", None) or {}
+        try:
+            balance = balances.get(self._credential_for(config).token_cache_key)
+            return float(balance["ConfirmedCapital"]) if balance else None
+        except (KisCredentialError, KeyError, TypeError, ValueError):
+            return None
+
+    def _theme_entry_context(
         self, config: TradingConfig, current_price: float, decision
+    ) -> dict:
+        """진입 판정 맥락(테마 등락률·당일 집계)과 게이트·필터 판정을 모읍니다.
+
+        조회가 실패하면 게이트를 적용하지 않고(매매를 막지 않음) 사유만 로그로 남긴다.
+        """
+        from dolpha.theme_surge.entry_context import load_daily_stats, load_theme_context
+        from dolpha.theme_surge.entry_gates import (
+            check_risk_gates,
+            evaluate_quality_filters,
+            load_entry_gate_settings,
+        )
+
+        now = tz.localtime()
+        context = {
+            "tics_id": 0, "theme_name": "", "theme_fluctuation": None,
+            "day_trade_seq": None, "day_realized_losses": None,
+            "gate_flags": {}, "block_reason": "",
+        }
+        try:
+            theme = load_theme_context(config.stock_code, now)
+            stats = load_daily_stats(self.user, now)
+            gate = check_risk_gates(
+                load_entry_gate_settings(getattr(self.user, "trading_defaults", None)),
+                now.time(), stats, self._cycle_confirmed_capital(config),
+            )
+            quality = evaluate_quality_filters(
+                theme.fluctuation, decision.volume_ratio, current_price, decision.prev_high,
+            )
+        except Exception as e:  # noqa: BLE001 — 맥락 조회 실패가 매매를 막아선 안 된다
+            print(f"[{config.stock_name}] 진입 맥락 조회 오류(게이트 미적용): {e}")
+            return context
+
+        context.update(
+            tics_id=theme.tics_id,
+            theme_name=theme.theme_name,
+            theme_fluctuation=theme.fluctuation,
+            day_trade_seq=stats.rounds_started + 1,
+            day_realized_losses=stats.realized_losses,
+            gate_flags={
+                "risk": gate.flags,
+                "quality": quality.flags,
+                "theme_slot": theme.slot_time,
+            },
+            block_reason=gate.reason or quality.reason,
+        )
+        return context
+
+    def _save_theme_entry_signal(
+        self, config: TradingConfig, current_price: float, decision, context: dict | None = None
     ) -> None:
         """진입 조건 판정 결과를 타임라인용으로 저장합니다."""
         from myweb.models import ThemeEntrySignal, ThemeLeaderCandidate
 
         try:
             now = tz.localtime()
-            candidate = (
-                ThemeLeaderCandidate.objects.filter(
-                    date=now.date(), stock_code=config.stock_code
+            if context is None:
+                candidate = (
+                    ThemeLeaderCandidate.objects.filter(
+                        date=now.date(), stock_code=config.stock_code
+                    )
+                    .order_by("-slot_time")
+                    .first()
                 )
-                .order_by("-slot_time")
-                .first()
-            )
+                context = {
+                    "tics_id": candidate.tics_id if candidate else 0,
+                    "theme_name": candidate.theme_name if candidate else "",
+                }
 
             self._last_theme_signal = ThemeEntrySignal.objects.create(
                 user=self.user,
                 date=now.date(),
                 checked_at=now,
-                tics_id=candidate.tics_id if candidate else 0,
-                theme_name=candidate.theme_name if candidate else "",
+                tics_id=context.get("tics_id") or 0,
+                theme_name=context.get("theme_name") or "",
+                theme_fluctuation=context.get("theme_fluctuation"),
+                day_trade_seq=context.get("day_trade_seq"),
+                day_realized_losses=context.get("day_realized_losses"),
+                gate_flags=context.get("gate_flags") or {},
                 stock_code=config.stock_code,
                 stock_name=config.stock_name,
                 price=current_price,
@@ -1162,6 +1241,25 @@ class TradingEngine:
         except Exception as e:  # noqa: BLE001 — 기록 실패가 매매를 막아선 안 된다
             print(f"[{config.stock_name}] 청산 판정 기록 실패: {e}")
 
+    @staticmethod
+    def _theme_effective_stop(
+        config: TradingConfig, settings: "ExitSettings", avg_price: float, days_held: int
+    ) -> tuple[float | None, str]:
+        """이번 판정에 쓸 손절가와 그 이름.
+
+        익일 이후(이월된 포지션)는 손절가를 평단(본전)으로 올린다 (docs/13 Phase 1-4).
+        config 의 원래 손절가는 R 산출 기준이므로 덮어쓰지 않고 판정 시점에만 적용한다.
+        """
+        stop = config.theme_pullback_low
+        if (
+            settings.overnight_breakeven_stop
+            and days_held >= 2
+            and avg_price > 0
+            and (stop is None or avg_price > stop)
+        ):
+            return avg_price, "이월 본전"
+        return stop, "눌림저점"
+
     def _evaluate_theme_exit(
         self, config: TradingConfig, current_price: float, holding_info: dict
     ):
@@ -1177,6 +1275,7 @@ class TradingEngine:
             is_trailing_triggered,
             trailing_stop_line,
         )
+        from dolpha.theme_surge.overnight import apply_profit_cushion, unrealized_r
 
         cache_key = (config.id, current_price)
         cached = getattr(self, "_theme_exit_cache", None)
@@ -1223,14 +1322,24 @@ class TradingEngine:
             overnight_signal = self._theme_overnight_signal(config, settings, now, days_held)
         else:
             days_held, overnight_signal = 1, None
+        if overnight_signal is not None:
+            # 수급이 충족돼도 평가수익 쿠션이 없으면 이월하지 않는다 (docs/13 Phase 1-3).
+            # R 은 항상 진입 시 확정한 원래 손절가 기준 — 본전 손절로 바뀐 뒤에도 흔들리지 않게.
+            overnight_signal = apply_profit_cushion(
+                overnight_signal,
+                unrealized_r(avg_price, current_price, config.theme_pullback_low),
+                settings.overnight_min_profit_r,
+            )
         overnight_hold = bool(overnight_signal and overnight_signal.should_hold)
+        stop_price, stop_label = self._theme_effective_stop(config, settings, avg_price, days_held)
 
         try:
             decision = evaluate_exit(
                 settings,
                 avg_price=avg_price,
                 current_price=current_price,
-                stop_price=config.theme_pullback_low,
+                stop_price=stop_price,
+                stop_label=stop_label,
                 t_value=config.theme_t_value,
                 peak_price=config.trailing_stop_peak_price,
                 completed_stages=list(config.staged_exit_completed_stages or []),
@@ -2391,9 +2500,67 @@ class TradingEngine:
                     f"[{config.stock_name}] 계좌에 없는 포지션 감지"
                     f" — DB 정리 후 비활성화"
                 )
+                self._reconcile_partial_fills(config)
                 self._deactivate_config(config)
 
         self._warn_orphan_positions(held_codes_by_account)
+
+    def _reconcile_partial_fills(self, config: TradingConfig) -> None:
+        """계좌엔 이미 없는데(잔고 0) 장부는 부분체결로 남아 순보유가 있는 경우,
+        해당 매도 주문을 다시 조회해 최종 체결값으로 장부를 보정한다.
+
+        시장가 매도가 체결 확인 재시도 시간(FILL_CONFIRM_RETRIES) 안에 완료되지
+        못하면 '부분체결'로 기록된 채 방치되는데, 거래소에서는 그 뒤로도 계속
+        체결이 진행돼 결국 전량 체결되는 사례가 있었다(강제청산 시간대 등).
+        그 경우 이 재조회 없이 비활성화만 하면 매도 수량·손익이 장부에서
+        영구적으로 누락된다.
+        """
+        pos = self._config_net_position(config)
+        if pos.qty <= 0:
+            return
+
+        # filled_quantity < order_quantity 비교는 파이썬에서 직접 거른다
+        # (DB 필드끼리 비교하려면 F() 식이 필요한데, 건수가 적어 굳이 안 씀)
+        incomplete_sells = [
+            e for e in TradeEntry.objects.filter(
+                user=self.user, trading_config=config,
+                trade_type="SELL", status="FILLED",
+            ).order_by("-created_at")
+            if e.filled_quantity < e.order_quantity
+        ]
+
+        for entry in incomplete_sells:
+            try:
+                fill = KIS.GetOrderFill(
+                    entry.order_no, self._credential_for(config), stock_code=entry.stock_code,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[{config.stock_name}] 최종 체결 재조회 실패: {e}")
+                continue
+            if fill is None or fill["filled_qty"] <= entry.filled_quantity:
+                continue
+
+            old_qty = entry.filled_quantity
+            entry.filled_quantity = fill["filled_qty"]
+            entry.filled_price = Decimal(str(fill["avg_price"] or entry.filled_price))
+            entry.filled_amount = Decimal(
+                str(fill["filled_amount"] or float(entry.filled_price) * fill["filled_qty"])
+            )
+            entry.note = (f"{entry.note} " if entry.note else "") + (
+                f"[재조회 보정: {old_qty}→{fill['filled_qty']}주]"
+            )
+            entry.save(update_fields=["filled_quantity", "filled_price", "filled_amount", "note"])
+            order_log(
+                f"[체결보정] {config.stock_name}({config.stock_code}) 주문 {entry.order_no}"
+                f" {old_qty}→{fill['filled_qty']}주"
+            )
+
+        remain = self._config_net_position(config).qty
+        if remain > 0:
+            order_log(
+                f"[장부불일치] {config.stock_name}({config.stock_code}) 재조회 후에도"
+                f" 장부상 {remain}주가 남아 있는데 계좌 잔고는 0입니다 — 수동 확인 필요"
+            )
 
     def _warn_orphan_positions(self, held_codes_by_account: dict[str, set]) -> None:
         """계좌엔 남아 있는데 설정이 비활성인 '고아 포지션'을 경고한다.
@@ -2482,6 +2649,8 @@ class TradingEngine:
 
         # 사이클 레벨 캐시: 계좌마다 GetBalance, GetMyStockList 각 1회만 호출
         balances, holdings_by_account = self._load_account_snapshots()
+        # 신규 진입 게이트의 '당일 실현손실 % 한도'가 계좌 확정원금을 참조한다
+        self._cycle_balances = balances
         if not balances:
             print("[TradingEngine] 사용 가능한 계좌 잔고 없음 — 종료")
             return

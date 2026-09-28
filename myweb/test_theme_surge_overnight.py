@@ -387,13 +387,41 @@ class ExitFinalizerTests(TestCase):
         self.config = TradingConfig.objects.create(
             user=self.user, stock_code="032820", stock_name="우리기술",
             trading_mode="manual", strategy_type="theme_surge", is_active=True,
+            theme_pullback_low=95.0,   # 평단 100 → 1R = 5원
         )
+        # 실행일이 휴장일(주말)이어도 finalizer 가 동작하도록 개장일 판정을 고정한다
+        patcher = patch("dolpha.kis.holiday.is_trading_day", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self._closing_bar(104.0)   # 기본: +0.8R 수익 쿠션
         TradeEntry.objects.create(
             user=self.user, trading_config=self.config, stock_code="032820",
             stock_name="우리기술", trade_type="BUY", entry_type="INITIAL",
             order_quantity=10, filled_quantity=10, filled_price=Decimal("100"),
             status="FILLED", filled_at=tz.now(),
         )
+
+    def _closing_bar(self, close):
+        from django.utils import timezone as tz
+        from myweb.models import StockMinuteOhlcv
+
+        StockMinuteOhlcv.objects.update_or_create(
+            stock_code="032820",
+            bar_datetime=tz.localtime().replace(hour=15, minute=29, second=0, microsecond=0),
+            defaults={"open": close, "high": close, "low": close, "close": close, "volume": 1},
+        )
+
+    def test_supply_met_but_no_profit_cushion_flags_rule_violation(self):
+        from myweb.models import ThemeExitSignal
+        from dolpha.theme_surge.exit_finalizer import finalize_theme_exit_signals
+
+        self._closing_bar(101.0)   # +0.2R < 기본 0.5R
+        self._snapshot(foreign_ntby=5000, program_ntby=9000)
+        finalize_theme_exit_signals()
+        row = ThemeExitSignal.objects.get(user=self.user, stock_code="032820")
+        self.assertEqual(row.overnight_met_count, 2)
+        self.assertIn("수익쿠션 부족", row.reason)
+        self.assertIn("수익쿠션 +0.20R✗", row.overnight_detail)
 
     def _snapshot(self, foreign_ntby, program_ntby):
         from django.utils import timezone as tz
@@ -419,7 +447,7 @@ class ExitFinalizerTests(TestCase):
         self.assertEqual(row.decision, "overnight")
         self.assertTrue(row.overnight_evaluated)
         self.assertEqual(row.overnight_met_count, 2)
-        self.assertIn("충족", row.reason)
+        self.assertIn("수급 조건 충족", row.reason)
 
     def test_records_overnight_but_flags_rule_violation(self):
         from myweb.models import ThemeExitSignal

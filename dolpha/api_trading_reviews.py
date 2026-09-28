@@ -14,8 +14,22 @@ from django.db.models import Q
 from django.core.paginator import Paginator
 from pytz import timezone as pytz_tz
 
-from myweb.models import TradingSummary, TradeEntry
+from myweb.models import TradingSummary, TradeEntry, TradingConfig
 from .api_mypage_ninja import get_authenticated_user
+
+_STRATEGY_LABELS = dict(TradingConfig.STRATEGY_TYPES)
+
+
+def _summary_strategy_type(summary: TradingSummary) -> str:
+    """거래 요약의 전략 타입을 첫 체결 기록의 설정에서 역추적한다.
+
+    TradingSummary에는 strategy_type이 없고, TradeEntry → TradingConfig로만
+    전략을 추적할 수 있다. entries는 prefetch_related로 미리 로드되어 있어야 한다.
+    """
+    entry = next((e for e in summary.entries.all() if e.trading_config_id), None)
+    if entry and entry.trading_config:
+        return entry.trading_config.strategy_type
+    return "unknown"
 
 # 라우터 생성
 trading_reviews_router = Router()
@@ -331,7 +345,11 @@ def get_trading_summary_data(request):
         if not user:
             return JsonResponse({"error": "인증이 필요합니다."}, status=401)
 
-        queryset = TradingSummary.objects.filter(user=user).order_by("-updated_at")
+        queryset = (
+            TradingSummary.objects.filter(user=user)
+            .order_by("-updated_at")
+            .prefetch_related("entries__trading_config")
+        )
 
         data = [
             {
@@ -356,6 +374,8 @@ def get_trading_summary_data(request):
                 "memo": ts.memo,
                 "created_at": ts.created_at.isoformat(),
                 "updated_at": ts.updated_at.isoformat(),
+                "strategy_type": (strategy_type := _summary_strategy_type(ts)),
+                "strategy_label": _STRATEGY_LABELS.get(strategy_type, "미분류"),
             }
             for ts in queryset
         ]

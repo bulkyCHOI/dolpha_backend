@@ -231,6 +231,42 @@ def evaluate_overnight_signal(
     )
 
 
+def unrealized_r(avg_price: float, price: float, stop_price: float | None) -> float | None:
+    """평가손익을 R 배수로 환산한다. R = 평단 − 손절가. 산출 불가면 None."""
+    if not stop_price or avg_price <= 0 or price <= 0:
+        return None
+    risk = avg_price - stop_price
+    if risk <= 0:
+        return None
+    return (price - avg_price) / risk
+
+
+def apply_profit_cushion(
+    signal: OvernightSignal, profit_r: float | None, min_profit_r: float
+) -> OvernightSignal:
+    """수급 판정에 '수익 쿠션' 필수 조건을 AND 로 덧붙인다 (docs/13 Phase 1-3).
+
+    수급이 충족돼도 평가손익이 min_profit_r 미만이면 이월하지 않는다.
+    R 을 산출할 수 없으면(손절가 없음 등) 보수적으로 이월하지 않는다.
+    수급 판정 결과(met, met_count)는 그대로 두고 should_hold 와 detail 만 바꾼다.
+    """
+    if profit_r is None:
+        cushion_ok, cushion_text = False, "수익쿠션 산출불가"
+    else:
+        cushion_ok = profit_r >= min_profit_r
+        mark = "✓" if cushion_ok else "✗"
+        cushion_text = f"수익쿠션 {profit_r:+.2f}R{mark}(≥{min_profit_r:+g}R)"
+
+    return OvernightSignal(
+        available=signal.available,
+        met=signal.met,
+        met_count=signal.met_count,
+        required=signal.required,
+        should_hold=signal.should_hold and cushion_ok,
+        detail=f"{signal.detail} · {cushion_text}",
+    )
+
+
 def evaluate_overnight_signal_from_snapshot(
     snapshot,
     conditions: Sequence[str] | None,
