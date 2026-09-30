@@ -2505,6 +2505,49 @@ class TradingEngine:
 
         self._warn_orphan_positions(held_codes_by_account)
 
+    def _refetch_and_apply_fill(self, config: TradingConfig, entry: TradeEntry) -> bool:
+        """KIS API로 주문 체결을 재조회하여 TradeEntry를 보정한다.
+
+        Args:
+            config: TradingConfig 인스턴스
+            entry: TradeEntry 인스턴스 (filled_quantity < order_quantity)
+
+        Returns:
+            갱신 성공 시 True, 그 외 False.
+        """
+        # GetOrderFill 은 order_date 를 안 넘기면 조회 범위를 '오늘'로 고정한다.
+        # 사후 보정은 며칠 지난 주문도 대상이므로 주문일을 명시해야 한다.
+        order_date = tz.localtime(entry.created_at).strftime("%Y%m%d")
+        try:
+            fill = KIS.GetOrderFill(
+                entry.order_no,
+                self._credential_for(config),
+                stock_code=entry.stock_code,
+                order_date=order_date,
+            )
+        except Exception as e:  # noqa: BLE001
+            print(f"[{config.stock_name}] 체결 재조회 실패: {e}")
+            return False
+
+        if fill is None or fill["filled_qty"] <= entry.filled_quantity:
+            return False
+
+        old_qty = entry.filled_quantity
+        entry.filled_quantity = fill["filled_qty"]
+        entry.filled_price = Decimal(str(fill["avg_price"] or entry.filled_price))
+        entry.filled_amount = Decimal(
+            str(fill["filled_amount"] or float(entry.filled_price) * fill["filled_qty"])
+        )
+        entry.note = (f"{entry.note} " if entry.note else "") + (
+            f"[재조회 보정: {old_qty}→{fill['filled_qty']}주]"
+        )
+        entry.save(update_fields=["filled_quantity", "filled_price", "filled_amount", "note"])
+        order_log(
+            f"[체결보정] {config.stock_name}({config.stock_code}) 주문 {entry.order_no}"
+            f" {old_qty}→{fill['filled_qty']}주"
+        )
+        return True
+
     def _reconcile_partial_fills(self, config: TradingConfig) -> None:
         """계좌엔 이미 없는데(잔고 0) 장부는 부분체결로 남아 순보유가 있는 경우,
         해당 매도 주문을 다시 조회해 최종 체결값으로 장부를 보정한다.
@@ -2530,30 +2573,7 @@ class TradingEngine:
         ]
 
         for entry in incomplete_sells:
-            try:
-                fill = KIS.GetOrderFill(
-                    entry.order_no, self._credential_for(config), stock_code=entry.stock_code,
-                )
-            except Exception as e:  # noqa: BLE001
-                print(f"[{config.stock_name}] 최종 체결 재조회 실패: {e}")
-                continue
-            if fill is None or fill["filled_qty"] <= entry.filled_quantity:
-                continue
-
-            old_qty = entry.filled_quantity
-            entry.filled_quantity = fill["filled_qty"]
-            entry.filled_price = Decimal(str(fill["avg_price"] or entry.filled_price))
-            entry.filled_amount = Decimal(
-                str(fill["filled_amount"] or float(entry.filled_price) * fill["filled_qty"])
-            )
-            entry.note = (f"{entry.note} " if entry.note else "") + (
-                f"[재조회 보정: {old_qty}→{fill['filled_qty']}주]"
-            )
-            entry.save(update_fields=["filled_quantity", "filled_price", "filled_amount", "note"])
-            order_log(
-                f"[체결보정] {config.stock_name}({config.stock_code}) 주문 {entry.order_no}"
-                f" {old_qty}→{fill['filled_qty']}주"
-            )
+            self._refetch_and_apply_fill(config, entry)
 
         remain = self._config_net_position(config).qty
         if remain > 0:
@@ -2561,6 +2581,59 @@ class TradingEngine:
                 f"[장부불일치] {config.stock_name}({config.stock_code}) 재조회 후에도"
                 f" 장부상 {remain}주가 남아 있는데 계좌 잔고는 0입니다 — 수동 확인 필요"
             )
+
+    def _reconcile_pending_buy_fills(self) -> None:
+        """부분체결로 고정된 BUY TradeEntry를 재조회해 최종 체결값으로 보정한다.
+
+        16초 재시도 안에 완전 체결을 확인 못한 매수 주문의 경우, filled_quantity가
+        그 시점의 부분체결 수량으로 영구 고정돼 실계좌와 DB 수량이 어긋난다.
+        SELL 케이스의 사후 보정 패턴을 BUY에도 적용한다.
+
+        대상: trade_type="BUY", status="FILLED"이면서 filled_quantity < order_quantity인 항목 중
+        - 방금 막 생성된 것(<1분)과 경합하지 않도록 최소 1분 이상 경과한 것만
+        - 주문조회 API 보관 기간(약 7일)을 넘는 주문은 무한정 재조회하지 않음
+        """
+        now = tz.now()
+        min_age = timedelta(minutes=1)
+        max_age = timedelta(days=7)
+
+        # 1분 이상 경과하고 7일 이내인 부분체결 BUY 항목
+        cutoff_time = now - max_age
+        min_time = now - min_age
+
+        incomplete_buys = [
+            e for e in TradeEntry.objects.filter(
+                user=self.user,
+                trade_type="BUY",
+                status="FILLED",
+                created_at__lt=min_time,
+                created_at__gte=cutoff_time,
+            ).order_by("-created_at")
+            if e.filled_quantity < e.order_quantity
+        ]
+
+        if not incomplete_buys:
+            return
+
+        print(f"[TradingEngine] 부분체결 BUY 재조회: {len(incomplete_buys)}건")
+
+        for entry in incomplete_buys:
+            try:
+                config = entry.trading_config
+                if config is None or not config.is_active:
+                    continue
+
+                updated = self._refetch_and_apply_fill(config, entry)
+                if not updated:
+                    # 재조회 결과가 없거나 증가분이 없으면 기간 만료로 표시
+                    if "[재조회 포기" not in entry.note:
+                        entry.note = (f"{entry.note} " if entry.note else "") + (
+                            "[재조회 포기: 기간 만료]"
+                        )
+                        entry.save(update_fields=["note"])
+
+            except Exception as e:  # noqa: BLE001
+                print(f"[TradingEngine] BUY 부분체결 보정 오류 (무시): {e}")
 
     def _warn_orphan_positions(self, held_codes_by_account: dict[str, set]) -> None:
         """계좌엔 남아 있는데 설정이 비활성인 '고아 포지션'을 경고한다.
@@ -2573,7 +2646,18 @@ class TradingEngine:
         상태를 바꾸지는 않는다. 복구는 /trading-status/reconcile-positions 가 한다.
         """
         inactive = TradingConfig.objects.filter(user=self.user, is_active=False)
+        active_positions = set(
+            TradingConfig.objects.filter(user=self.user, is_active=True).values_list(
+                "stock_code", "strategy_type"
+            )
+        )
         for config in list(inactive):
+            # 같은 종목·전략을 이어받은 새 config가 이미 활성화돼 포지션을 추적
+            # 중이면(예: 재진입, 유령 포지션 복구) 이 config는 완결된 과거 이력일
+            # 뿐이므로 고아 포지션이 아니다.
+            if (config.stock_code, config.strategy_type) in active_positions:
+                continue
+
             try:
                 account_key = self._credential_for(config).token_cache_key
             except KisCredentialError:
@@ -2672,6 +2756,12 @@ class TradingEngine:
                 self._reconcile_positions(reconcilable)
             except Exception as e:
                 print(f"[TradingEngine] 포지션 재조정 실패 (무시): {e}")
+
+        # 부분체결로 고정된 BUY 주문 사후 보정
+        try:
+            self._reconcile_pending_buy_fills()
+        except Exception as e:
+            print(f"[TradingEngine] BUY 부분체결 보정 실패 (무시): {e}")
 
         # 설정 다시 로드 (재조정 이후 최신 상태 반영)
         self._load_configs()
