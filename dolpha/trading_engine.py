@@ -36,6 +36,7 @@ from dolpha.kis.credentials import credential_for_account
 from dolpha.order_log import order_log
 from dolpha.stockCommon import GetOhlcv, GetNowDateStr
 from dolpha.strategy_account import get_active_accounts, resolve_account
+from dolpha import telegram_notifier
 
 # 주문 접수 후 실제 체결을 확인할 때의 재시도 횟수·간격.
 # 접수 직후에는 체결 조회에 아직 잡히지 않는 경우가 있어 몇 번 더 본다.
@@ -462,6 +463,7 @@ class TradingEngine:
         청산/익절은 기존 Manual 설정을 그대로 사용하므로 여기서 다루지 않습니다.
         """
         from dolpha.theme_surge import check_theme_surge_entry as _check
+        from dolpha.theme_surge.entry_gates import block_reason
 
         try:
             use_foreign = self._theme_surge_uses_foreign_filter()
@@ -489,7 +491,7 @@ class TradingEngine:
                 decision = replace(
                     decision,
                     passed=False,
-                    reason=f"{context['block_reason']} | 신호: {decision.reason}",
+                    reason=block_reason(context["block_reason"], decision.reason),
                 )
 
             print(
@@ -1653,6 +1655,10 @@ class TradingEngine:
                         filled_amount=Decimal("0"), status="FAILED",
                         note=f"KIS 매수 주문 실패: {err_msg}"[:255], ordered_at=tz.now(),
                     )
+                    # 매수 실패 알림
+                    telegram_notifier.notify_failure_async(
+                        "매수", stock_name, stock_code, err_msg, self.user, config, tz.now()
+                    )
                     return False
 
                 # 체결은 되돌릴 수 없다. DB 기록보다 먼저 파일 로그를 남겨 두어야
@@ -1721,7 +1727,14 @@ class TradingEngine:
 
             # 커밋된 뒤에 실제 체결을 확인해 장부를 실측값으로 보정한다.
             # 확인을 트랜잭션 안에서 하면 조회 지연·실패가 체결 기록까지 롤백시킨다.
-            self._apply_fill_to_entry(config, entry, result["OrderNum2"], buy_qty)
+            fill = self._apply_fill_to_entry(config, entry, result["OrderNum2"], buy_qty)
+            # 매수 성공 알림 (실체결 수량/평균가로 보정)
+            notify_qty = fill["filled_qty"] if fill and fill["filled_qty"] else buy_qty
+            notify_price = fill["avg_price"] if fill and fill["avg_price"] else current_price
+            telegram_notifier.notify_buy_async(
+                stock_name, stock_code, config.strategy_type,
+                notify_qty, notify_price, self.user, config, tz.now()
+            )
             return True
 
         except Exception as e:
@@ -1732,6 +1745,10 @@ class TradingEngine:
             order_log(
                 f"[매수오류] {stock_name}({stock_code}) — 체결 여부 확인 필요"
                 f" (기록 롤백 가능성): {e}"
+            )
+            # 매수 예외 알림
+            telegram_notifier.notify_failure_async(
+                "매수", stock_name, stock_code, str(e), self.user, config, tz.now()
             )
             return False
 
@@ -1813,6 +1830,10 @@ class TradingEngine:
                     filled_amount=Decimal("0"), status="FAILED",
                     note=f"KIS 매도 주문 실패 ({reason}): {err_msg}"[:255], ordered_at=tz.now(),
                 )
+                # 매도 실패 알림
+                telegram_notifier.notify_failure_async(
+                    "매도", stock_name, stock_code, err_msg, self.user, config, tz.now()
+                )
                 return False
 
             self.last_sell_error = ""
@@ -1871,6 +1892,11 @@ class TradingEngine:
                 current_price = fill["avg_price"] or current_price
 
             if fully_exited:
+                # 이전 단계(분할 익절 등)에서 부분체결로 고정된 SELL 엔트리가 있으면
+                # 비활성화 전에 재조회해 보정한다 — 그렇지 않으면 config가 비활성화된
+                # 뒤로는 _reconcile_positions(활성 설정만 순회)가 다시는 못 고친다.
+                # KIS 재조회는 외부 I/O이므로 트랜잭션 밖에서 먼저 처리한다.
+                self._reconcile_partial_fills(config)
                 with transaction.atomic():
                     # 포지션 청산 — BUY 엔트리 CANCELLED, 상태 리셋, 비활성화
                     self._deactivate_config(config)
@@ -1888,6 +1914,12 @@ class TradingEngine:
                 if profit_loss is not None
                 else f"[{stock_name}] 매도 완료: {holding_qty}주 @ {current_price:,.0f}원"
             )
+            # 매도 성공 알림
+            remain_qty = fill["remain_qty"] if fill else 0
+            telegram_notifier.notify_sell_async(
+                stock_name, stock_code, holding_qty, current_price, avg_price,
+                profit_loss, profit_loss_pct, reason, remain_qty, self.user, config, tz.now()
+            )
             return True
 
         except Exception as e:
@@ -1897,6 +1929,10 @@ class TradingEngine:
             order_log(
                 f"[매도오류] {stock_name}({stock_code}) — 체결 여부 확인 필요"
                 f" (기록 롤백 가능성): {e}"
+            )
+            # 매도 예외 알림
+            telegram_notifier.notify_failure_async(
+                "매도", stock_name, stock_code, str(e), self.user, config, tz.now()
             )
             return False
 
@@ -1969,6 +2005,10 @@ class TradingEngine:
                     filled_amount=Decimal("0"), status="FAILED",
                     note=f"KIS 분할매도 주문 실패 ({reason}): {err_msg}"[:255], ordered_at=tz.now(),
                 )
+                # 분할매도 실패 알림
+                telegram_notifier.notify_failure_async(
+                    "분할매도", stock_name, stock_code, err_msg, self.user, config, tz.now()
+                )
                 return False
 
             now = tz.now()
@@ -2022,16 +2062,28 @@ class TradingEngine:
 
             # 분할 매도로 잔여 수량이 0이 되는 경우 → 전량 청산 처리
             if sell_qty >= holding_qty:
+                # 이전 단계에서 부분체결로 고정된 SELL 엔트리가 있으면 비활성화 전에
+                # 재조회해 보정한다 (execute_sell_order의 전량청산 분기와 동일한 이유).
+                self._reconcile_partial_fills(config)
                 self._deactivate_config(config)
 
             # 항상 TradingSummary 업데이트
             self._update_trading_summary(config, stock_code, stock_name)
 
+            # 분할매도 성공 알림
+            telegram_notifier.notify_partial_sell_async(
+                stock_name, stock_code, sell_qty, holding_qty, current_price, avg_price,
+                profit_loss, profit_loss_pct, sell_pct, reason, self.user, config, tz.now()
+            )
             return True
 
         except Exception as e:
             print(f"[{stock_name}] 분할 매도 주문 오류: {e}")
             traceback.print_exc()
+            # 분할매도 예외 알림
+            telegram_notifier.notify_failure_async(
+                "분할매도", stock_name, stock_code, str(e), self.user, config, tz.now()
+            )
             return False
 
     # ──────────────────────────────────────────────
