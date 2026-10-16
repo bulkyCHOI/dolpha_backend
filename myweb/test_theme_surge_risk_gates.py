@@ -255,3 +255,56 @@ class EffectiveStopTests(_EngineFixture):
             self.config, self._settings(breakeven=False), 1000.0, 2
         )
         self.assertEqual(stop, 950.0)
+
+
+class GateBlockDisplayTests(_EngineFixture):
+    """게이트에 막힌 판정이 화면용 gate_block / 현황 배너로 드러나는지."""
+
+    def test_describe_gate_block(self):
+        from dolpha.theme_surge.entry_gates import block_reason, describe_gate_block
+
+        info = describe_gate_block(block_reason("서킷브레이커 — 당일 손실 1회 ≥ 한도 1회", "눌림 → 돌파"))
+        self.assertEqual(info["kind"], "circuit_breaker")
+        self.assertEqual(info["stage"], "risk")
+        self.assertEqual(info["detail"], "서킷브레이커 — 당일 손실 1회 ≥ 한도 1회")
+        self.assertEqual(info["signal"], "눌림 → 돌파")
+        self.assertEqual(describe_gate_block("진입 품질 필터 — x")["kind"], "quality_filter")
+        self.assertIsNone(describe_gate_block("돌파 미성립 — 거래량 부족"))
+        self.assertIsNone(describe_gate_block(""))
+
+    def test_watching_row_and_banner_show_circuit_breaker(self):
+        from dolpha.theme_surge.positions import build_positions
+
+        now = tz.localtime()
+        self._fill(self.config, "BUY", "INITIAL", now.replace(hour=9, minute=40))
+        self._fill(self.config, "SELL", "STOP_LOSS", now.replace(hour=9, minute=50), -300_000)
+        blocked = EngineGateWiringTests._PASSED
+        with patch("dolpha.theme_surge.check_theme_surge_entry", return_value=blocked), \
+                patch("dolpha.trading_engine.tz.localtime",
+                      return_value=KST.localize(datetime.combine(tz.localdate(), time(10, 30)))):
+            self.engine.check_theme_surge_entry(self.config, 10_050.0)
+
+        with patch("dolpha.theme_surge.positions._kis_holdings", return_value={}):
+            result = build_positions(self.user)
+
+        row = result["watching"][0]
+        self.assertEqual(row["gate_block"]["kind"], "circuit_breaker")
+        self.assertIn("신호: ", row["last_reason"])
+        # 배너는 실행 시각 기준이라(14시 이후면 진입 마감이 우선) 시각을 고정해 직접 확인한다
+        from dolpha.theme_surge.entry_context import current_gate_status
+
+        at_1030 = KST.localize(datetime.combine(tz.localdate(), time(10, 30)))
+        self.assertEqual(current_gate_status(self.user, at_1030)["kind"], "circuit_breaker")
+        self.assertIn("entry_gate", result["summary"])
+
+    def test_no_banner_when_nothing_blocked(self):
+        from dolpha.theme_surge.entry_context import current_gate_status
+
+        now = KST.localize(datetime.combine(tz.localdate(), time(10, 0)))
+        self.assertIsNone(current_gate_status(self.user, now))
+
+    def test_banner_after_cutoff(self):
+        from dolpha.theme_surge.entry_context import current_gate_status
+
+        now = KST.localize(datetime.combine(tz.localdate(), time(14, 30)))
+        self.assertEqual(current_gate_status(self.user, now)["kind"], "entry_cutoff")

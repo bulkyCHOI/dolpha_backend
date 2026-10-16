@@ -18,6 +18,7 @@ KIS 국내주식 거래 API 모듈
     MakeBuyMarketOrder(stock_code, qty, account)   시장가 매수
     MakeSellMarketOrder(stock_code, qty, account)  시장가 매도
     GetOrderFill(order_no, account, ...)           주문번호별 체결 현황 조회
+    CancelOrder(order_no, org_no, account)         미체결 잔량 취소
 """
 
 import time
@@ -481,6 +482,61 @@ def MakeBuyMarketOrderUS(stock_code: str, qty: int, exchange: str = "NASD", acco
 
 
 # ─────────────────────────────────────────────────────────────
+# 주문 취소 (정정취소)
+# ─────────────────────────────────────────────────────────────
+
+def CancelOrder(order_no: str, org_no: str = "", account=None) -> bool:
+    """원주문의 미체결 잔량을 전량 취소합니다 (주식주문(정정취소), order-rvsecncl).
+
+    부분체결된 시장가 주문의 잔량은 KIS 에 살아 있다가 나중에 체결될 수 있다.
+    잔량을 재주문하기 전에 반드시 취소해 이중 주문을 막아야 한다.
+
+    Args:
+        order_no: 원주문번호(ODNO). MakeBuy/SellMarketOrder 의 "OrderNum2"
+        org_no:   원주문 한국거래소전송주문조직번호(MakeXxx 의 "OrderNum",
+                  또는 GetOrderFill 의 "org_no"). 모르면 빈 문자열.
+    Returns:
+        접수 성공 True, 실패 False (사유는 LAST_ORDER_ERROR["cancel"]).
+        True 는 '취소 접수'이며, 최종 상태는 GetOrderFill 로 다시 확인해야 한다.
+    """
+    cred = resolve_credential(account)
+    _sleep(cred)
+
+    tr_id = "VTTC0013U" if cred.is_virtual else "TTTC0013U"
+    url = f"{cred.url_base}/uapi/domestic-stock/v1/trading/order-rvsecncl"
+
+    data = {
+        **_account_params(cred),
+        "KRX_FWDG_ORD_ORGNO": org_no or "",
+        "ORGN_ODNO": order_no,
+        "ORD_DVSN": "01",
+        "RVSE_CNCL_DVSN_CD": "02",   # 02 = 취소
+        "ORD_QTY": "0",
+        "ORD_UNPR": "0",
+        "QTY_ALL_ORD_YN": "Y",       # 잔량 전부
+    }
+
+    try:
+        headers = GetHeaders(tr_id=tr_id, custtype="P", account=cred)
+        headers["hashkey"] = GetHashKey(data, cred)
+        res = requests.post(url, headers=headers, data=json.dumps(data), timeout=10, verify=False)
+        body = res.json()
+    except Exception as e:  # noqa: BLE001 — 네트워크·JSON 오류 모두 취소 실패
+        err = str(e)
+        print(f"[KIS] CancelOrder({order_no}) 오류: {err}")
+        LAST_ORDER_ERROR["cancel"] = err
+        return False
+
+    if res.status_code == 200 and body.get("rt_cd") == "0":
+        return True
+
+    err = f"{body.get('msg_cd', '')} {body.get('msg1', res.text[:200])}".strip()
+    print(f"[KIS] CancelOrder({order_no}) 실패: {err}")
+    LAST_ORDER_ERROR["cancel"] = err
+    return False
+
+
+# ─────────────────────────────────────────────────────────────
 # 체결 현황 조회
 # ─────────────────────────────────────────────────────────────
 
@@ -576,9 +632,16 @@ def GetOrderFill(
         amount += _int(row.get("tot_ccld_amt"))
 
     # 잔여수량은 응답 값을 우선하되, 없으면 주문-체결로 유도한다.
-    remain = sum(_int(row.get("rmn_qty")) for row in rows) or max(ordered - filled, 0)
+    # 취소된 주문은 rmn_qty 가 0 으로 내려오므로 '주문-체결' 유도값을 쓰면 안 된다.
+    cancelled = any(str(row.get("cncl_yn", "")).upper() == "Y" for row in rows)
+    if cancelled:
+        remain = 0
+    else:
+        remain = sum(_int(row.get("rmn_qty")) for row in rows) or max(ordered - filled, 0)
 
     return {
+        "cancelled": cancelled,
+        "org_no": rows[0].get("ord_gno_brno", ""),  # 취소 주문의 KRX_FWDG_ORD_ORGNO
         "order_no": order_no,
         "stock_code": rows[0].get("pdno", stock_code),
         "ordered_qty": ordered,

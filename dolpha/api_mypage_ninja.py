@@ -756,7 +756,12 @@ def force_exit_trading_config(request, data: ForceExitRequest):
         else:
             if config:
                 engine = TradingEngine(user=user)
-                engine._deactivate_config(config)
+                if not engine._deactivate_config(config):
+                    return JsonResponse({
+                        "status": "error",
+                        "message": f"{stock_name}({stock_code}) 계좌에 잔량이 남아 있어 비활성화하지 않았습니다. 잔고를 확인해 주세요.",
+                        "error": "계좌 잔량 존재",
+                    }, status=409)
             return JsonResponse({
                 "status": "OK",
                 "message": f"{stock_name}({stock_code}) 보유 수량이 없어 설정을 비활성화했습니다.",

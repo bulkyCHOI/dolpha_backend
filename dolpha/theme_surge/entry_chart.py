@@ -44,6 +44,7 @@ from .config import (
     PULLBACK_MIN_PCT,
     PULLBACK_VOLUME_RATIO_MAX,
 )
+from .entry_gates import describe_gate_block
 from .exit_signals import load_overnight_holds
 from .exits import load_exits
 from .exit_rules import derive_entry_levels, load_exit_settings
@@ -249,6 +250,7 @@ def _decision_row(bars: list[dict], signal, exit_settings) -> dict:
         "passed": signal.passed,
         "executed": signal.executed,
         "reason": signal.reason,
+        "gate_block": describe_gate_block(signal.reason),
         "geometry": geometry,
         "exit_levels": (
             _exit_levels(geometry, signal.price, exit_settings)

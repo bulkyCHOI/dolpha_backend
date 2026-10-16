@@ -24,6 +24,7 @@ from .trade import (
     GetCurrentPrice,
     MakeBuyMarketOrder,
     MakeSellMarketOrder,
+    CancelOrder,
 )
 
 __all__ = [
@@ -33,5 +34,5 @@ __all__ = [
     "GetMinuteOhlcvKR", "_iter_minute_pages",
     "GetHashKey",
     "GetBalance", "GetMyStockList", "GetCurrentPrice", "GetOrderFill",
-    "MakeBuyMarketOrder", "MakeSellMarketOrder",
+    "MakeBuyMarketOrder", "MakeSellMarketOrder", "CancelOrder",
 ]

@@ -26,13 +26,13 @@ from dataclasses import asdict, dataclass
 from django.core.management.base import BaseCommand
 from django.utils import timezone as tz
 
+from dolpha.theme_surge.entry_gates import GATE_REASON_PREFIXES
 from myweb.management.commands.theme_surge_holding_analysis import Round, build_rounds
 from myweb.models import StockMinuteOhlcv, ThemeEntrySignal, ThemeSnapshot, TradeEntry, User
 
 STRATEGY_TYPE = "theme_surge"
 DEFAULT_COST_PCT = 0.23          # 왕복 거래비용(세금+수수료) 가정치(%)
 SIGNAL_MATCH_WINDOW_MIN = 3      # 매수 체결 시각과 진입 시그널 시각의 허용 오차(분)
-GATE_REASON_PREFIXES = ("신규 진입 마감", "서킷브레이커", "진입 품질 필터")
 
 
 @dataclass(frozen=True)

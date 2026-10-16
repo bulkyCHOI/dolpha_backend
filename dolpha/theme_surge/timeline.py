@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import date as date_cls, datetime, time as time_cls, timedelta
 
 from .config import MARKET_CLOSE, MARKET_OPEN, SLOT_MINUTES
+from .entry_gates import describe_gate_block
 
 
 def slot_labels() -> list[str]:
@@ -186,6 +187,7 @@ def _build_signals(target_date: date_cls, user) -> list[dict]:
             "passed": row.passed,
             "executed": row.executed,
             "reason": row.reason,
+            "gate_block": describe_gate_block(row.reason),
         }
         for row in rows
     ]

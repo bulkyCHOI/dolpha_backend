@@ -26,7 +26,7 @@ from decimal import Decimal
 from typing import NamedTuple
 
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Sum, Max
 from django.utils import timezone as tz
 
 from myweb.models import TradingConfig, TradeEntry, TradingSummary, StockMinuteOhlcv
@@ -47,6 +47,13 @@ FILL_CONFIRM_INTERVAL_SEC = 2.0
 
 if TYPE_CHECKING:
     from dolpha.theme_surge.exit_rules import ExitSettings
+
+# 미체결·부분체결 대응
+MAX_SELL_RETRY = 3                 # SELL 미달 시 재주문 최대 횟수
+SELL_RETRY_INTERVAL_SEC = 1.0      # SELL 재주문 간 대기 시간
+SELL_RETRY_BUDGET_SEC = 20.0       # 재주문 루프 전체 시간 상한 (매분 사이클을 막지 않도록)
+CANCEL_CONFIRM_RETRIES = 3         # 취소 접수 후 반영 확인 조회 횟수
+CANCEL_CONFIRM_INTERVAL_SEC = 1.0
 
 # 분봉 백필 정책
 BACKFILL_STALE_MINUTES = 3        # 마지막 분봉이 이 시간보다 낡으면 백필을 다시 시도
@@ -86,6 +93,8 @@ class TradingEngine:
     _overnight_cache_date: str = ""
     _overnight_decision: dict[int, bool] = {}
     _days_held_cache: dict[int, int] = {}
+    # 일일 고점 동기화 날짜 (보유 종목의 OHLCV 고점과 DB peak_price 대조 보정)
+    _peak_sync_date: str = ""
 
     def __init__(self, user):
         """
@@ -169,12 +178,15 @@ class TradingEngine:
             return NetPosition(0, 0.0)
 
         buy_qty = sum(e.filled_quantity for e in buys)
+        # 청산 시 BUY는 CANCELLED로 바뀌지만 SELL은 FILLED로 남는다.
+        # 현재 사이클의 첫 매수 이후 매도만 차감해야 과거 사이클 매도가 섞이지 않는다.
         sold_qty = (
             TradeEntry.objects.filter(
                 user=self.user,
                 trading_config=config,
                 trade_type="SELL",
                 status="FILLED",
+                filled_at__gte=buys[0].filled_at,
             ).aggregate(total=Sum("filled_quantity"))["total"]
             or 0
         )
@@ -184,15 +196,39 @@ class TradingEngine:
         avg_price = total_amount / buy_qty if buy_qty > 0 else 0.0
         return NetPosition(net_qty, avg_price)
 
-    def _deactivate_config(self, config: TradingConfig) -> None:
+    def _deactivate_config(self, config: TradingConfig) -> bool:
         """
         포지션 전량 청산 시 TradingConfig의 모든 포지션 추적 상태를 초기화합니다.
         - BUY/FILLED 엔트리 → CANCELLED
         - trailing_stop_peak_price → None
         - staged_exit_completed_stages → []
         - is_active → False
+
+        비활성화 전에 실제 계좌에 해당 종목이 남아있지 않음을 확인합니다.
+
+        Returns:
+            비활성화 성공 여부 (False = 계좌에 잔량이 있어 비활성화 거부)
         """
         stock_code = config.stock_code
+        stock_name = config.stock_name
+
+        # 계좌 실제 보유 수량 확인 — 다른 전략 몫과 구분해서 확인해야 함
+        try:
+            my_stocks = KIS.GetMyStockList(self._credential_for(config))
+            account_qty = self._get_account_qty_for_strategy(config, my_stocks)
+            if account_qty > 0:
+                order_log(
+                    f"[비활성화거부] {stock_name}({stock_code}) — 계좌에 {account_qty}주"
+                    f" 실보유 중입니다. 수동 매도 또는 다음 사이클에서 재시도하세요."
+                )
+                return False
+        except Exception as e:  # noqa: BLE001
+            order_log(
+                f"[비활성화경고] {stock_name}({stock_code}) 계좌 조회 실패: {e}"
+                f" — 수동 확인 필요"
+            )
+            # 조회 실패해도 계속 진행 (롤백하지 않음)
+
         self._buy_entries(config).update(status="CANCELLED")
         config.trailing_stop_peak_price = None
         config.staged_exit_completed_stages = []
@@ -212,7 +248,8 @@ class TradingEngine:
         # 분봉은 남긴다 — 진입 판정 차트가 지난 날짜의 근거 데이터로 사용한다.
         # 재등록 시 누락 구간만 백필하면 되므로 백필 이력만 초기화한다.
         self._backfilled_at.pop(stock_code, None)
-        print(f"[{config.stock_name}] 포지션 청산 완료 — 자동매매 비활성화")
+        print(f"[{stock_name}] 포지션 청산 완료 — 자동매매 비활성화")
+        return True
 
     def get_entry_count(self, config: TradingConfig) -> int:
         """이 전략의 현재 보유 매수 횟수 (BUY/FILLED 체결 건수)."""
@@ -227,6 +264,44 @@ class TradingEngine:
         """이 전략의 가중 평균 매수가 (없으면 None)."""
         pos = self._config_net_position(config)
         return pos.avg_price if pos.avg_price > 0 else None
+
+    def _get_account_qty_for_strategy(
+        self, config: TradingConfig, my_stocks: list[dict]
+    ) -> int:
+        """
+        이 전략이 청산할 수 있는 실제 계좌 수량을 계산합니다.
+
+        같은 종목을 여러 활성 전략이 보유하면 계좌 잔고는 합산되므로,
+        이 전략의 청산 수량 = 계좌 실보유 - (다른 활성 전략의 장부 순보유)
+
+        Returns:
+            이 전략이 청산할 수 있는 수량 (0 이상)
+        """
+        # 계좌 실보유
+        account_qty = self._extract_holding_info(config.stock_code, my_stocks)["qty"]
+        if account_qty <= 0:
+            return 0
+
+        # 다른 활성 전략의 장부 수량 합산
+        # 계좌가 다른 전략은 잔고가 합산되지 않으므로 같은 계좌의 전략만 차감한다.
+        my_account_key = self._credential_for(config).token_cache_key
+        other_strategies_qty = 0
+        for other_config in TradingConfig.objects.filter(
+            user=self.user,
+            is_active=True,
+            stock_code=config.stock_code,
+        ).exclude(id=config.id):
+            try:
+                if self._credential_for(other_config).token_cache_key != my_account_key:
+                    continue
+            except KisCredentialError:
+                continue
+            pos = self._config_net_position(other_config)
+            other_strategies_qty += pos.qty
+
+        # 이 전략의 청산 가능 수량
+        available_qty = max(0, account_qty - other_strategies_qty)
+        return available_qty
 
     # ──────────────────────────────────────────────
     # ATR 계산
@@ -917,20 +992,61 @@ class TradingEngine:
             print(f"[TradingEngine] OHLCV 고점 계산 실패 ({config.stock_code}): {e}")
             return None
 
+    def _sync_trailing_stop_peaks(self) -> None:
+        """
+        매일 첫 사이클에서 보유 중인 모든 설정의 trailing_stop_peak_price를
+        OHLCV 실제 최고가와 대조하여 뒤처져 있는 경우 자동으로 상향 동기화(Self-Healing)합니다.
+        (엔진 다운타임 등으로 장중 고점이 누락되는 현상을 원천 방지)
+        """
+        today_str = tz.localtime().strftime("%Y-%m-%d")
+        if TradingEngine._peak_sync_date == today_str:
+            return
+        TradingEngine._peak_sync_date = today_str
+
+        for config in self.trading_configs:
+            # 보유 중인 설정만 대상
+            if not self._buy_entries(config).exists():
+                continue
+            try:
+                ohlcv_peak = self._calc_peak_from_ohlcv(config)
+                if ohlcv_peak is not None and (
+                    config.trailing_stop_peak_price is None
+                    or ohlcv_peak > config.trailing_stop_peak_price
+                ):
+                    old_peak = config.trailing_stop_peak_price
+                    config.trailing_stop_peak_price = ohlcv_peak
+                    config.save(update_fields=["trailing_stop_peak_price"])
+                    print(
+                        f"[{config.stock_name}] 일일 고점 동기화 보정: "
+                        f"{old_peak} → {ohlcv_peak:,.0f}원"
+                    )
+            except Exception as e:
+                print(f"[{config.stock_name}] 일일 고점 동기화 실패 (무시): {e}")
+
     def _update_peak_price(self, config: TradingConfig, current_price: float):
         """
-        현재가가 기존 고점보다 높으면 peak_price를 갱신합니다.
+        현재가 또는 당일 수집된 분봉 최고가가 기존 고점보다 높으면 peak_price를 갱신합니다.
         peak_price가 None(미초기화)이면 OHLCV 고점으로 초기화하고,
         그래도 None이면 현재가를 초기값으로 사용합니다.
         """
+        # 당일 수집된 분봉의 최고가도 확인하여 장중 찰나의 급등 고점이 누락되지 않도록 방어
+        try:
+            today_bar_max = StockMinuteOhlcv.objects.filter(
+                stock_code=config.stock_code,
+                bar_datetime__date=tz.localtime().date(),
+            ).aggregate(Max("high"))["high__max"] or 0.0
+            effective_price = max(current_price, float(today_bar_max))
+        except Exception:
+            effective_price = current_price
+
         if config.trailing_stop_peak_price is None:
             # OHLCV로 매수 이후 실제 고점 계산
             ohlcv_peak = self._calc_peak_from_ohlcv(config)
-            new_peak = max(ohlcv_peak, current_price) if ohlcv_peak else current_price
+            new_peak = max(ohlcv_peak, effective_price) if ohlcv_peak else effective_price
             config.trailing_stop_peak_price = new_peak
             config.save(update_fields=["trailing_stop_peak_price"])
-        elif current_price > config.trailing_stop_peak_price:
-            config.trailing_stop_peak_price = current_price
+        elif effective_price > config.trailing_stop_peak_price:
+            config.trailing_stop_peak_price = effective_price
             config.save(update_fields=["trailing_stop_peak_price"])
 
     def check_exit_conditions(
@@ -1689,10 +1805,10 @@ class TradingEngine:
                     order_no        = result["OrderNum2"],
                     order_quantity  = buy_qty,
                     order_price     = Decimal(str(current_price)),
-                    filled_quantity = buy_qty,
-                    filled_price    = Decimal(str(current_price)),
-                    filled_amount   = Decimal(str(current_price * buy_qty)),
-                    status          = "FILLED",
+                    filled_quantity = 0,  # 실제 체결값 확인 전까지 0으로 초기화
+                    filled_price    = Decimal("0"),
+                    filled_amount   = Decimal("0"),
+                    status          = "SUBMITTED",  # 체결 확인 전까지 SUBMITTED
                     atr_value       = atr_val,
                     stop_price      = stop_price,
                     ordered_at      = tz.now(),
@@ -1703,12 +1819,12 @@ class TradingEngine:
                 # 예외가 atomic 블록을 빠져나가면 방금 만든 TradeEntry 까지 롤백되어
                 # 실제로는 보유 중인데 장부에 없는 유령 포지션이 된다.
                 try:
-                    # 트레일링 스탑 고점: 신규 진입이면 초기화, 피라미딩이면 현재가로 갱신
-                    # (피라미딩으로 평균가가 올라가므로 고점도 최신 진입가 기준으로 유지)
-                    if config.trailing_stop_peak_price is None or (
-                        entry_type == "PYRAMIDING"
-                        and current_price > config.trailing_stop_peak_price
-                    ):
+                    # 트레일링 스탑 고점: 신규 진입이면 진입가로 강제 초기화(과거 이력 잔여값 방지),
+                    # 피라미딩이면 고점 상향 (평균가가 올라가므로 고점도 최신 진입가 기준으로 유지)
+                    if entry_type != "PYRAMIDING":
+                        config.trailing_stop_peak_price = current_price
+                        config.save(update_fields=["trailing_stop_peak_price"])
+                    elif config.trailing_stop_peak_price is None or current_price > config.trailing_stop_peak_price:
                         config.trailing_stop_peak_price = current_price
                         config.save(update_fields=["trailing_stop_peak_price"])
 
@@ -1728,6 +1844,23 @@ class TradingEngine:
             # 커밋된 뒤에 실제 체결을 확인해 장부를 실측값으로 보정한다.
             # 확인을 트랜잭션 안에서 하면 조회 지연·실패가 체결 기록까지 롤백시킨다.
             fill = self._apply_fill_to_entry(config, entry, result["OrderNum2"], buy_qty)
+
+            # 부분체결이면 미체결 잔량을 취소해 장부와 계좌를 일치시킨다.
+            # 취소 실패 시에는 잔량이 나중에 체결될 수 있으므로 _reconcile_pending_buy_fills 가
+            # 재조회로 보정한다(order_quantity > filled_quantity 로 남겨 둔다).
+            if fill and fill["remain_qty"] > 0:
+                fill, _ = self._cancel_remainder(config, entry, fill, buy_qty)
+
+            if fill and fill["filled_qty"] == 0:
+                # 취소 확인된 0체결 — 보유가 생기지 않았으므로 진입 흔적을 되돌린다.
+                config.trailing_stop_peak_price = None
+                config.save(update_fields=["trailing_stop_peak_price"])
+                order_log(f"[매수무체결] {stock_name}({stock_code}) {buy_qty}주 전량 미체결 — 취소됨")
+                return False
+
+            # 체결 반영 후 요약을 갱신한다 (접수 시점엔 SUBMITTED 라 집계에 안 잡힌다)
+            self._update_trading_summary(config, stock_code, stock_name)
+
             # 매수 성공 알림 (실체결 수량/평균가로 보정)
             notify_qty = fill["filled_qty"] if fill and fill["filled_qty"] else buy_qty
             notify_price = fill["avg_price"] if fill and fill["avg_price"] else current_price
@@ -1847,7 +1980,7 @@ class TradingEngine:
             )
 
             with transaction.atomic():
-                # SELL TradeEntry 생성
+                # SELL TradeEntry 생성 — 초기값은 추정, 나중에 _apply_fill_to_entry로 실제값 반영
                 entry = TradeEntry.objects.create(
                     user            = self.user,
                     trading_config  = config,
@@ -1858,12 +1991,12 @@ class TradingEngine:
                     order_no        = result["OrderNum2"],
                     order_quantity  = holding_qty,
                     order_price     = Decimal(str(current_price)),
-                    filled_quantity = holding_qty,
-                    filled_price    = Decimal(str(current_price)),
-                    filled_amount   = Decimal(str(sell_amount)),
+                    filled_quantity = 0,  # 실제 체결값 확인 전까지 0으로 초기화
+                    filled_price    = Decimal("0"),
+                    filled_amount   = Decimal("0"),
                     profit_loss     = Decimal(str(profit_loss)) if profit_loss is not None else None,
                     profit_loss_percent = profit_loss_pct,
-                    status          = "FILLED",
+                    status          = "SUBMITTED",  # 체결 확인 전까지 SUBMITTED
                     note            = reason,
                     ordered_at      = now,
                     filled_at       = now,
@@ -1876,7 +2009,17 @@ class TradingEngine:
             # 단정하면, 부분체결로 잔량이 남았는데도 설정이 비활성화되어 손절·강제청산이
             # 멈춘 채 방치된다(실제로 그렇게 유령 포지션이 생겼다).
             fill = self._apply_fill_to_entry(config, entry, result["OrderNum2"], holding_qty)
-            fully_exited = fill is not None and fill["remain_qty"] == 0 and fill["filled_qty"] > 0
+
+            # 부분체결 미달 시 재주문 시도
+            # (잔량은 먼저 취소하고, 계좌 실보유 한도 안에서만 재주문한다)
+            ordered_qty = holding_qty
+            fill, remaining_after_retry = self._settle_sell_remainder(
+                config, entry, fill, ordered_qty, current_price, entry_type, reason
+            )
+
+            fully_exited = (fill is not None
+                            and fill["filled_qty"] > 0
+                            and not remaining_after_retry)
 
             # 손익도 실체결 수량·평균가로 다시 계산한다 (추정 체결가로 남기지 않는다)
             if fill and fill["filled_qty"] > 0 and avg_price:
@@ -1899,10 +2042,22 @@ class TradingEngine:
                 self._reconcile_partial_fills(config)
                 with transaction.atomic():
                     # 포지션 청산 — BUY 엔트리 CANCELLED, 상태 리셋, 비활성화
-                    self._deactivate_config(config)
+                    deactivated = self._deactivate_config(config)
                     self._update_trading_summary(config, stock_code, stock_name)
+                if not deactivated:
+                    order_log(
+                        f"[청산미완료] {stock_name}({stock_code}) 체결은 전량이나 계좌에 잔량이"
+                        f" 남아 있어 설정을 유지합니다 — 수동 확인 필요"
+                    )
+                    telegram_notifier.notify_failure_async(
+                        "매도", stock_name, stock_code,
+                        "전량 체결 후에도 계좌 잔량 존재 — 수동 확인 필요",
+                        self.user, config, tz.now(),
+                    )
             else:
-                remain = fill["remain_qty"] if fill else holding_qty
+                # 체결 반영 후 요약을 갱신한다 (접수 시점 집계는 체결 0 이었다)
+                self._update_trading_summary(config, stock_code, stock_name)
+                remain = (ordered_qty - fill["filled_qty"]) if fill else holding_qty
                 order_log(
                     f"[청산미완료] {stock_name}({stock_code}) 잔여 {remain}주"
                     f" — 설정을 활성 상태로 유지합니다(다음 사이클에서 재시도)"
@@ -2026,12 +2181,12 @@ class TradingEngine:
                 order_no            = result["OrderNum2"],
                 order_quantity      = sell_qty,
                 order_price         = Decimal(str(current_price)),
-                filled_quantity     = sell_qty,
-                filled_price        = Decimal(str(current_price)),
-                filled_amount       = Decimal(str(sell_amount)),
+                filled_quantity     = 0,  # 실제 체결값 확인 전까지 0으로 초기화
+                filled_price        = Decimal("0"),
+                filled_amount       = Decimal("0"),
                 profit_loss         = Decimal(str(profit_loss)) if profit_loss is not None else None,
                 profit_loss_percent = profit_loss_pct,
-                status              = "FILLED",
+                status              = "SUBMITTED",  # 체결 확인 전까지 SUBMITTED
                 note                = reason,
                 ordered_at          = now,
                 filled_at           = now,
@@ -2039,6 +2194,17 @@ class TradingEngine:
 
             # 분할 매도도 실체결로 보정 — 추정 수량·가격이 익절 이력에 남지 않게 한다
             fill = self._apply_fill_to_entry(config, entry, result["OrderNum2"], sell_qty)
+
+            # 부분체결 미달 시 재주문 시도 (분할 매도도 동일)
+            ordered_qty = sell_qty
+            fill, remaining_after_retry = self._settle_sell_remainder(
+                config, entry, fill, ordered_qty, current_price, "EXIT_PARTIAL", reason
+            )
+            # 잔량 재주문까지 모두 끝났다면 주문 수량 전체가 체결된 것이다
+            fully_sold_qty = (
+                ordered_qty if (fill and fill["filled_qty"] > 0 and not remaining_after_retry)
+                else (fill["filled_qty"] if fill else sell_qty)
+            )
             if fill and fill["filled_qty"] > 0 and avg_price:
                 sold_qty = fill["filled_qty"]
                 sold_amount = fill["filled_amount"] or fill["avg_price"] * sold_qty
@@ -2061,11 +2227,15 @@ class TradingEngine:
             )
 
             # 분할 매도로 잔여 수량이 0이 되는 경우 → 전량 청산 처리
-            if sell_qty >= holding_qty:
+            if fully_sold_qty >= holding_qty:
                 # 이전 단계에서 부분체결로 고정된 SELL 엔트리가 있으면 비활성화 전에
                 # 재조회해 보정한다 (execute_sell_order의 전량청산 분기와 동일한 이유).
                 self._reconcile_partial_fills(config)
-                self._deactivate_config(config)
+                if not self._deactivate_config(config):
+                    order_log(
+                        f"[청산미완료] {stock_name}({stock_code}) 계좌에 잔량이 남아"
+                        f" 설정을 유지합니다 — 수동 확인 필요"
+                    )
 
             # 항상 TradingSummary 업데이트
             self._update_trading_summary(config, stock_code, stock_name)
@@ -2126,15 +2296,17 @@ class TradingEngine:
                 if first_entry_date and last_exit_date:
                     holding_days = (last_exit_date - first_entry_date).total_seconds() / 86400.0
 
-                # 현재 보유 여부
-                active_buys = all_entries.filter(trade_type="BUY", status="FILLED").exists()
-                final_status = "HOLDING" if active_buys else "CLOSED"
+                # 현재 보유 여부 — filled_quantity 기반 판정
+                # 부분체결이 있어도 filled_qty로 정확히 계산 (order_qty 무시)
+                buy_filled_total = int(sum(e.filled_quantity for e in buy_entries))
+                sell_filled_total = int(sum(e.filled_quantity for e in sell_entries))
+                final_status = "CLOSED" if buy_filled_total == sell_filled_total else "HOLDING"
 
                 # 손익 계산
                 # HOLDING(부분 매도): TradeEntry.profit_loss 합계로 실현 손익만 계산
                 #   (total_sell - total_buy 방식은 남은 주식 가치를 0으로 처리해 오류 발생)
                 # CLOSED(전량 매도): total_sell - total_buy가 정확
-                if active_buys:
+                if final_status == "HOLDING":
                     sell_pls = [e.profit_loss for e in sell_entries if e.profit_loss is not None]
                     total_pl = int(sum(float(pl) for pl in sell_pls)) if sell_pls else 0
                 else:
@@ -2216,9 +2388,17 @@ class TradingEngine:
 
             update_fields = []
 
-            # 최고 수익률 갱신
-            if summary.max_profit_percent is None or current_profit_pct > summary.max_profit_percent:
-                summary.max_profit_percent = current_profit_pct
+            # 최고 수익률 갱신 (현재가 수익률 및 config의 peak_price 수익률 중 큰 값 반영)
+            peak_price = config.trailing_stop_peak_price
+            peak_profit_pct = (
+                (peak_price - avg_price) / avg_price * 100.0
+                if peak_price and peak_price > 0 and avg_price > 0
+                else current_profit_pct
+            )
+            target_max_profit = max(current_profit_pct, peak_profit_pct)
+
+            if summary.max_profit_percent is None or target_max_profit > summary.max_profit_percent:
+                summary.max_profit_percent = target_max_profit
                 update_fields.append("max_profit_percent")
 
             # 고점 대비 낙폭 갱신 (낙폭 = -(고점 - 현재), 음수값이 클수록 낙폭이 큼)
@@ -2445,37 +2625,159 @@ class TradingEngine:
     def _apply_fill_to_entry(
         self, config: TradingConfig, entry: TradeEntry, order_no: str, expected_qty: int
     ) -> dict | None:
-        """접수 수량으로 기록해 둔 TradeEntry 를 실제 체결값으로 보정한다.
+        """SUBMITTED(체결 0)로 기록해 둔 TradeEntry 를 실제 체결값으로 보정한다.
 
-        체결을 확인하지 못하면(None) 기록을 그대로 둔다 — 접수 수량 기준 추정치이며,
-        note 에 그 사실을 남겨 나중에 사람이 구분할 수 있게 한다.
+        체결을 끝내 확인하지 못하면(None) 접수 수량 기준 추정치를 FILLED 로 기록한다.
+        SUBMITTED/0 으로 남기면 BUY 가 _buy_entries(status=FILLED)에서 빠져 실제
+        보유분이 장부에서 사라지고(손절·청산 중단), SELL 은 차감이 안 된다.
+        note 에 추정이라는 사실을 남겨 사람이 구분할 수 있게 한다.
         """
         fill = self._confirm_fill(config, order_no, entry.stock_code, expected_qty)
         if fill is None:
+            price = entry.order_price or Decimal("0")
+            entry.filled_quantity = expected_qty
+            entry.filled_price = price
+            entry.filled_amount = price * expected_qty
+            entry.status = "FILLED"
             entry.note = (f"{entry.note} " if entry.note else "") + "체결 미확인(주문수량 기준 추정)"
-            entry.save(update_fields=["note"])
+            entry.save(update_fields=["filled_quantity", "filled_price", "filled_amount",
+                                      "status", "note"])
             return None
 
+        self._write_fill(entry, fill, expected_qty)
+        return fill
+
+    @staticmethod
+    def _write_fill(
+        entry: TradeEntry, fill: dict, expected_qty: int, cancelled_remainder: bool = False
+    ) -> None:
+        """조회된 체결값을 TradeEntry 에 기록한다.
+
+        부분체결도 status 는 FILLED 로 둔다. 장부 집계 다수가 status="FILLED" 로
+        거르므로 PARTIAL 을 쓰면 그 포지션이 집계에서 통째로 사라진다.
+        진실은 filled_quantity 가 들고, 부분체결 사실은 note 와 order_log 에 남긴다.
+        잔량을 취소했다면 order_quantity 를 체결 수량으로 줄여 '미체결 잔량이 남은
+        주문'으로 재조회 대상에 계속 걸리지 않게 한다(원 주문 수량은 note 에 보존).
+        """
         filled = fill["filled_qty"]
         price = fill["avg_price"] or float(entry.filled_price or 0)
         entry.filled_quantity = filled
-        entry.filled_price = Decimal(str(price))
-        entry.filled_amount = Decimal(str(fill["filled_amount"] or price * filled))
+        entry.filled_price = Decimal(str(price if filled else 0))
+        entry.filled_amount = Decimal(str(fill["filled_amount"] or price * filled)) if filled else Decimal("0")
 
-        # 부분체결도 status 는 FILLED 로 둔다. 장부 집계 다수가 status="FILLED" 로
-        # 거르므로 PARTIAL 을 쓰면 그 포지션이 집계에서 통째로 사라진다.
-        # 진실은 filled_quantity 가 들고, 부분체결 사실은 note 와 order_log 에 남긴다.
+        notes = []
         if filled == 0:
-            entry.status = "SUBMITTED"
-        elif filled < expected_qty:
-            entry.note = (f"{entry.note} " if entry.note else "") + (
-                f"부분체결 {filled}/{expected_qty}주"
-            )
+            entry.status = "CANCELLED" if cancelled_remainder else "SUBMITTED"
+        else:
+            entry.status = "FILLED"
+            if filled < expected_qty:
+                notes.append(f"부분체결 {filled}/{expected_qty}주")
+        if cancelled_remainder and filled < expected_qty:
+            notes.append(f"잔량 {expected_qty - filled}주 취소")
+            if filled > 0:
+                entry.order_quantity = filled
+        if notes:
+            entry.note = (f"{entry.note} " if entry.note else "") + " ".join(notes)
         entry.save(
             update_fields=["filled_quantity", "filled_price", "filled_amount",
-                           "status", "note"]
+                           "status", "note", "order_quantity"]
         )
-        return fill
+
+    def _cancel_remainder(
+        self, config: TradingConfig, entry: TradeEntry, fill: dict, expected_qty: int
+    ) -> tuple[dict, bool]:
+        """부분체결 주문의 미체결 잔량을 KIS 에서 취소하고 최종 체결값으로 장부를 보정한다.
+
+        잔량 주문은 KIS 에 살아 있다가 나중에 체결된다. 취소하지 않고 재주문하면
+        이중 체결(과매도·과매수)이 되고, 장부는 조회 시점 수량에 고정돼 계좌와 어긋난다.
+
+        Returns:
+            (fill, resolved). resolved=True 면 주문이 더는 체결될 수 없는 상태
+            (취소 확인 또는 이미 전량 체결)이며 fill 은 그 최종 체결값이다.
+            False 면 취소 실패·확인 불가 — 호출부는 재주문하지 말고 다음 사이클로 넘길 것.
+        """
+        cred = self._credential_for(config)
+        code = entry.stock_code
+        order_no = entry.order_no
+        label = f"{config.stock_name}({code}) 주문 {order_no}"
+
+        try:
+            accepted = KIS.CancelOrder(order_no, fill.get("org_no", ""), cred)
+        except Exception as e:  # noqa: BLE001
+            accepted = False
+            order_log(f"[취소오류] {label}: {e}")
+        cancel_err = "" if accepted else _pop_order_error("cancel")
+
+        # 취소 접수 여부와 무관하게 최종 상태를 다시 읽는다 (취소 실패 사유가
+        # '그 사이 전량 체결'일 수 있다).
+        final = None
+        for attempt in range(CANCEL_CONFIRM_RETRIES):
+            if attempt:
+                time.sleep(CANCEL_CONFIRM_INTERVAL_SEC)
+            try:
+                final = KIS.GetOrderFill(order_no, cred, stock_code=code)
+            except Exception as e:  # noqa: BLE001
+                print(f"[{config.stock_name}] 취소 후 체결 재조회 오류: {e}")
+                final = None
+            if final and (final.get("cancelled") or final["remain_qty"] == 0):
+                break
+            if not accepted:
+                break  # 취소 실패 시 반복 조회는 의미 없다
+
+        settled = bool(final) and (final.get("cancelled") or final["remain_qty"] == 0)
+        if not settled:
+            order_log(
+                f"[취소실패] {label} — 미체결 잔량이 살아 있을 수 있어 재주문하지 않습니다"
+                f" ({cancel_err or ('취소 접수됨, 반영 미확인' if accepted else '사유 미상')})"
+            )
+            telegram_notifier.notify_failure_async(
+                "주문취소", config.stock_name, code,
+                f"미체결 잔량 취소 실패: {cancel_err or '반영 미확인'}",
+                self.user, config, tz.now(),
+            )
+            return fill, False
+
+        self._write_fill(entry, final, expected_qty, cancelled_remainder=bool(final.get("cancelled")))
+        order_log(
+            f"[잔량취소] {label} 최종 체결 {final['filled_qty']}/{expected_qty}주"
+        )
+        return final, True
+
+    def _sellable_qty(self, config: TradingConfig) -> int | None:
+        """계좌 실보유에서 다른 전략 몫을 뺀, 이 전략이 지금 팔 수 있는 수량. 조회 실패 시 None."""
+        try:
+            my_stocks = KIS.GetMyStockList(self._credential_for(config))
+            return self._get_account_qty_for_strategy(config, my_stocks)
+        except Exception as e:  # noqa: BLE001
+            order_log(f"[계좌조회실패] {config.stock_name}({config.stock_code}): {e}")
+            return None
+
+    def _settle_sell_remainder(
+        self,
+        config: TradingConfig,
+        entry: TradeEntry,
+        fill: dict | None,
+        order_qty: int,
+        current_price: float,
+        entry_type: str,
+        reason: str,
+    ) -> tuple[dict | None, bool]:
+        """매도 부분체결 잔량을 취소한 뒤, 계좌 실보유 한도 안에서만 재주문한다.
+
+        Returns:
+            (최종 fill, unresolved). unresolved=True 면 청산이 끝나지 않았다.
+        """
+        if fill is None or fill["remain_qty"] <= 0:
+            return fill, False
+
+        fill, resolved = self._cancel_remainder(config, entry, fill, order_qty)
+        if not resolved:
+            return fill, True
+
+        remaining = order_qty - fill["filled_qty"]
+        if remaining <= 0:
+            return fill, False
+        return fill, self._retry_sell_order(config, remaining, current_price, entry_type, reason)
 
     def _resolve_holding_info(self, config: TradingConfig, account_info: dict) -> dict:
         """계좌 잔고와 이 전략의 장부를 대조해 '이 전략 몫'의 보유 정보를 만듭니다.
@@ -2557,6 +2859,106 @@ class TradingEngine:
 
         self._warn_orphan_positions(held_codes_by_account)
 
+    def _retry_sell_order(
+        self,
+        config: TradingConfig,
+        remaining_qty: int,
+        current_price: float,
+        entry_type: str,
+        reason: str,
+    ) -> bool:
+        """원주문 잔량을 '취소한 뒤' 남은 수량을 재주문합니다.
+
+        호출 전에 원주문의 미체결 잔량이 취소(또는 전량 체결)되어 있어야 한다
+        (_settle_sell_remainder 가 보장). 재주문 수량은 매번 계좌 실보유에서
+        다른 전략 몫을 뺀 값으로 상한을 둬 과매도를 막는다. 체결 상태를 모르거나
+        잔량 취소에 실패하면 이중 주문 위험이 있으므로 재주문하지 않고 True 로 넘긴다.
+        전체 소요 시간은 SELL_RETRY_BUDGET_SEC 로 제한한다.
+
+        Returns:
+            True = 청산 미완료(잔량이 남았거나 상태 불명), False = 완전 청산
+        """
+        if remaining_qty <= 0:
+            return False
+
+        stock_code = config.stock_code
+        stock_name = config.stock_name
+        current_remaining = remaining_qty
+        deadline = time.monotonic() + SELL_RETRY_BUDGET_SEC
+
+        def give_up(msg: str) -> bool:
+            order_log(f"[재주문중단] {stock_name}({stock_code}) {msg}")
+            telegram_notifier.notify_failure_async(
+                "분할매도재주문", stock_name, stock_code, msg, self.user, config, tz.now()
+            )
+            return True
+
+        for retry_count in range(1, MAX_SELL_RETRY + 1):
+            if retry_count > 1:
+                if time.monotonic() + SELL_RETRY_INTERVAL_SEC > deadline:
+                    return give_up(f"시간 예산 초과 — {current_remaining}주 미청산")
+                time.sleep(SELL_RETRY_INTERVAL_SEC)
+
+            # 과매도 방지: 계좌 실보유(다른 전략 몫 제외)를 매번 다시 읽는다
+            sellable = self._sellable_qty(config)
+            if sellable is None:
+                return give_up(f"계좌 조회 실패 — 재주문 보류({current_remaining}주 미청산)")
+            qty = min(current_remaining, sellable)
+            if qty <= 0:
+                order_log(f"[재주문불필요] {stock_name}({stock_code}) 계좌에 매도할 잔량 없음")
+                return False
+
+            order_log(
+                f"[재주문시도{retry_count}] {stock_name}({stock_code})"
+                f" {qty}주 매도 (사유: {reason})"
+            )
+            result = KIS.MakeSellMarketOrder(stock_code, qty, self._credential_for(config))
+            if result is None:
+                err_msg = _pop_order_error("sell")
+                order_log(
+                    f"[재주문실패] {stock_name}({stock_code}) {qty}주"
+                    f" 재시도{retry_count}/{MAX_SELL_RETRY} — {err_msg or '사유 미상'}"
+                )
+                continue
+
+            order_no = result.get("OrderNum2", "")
+            retry_entry = TradeEntry.objects.create(
+                user            = self.user,
+                trading_config  = config,
+                stock_code      = stock_code,
+                stock_name      = stock_name,
+                trade_type      = "SELL",
+                entry_type      = entry_type,
+                order_no        = order_no,
+                order_quantity  = qty,
+                order_price     = Decimal(str(current_price)),
+                filled_quantity = 0,
+                filled_price    = Decimal("0"),
+                filled_amount   = Decimal("0"),
+                status          = "SUBMITTED",
+                note            = f"{reason} [재주문 {retry_count}/{MAX_SELL_RETRY}]",
+                ordered_at      = tz.now(),
+            )
+
+            fill = self._apply_fill_to_entry(config, retry_entry, order_no, qty)
+            if fill is None:
+                # 체결 상태 불명 — 살아 있는 주문이 있을 수 있어 추가 주문 금지
+                return give_up(f"재주문 {order_no} 체결 확인 불가 — 추가 주문 보류")
+
+            if fill["remain_qty"] > 0:
+                fill, resolved = self._cancel_remainder(config, retry_entry, fill, qty)
+                if not resolved:
+                    return give_up(f"재주문 {order_no} 잔량 취소 실패 — 추가 주문 보류")
+
+            current_remaining -= fill["filled_qty"]
+            if current_remaining <= 0:
+                order_log(
+                    f"[재주문성공] {stock_name}({stock_code}) 재시도{retry_count}에서 청산 완료"
+                )
+                return False
+
+        return give_up(f"재시도 한도({MAX_SELL_RETRY}회) 도달 — {current_remaining}주 미청산")
+
     def _refetch_and_apply_fill(self, config: TradingConfig, entry: TradeEntry) -> bool:
         """KIS API로 주문 체결을 재조회하여 TradeEntry를 보정한다.
 
@@ -2634,14 +3036,13 @@ class TradingEngine:
                 f" 장부상 {remain}주가 남아 있는데 계좌 잔고는 0입니다 — 수동 확인 필요"
             )
 
-    def _reconcile_pending_buy_fills(self) -> None:
-        """부분체결로 고정된 BUY TradeEntry를 재조회해 최종 체결값으로 보정한다.
+    def _reconcile_pending_fills(self) -> None:
+        """부분체결로 남아 있는 BUY 및 SELL TradeEntry를 재조회해 최종 체결값으로 보정한다.
 
-        16초 재시도 안에 완전 체결을 확인 못한 매수 주문의 경우, filled_quantity가
-        그 시점의 부분체결 수량으로 영구 고정돼 실계좌와 DB 수량이 어긋난다.
-        SELL 케이스의 사후 보정 패턴을 BUY에도 적용한다.
+        주문 접수 후 재시도 시간 안에 완전 체결을 확인 못한 경우, filled_quantity가
+        그 시점의 부분체결 수량으로 영구 고정돼 실계좌와 DB 수량이 어긋나는 문제를 방지한다.
 
-        대상: trade_type="BUY", status="FILLED"이면서 filled_quantity < order_quantity인 항목 중
+        대상: status="FILLED"이면서 filled_quantity < order_quantity인 항목 중
         - 방금 막 생성된 것(<1분)과 경합하지 않도록 최소 1분 이상 경과한 것만
         - 주문조회 API 보관 기간(약 7일)을 넘는 주문은 무한정 재조회하지 않음
         """
@@ -2649,14 +3050,14 @@ class TradingEngine:
         min_age = timedelta(minutes=1)
         max_age = timedelta(days=7)
 
-        # 1분 이상 경과하고 7일 이내인 부분체결 BUY 항목
+        # 1분 이상 경과하고 7일 이내인 부분체결 항목
         cutoff_time = now - max_age
         min_time = now - min_age
 
-        incomplete_buys = [
+        incomplete_entries = [
             e for e in TradeEntry.objects.filter(
                 user=self.user,
-                trade_type="BUY",
+                trade_type__in=["BUY", "SELL"],
                 status="FILLED",
                 created_at__lt=min_time,
                 created_at__gte=cutoff_time,
@@ -2664,12 +3065,12 @@ class TradingEngine:
             if e.filled_quantity < e.order_quantity
         ]
 
-        if not incomplete_buys:
+        if not incomplete_entries:
             return
 
-        print(f"[TradingEngine] 부분체결 BUY 재조회: {len(incomplete_buys)}건")
+        print(f"[TradingEngine] 부분체결 주문 재조회: {len(incomplete_entries)}건")
 
-        for entry in incomplete_buys:
+        for entry in incomplete_entries:
             try:
                 config = entry.trading_config
                 if config is None or not config.is_active:
@@ -2678,14 +3079,22 @@ class TradingEngine:
                 updated = self._refetch_and_apply_fill(config, entry)
                 if not updated:
                     # 재조회 결과가 없거나 증가분이 없으면 기간 만료로 표시
-                    if "[재조회 포기" not in entry.note:
+                    if "[재조회 포기" not in (entry.note or ""):
                         entry.note = (f"{entry.note} " if entry.note else "") + (
                             "[재조회 포기: 기간 만료]"
                         )
                         entry.save(update_fields=["note"])
+                elif entry.trade_type == "SELL":
+                    # 매도 체결량 증가 시 순보유 수량 확인 후 전량 청산 완료 시 비활성화
+                    net_qty = self._config_net_position(config).qty
+                    if net_qty <= 0:
+                        self._deactivate_config(config)
 
             except Exception as e:  # noqa: BLE001
-                print(f"[TradingEngine] BUY 부분체결 보정 오류 (무시): {e}")
+                print(f"[TradingEngine] 부분체결 보정 오류 (무시): {e}")
+
+    # 하위 호환성 유지용 별칭
+    _reconcile_pending_buy_fills = _reconcile_pending_fills
 
     def _warn_orphan_positions(self, held_codes_by_account: dict[str, set]) -> None:
         """계좌엔 남아 있는데 설정이 비활성인 '고아 포지션'을 경고한다.
@@ -2809,11 +3218,11 @@ class TradingEngine:
             except Exception as e:
                 print(f"[TradingEngine] 포지션 재조정 실패 (무시): {e}")
 
-        # 부분체결로 고정된 BUY 주문 사후 보정
+        # 부분체결로 고정된 주문(BUY/SELL) 사후 보정
         try:
-            self._reconcile_pending_buy_fills()
+            self._reconcile_pending_fills()
         except Exception as e:
-            print(f"[TradingEngine] BUY 부분체결 보정 실패 (무시): {e}")
+            print(f"[TradingEngine] 부분체결 보정 실패 (무시): {e}")
 
         # 설정 다시 로드 (재조정 이후 최신 상태 반영)
         self._load_configs()
@@ -2821,6 +3230,7 @@ class TradingEngine:
         print(f"[TradingEngine] 대상 종목 수: {len(self.trading_configs)}")
 
         self._run_backfills()
+        self._sync_trailing_stop_peaks()
 
         for config in self.trading_configs:
             try:

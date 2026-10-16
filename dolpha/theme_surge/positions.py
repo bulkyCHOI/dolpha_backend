@@ -19,6 +19,9 @@ from datetime import date as date_cls, datetime
 
 from pytz import timezone as pytz_tz
 
+from .entry_context import current_gate_status
+from .entry_gates import describe_gate_block
+
 _KST = pytz_tz("Asia/Seoul")
 
 STRATEGY = "theme_surge"
@@ -32,7 +35,7 @@ def build_positions(user, target_date: date_cls | None = None) -> dict:
         target_date: 테마·시그널 매칭 기준일 (기본: 오늘 KST)
 
     Returns:
-        {"positions": [...], "watching": [...], "summary": {...}}
+        {"positions": [...], "watching": [...], "summary": {..., "entry_gate": dict | None}}
     """
     from myweb.models import TradingConfig
 
@@ -72,11 +75,9 @@ def build_positions(user, target_date: date_cls | None = None) -> dict:
     positions.sort(key=lambda p: p["profit_loss_rate"], reverse=True)
     watching.sort(key=lambda w: w["conditions_met"], reverse=True)
 
-    return {
-        "positions": positions,
-        "watching": watching,
-        "summary": _summary(positions, watching),
-    }
+    summary = _summary(positions, watching)
+    summary["entry_gate"] = _entry_gate_status(user, day)
+    return {"positions": positions, "watching": watching, "summary": summary}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -130,6 +131,8 @@ def _watching_row(config, theme: dict | None, signal) -> dict:
         "has_foreign_buying": bool(signal and signal.has_foreign_buying),
         "conditions_met": met,
         "last_reason": _signal_reason(signal) or "아직 판정 이력이 없습니다.",
+        # 패턴 조건은 갖췄지만 리스크 게이트·품질 필터에 막혀 사지 않았으면 그 정보
+        "gate_block": describe_gate_block(_signal_reason(signal)),
         "checked_at": (
             signal.checked_at.astimezone(_KST).strftime("%H:%M") if signal else None
         ),
@@ -158,8 +161,21 @@ def _empty() -> dict:
             "watching_count": 0,
             "total_profit_loss": 0,
             "total_profit_rate": 0.0,
+            "entry_gate": None,
         },
     }
+
+
+def _entry_gate_status(user, day: date_cls) -> dict | None:
+    """오늘 화면일 때만, 지금 신규 진입이 리스크 게이트로 막혀 있는지 조회한다."""
+    now = datetime.now(_KST)
+    if day != now.date():
+        return None
+    try:
+        return current_gate_status(user, now)
+    except Exception as e:  # noqa: BLE001 — 배너 조회 실패가 현황 화면을 막아선 안 된다
+        print(f"[급등테마주] 진입 게이트 상태 조회 실패: {e}")
+        return None
 
 
 def _signal_reason(signal) -> str:

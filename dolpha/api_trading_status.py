@@ -132,10 +132,11 @@ def get_trading_status(request):
         for e in active_entries:
             entries_by_code.setdefault(e.stock_code, []).append(e)
 
-        configs = {
-            c.stock_code: c
-            for c in TradingConfig.objects.filter(user=user)
-        }
+        configs = {}
+        for c in TradingConfig.objects.filter(user=user).order_by("is_active", "updated_at"):
+            configs[c.stock_code] = c
+
+        strategy_labels = dict(TradingConfig.STRATEGY_TYPES)
 
         # DB 기록이 있는 종목 + KIS에 실제 보유 중인 종목 모두 포함
         all_codes = set(entries_by_code.keys()) | set(kis_holdings.keys())
@@ -318,8 +319,20 @@ def get_trading_status(request):
                     "stages": stages,
                 }
 
+            strategy_type = None
+            if config and config.strategy_type:
+                strategy_type = config.strategy_type
+            elif entries:
+                entry_with_cfg = next((e for e in entries if getattr(e, "trading_config_id", None)), None)
+                if entry_with_cfg and entry_with_cfg.trading_config:
+                    strategy_type = entry_with_cfg.trading_config.strategy_type
+
+            strategy_label = strategy_labels.get(strategy_type, strategy_type) if strategy_type else None
+
             data[code] = {
                 "stock_name": config.stock_name if config else (stock_name_kis or code),
+                "strategy_type": strategy_type,
+                "strategy_label": strategy_label,
                 "trading_mode": mode,
                 "actual_entries": actual_entries,
                 "total_possible_entries": total_possible_entries,

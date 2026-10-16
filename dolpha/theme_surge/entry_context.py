@@ -12,7 +12,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from .entry_gates import DailyStats
+from .entry_gates import (
+    PREFIX_CIRCUIT_BREAKER,
+    DailyStats,
+    check_risk_gates,
+    describe_gate_block,
+    load_entry_gate_settings,
+)
 
 STRATEGY_TYPE = "theme_surge"
 # 라운드를 끝내는 매도 유형. 분할 익절(EXIT_PARTIAL)은 라운드를 이어간다.
@@ -105,3 +111,34 @@ def load_theme_context(stock_code: str, now: datetime) -> ThemeContext:
         fluctuation=float(snap.fluctuation_rate) if snap else None,
         slot_time=snap.slot_time.strftime("%H:%M") if snap else None,
     )
+
+
+def current_gate_status(user, now: datetime) -> dict | None:
+    """지금 이 유저의 신규 진입이 리스크 게이트로 막혀 있는지 (화면 상단 배너용).
+
+    계좌 확정원금은 여기서 조회하지 않으므로(KIS 호출 회피) 손실 % 한도는 라이브 판정을
+    못 한다. 대신 오늘 엔진이 남긴 가장 최근 판정의 gate_flags 에 서킷브레이커가 찍혀 있으면
+    그것을 쓴다 — 실현손실은 당일 줄어들지 않으므로 한 번 걸리면 그날 내내 유효하다.
+
+    Returns:
+        describe_gate_block 형식 dict (막혀 있지 않으면 None)
+    """
+    from myweb.models import ThemeEntrySignal
+
+    settings = load_entry_gate_settings(getattr(user, "trading_defaults", None))
+    live = check_risk_gates(settings, now.time(), load_daily_stats(user, now), None)
+    if live.blocked:
+        return describe_gate_block(live.reason)
+
+    start, end = _kst_day_range(now)
+    latest_flags = (
+        ThemeEntrySignal.objects.filter(user=user, checked_at__gte=start, checked_at__lt=end)
+        .exclude(gate_flags={})
+        .order_by("-checked_at")
+        .values_list("gate_flags", flat=True)
+        .first()
+    )
+    recorded = ((latest_flags or {}).get("risk") or {}).get("blocked_by") or ""
+    if recorded.startswith(PREFIX_CIRCUIT_BREAKER):
+        return describe_gate_block(recorded)
+    return None

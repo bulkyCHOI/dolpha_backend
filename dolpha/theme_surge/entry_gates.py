@@ -34,6 +34,21 @@ from .config import (
 
 FILTER_MODES = ("shadow", "enforce")
 
+# 게이트에 막힌 판정의 사유 문자열: "<게이트 사유> | 신호: <원래 패턴 판정 사유>".
+# 사유 접두어로 차단 종류를 식별하므로, 아래 문구를 바꿀 때는 describe_gate_block 도 함께 본다.
+BLOCK_SIGNAL_SEPARATOR = " | 신호: "
+PREFIX_ENTRY_CUTOFF = "신규 진입 마감"
+PREFIX_CIRCUIT_BREAKER = "서킷브레이커"
+PREFIX_QUALITY_FILTER = "진입 품질 필터"
+
+# (접두어, kind, 화면 라벨, 게이트 단계)
+_BLOCK_KINDS = (
+    (PREFIX_ENTRY_CUTOFF, "entry_cutoff", "진입 마감", "risk"),
+    (PREFIX_CIRCUIT_BREAKER, "circuit_breaker", "서킷브레이커", "risk"),
+    (PREFIX_QUALITY_FILTER, "quality_filter", "품질 필터", "quality"),
+)
+GATE_REASON_PREFIXES = tuple(prefix for prefix, *_ in _BLOCK_KINDS)
+
 
 @dataclass(frozen=True)
 class EntryGateSettings:
@@ -109,10 +124,10 @@ def check_risk_gates(
 
     reason = ""
     if now_time >= settings.entry_cutoff:
-        reason = f"신규 진입 마감 ({settings.entry_cutoff:%H:%M} 이후)"
+        reason = f"{PREFIX_ENTRY_CUTOFF} ({settings.entry_cutoff:%H:%M} 이후)"
     elif settings.daily_max_losses and stats.realized_losses >= settings.daily_max_losses:
         reason = (
-            f"서킷브레이커 — 당일 손실 {stats.realized_losses}회"
+            f"{PREFIX_CIRCUIT_BREAKER} — 당일 손실 {stats.realized_losses}회"
             f" ≥ 한도 {settings.daily_max_losses}회"
         )
     elif (
@@ -121,7 +136,7 @@ def check_risk_gates(
         and loss_pct >= settings.daily_max_loss_pct
     ):
         reason = (
-            f"서킷브레이커 — 당일 실현손실 {loss_pct:.2f}%"
+            f"{PREFIX_CIRCUIT_BREAKER} — 당일 실현손실 {loss_pct:.2f}%"
             f" ≥ 한도 {settings.daily_max_loss_pct:g}%"
         )
 
@@ -162,7 +177,7 @@ def evaluate_quality_filters(
 
     reason = ""
     if failed and mode == "enforce":
-        reason = "진입 품질 필터 — " + ", ".join(_FILTER_LABELS[n](checks[n]) for n in failed)
+        reason = f"{PREFIX_QUALITY_FILTER} — " + ", ".join(_FILTER_LABELS[n](checks[n]) for n in failed)
 
     return GateResult(
         blocked=bool(reason),
@@ -182,3 +197,30 @@ def _check(value, limit, ok) -> dict:
     if value is None:
         return {"value": None, "limit": limit, "pass": None}
     return {"value": round(float(value), 3), "limit": limit, "pass": bool(ok(float(value), limit))}
+
+
+def block_reason(gate_reason: str, signal_reason: str) -> str:
+    """게이트에 막힌 판정의 저장용 사유 — 원래 신호 사유를 뒤에 보존한다."""
+    return f"{gate_reason}{BLOCK_SIGNAL_SEPARATOR}{signal_reason}"
+
+
+def describe_gate_block(reason: str | None) -> dict | None:
+    """저장된 판정 사유가 게이트 차단이면 화면 표시용 정보를, 아니면 None 을 돌려준다.
+
+    Returns:
+        {"kind", "label", "stage", "detail", "signal"} — detail 은 게이트 사유,
+        signal 은 막히기 전 원래 패턴 판정 사유.
+    """
+    if not reason:
+        return None
+    for prefix, kind, label, stage in _BLOCK_KINDS:
+        if reason.startswith(prefix):
+            detail, _, signal = reason.partition(BLOCK_SIGNAL_SEPARATOR)
+            return {
+                "kind": kind,
+                "label": label,
+                "stage": stage,
+                "detail": detail.strip(),
+                "signal": signal.strip(),
+            }
+    return None
