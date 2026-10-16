@@ -11,6 +11,7 @@ from django.http import JsonResponse
 
 # local Django
 from .api_auth import auth_router
+from .auth import ApprovedJWTAuth
 from .api_data import data_router
 from .api_mypage_ninja import mypage_router
 from .api_query import query_router
@@ -24,10 +25,11 @@ from .api_trade import trade_router
 from .api_investor_flow import investor_flow_router
 from .api_theme_surge import theme_surge_router
 
-api = NinjaAPI()
+# 모든 엔드포인트는 기본적으로 승인된 사용자의 JWT를 요구한다 (공개는 auth=None으로 개별 지정)
+api = NinjaAPI(auth=ApprovedJWTAuth())
 
 
-@api.get("/hello")
+@api.get("/hello", auth=None)
 def hello(request):
     return {"message": "Hello, Django Ninja!"}
 

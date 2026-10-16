@@ -22,6 +22,7 @@ from django.http import HttpResponse
 
 # local Django
 from . import stockCommon as Common
+from .auth import ApprovedJWTAuth, ApprovedJWTQueryAuth
 from .schemas import *
 from myweb.models import (
     StockOHLCV,
@@ -1677,7 +1678,8 @@ def find_stock_minute(request, code: str):
         return JsonResponse({"status": "error", "message": str(e)}, status=500)
 
 
-@query_router.get("/find_stock_minute_stream")
+# EventSource는 헤더를 못 붙이므로 쿼리 토큰도 허용한다
+@query_router.get("/find_stock_minute_stream", auth=[ApprovedJWTAuth(), ApprovedJWTQueryAuth()])
 def find_stock_minute_stream(request, code: str):
     """
     1분봉 OHLCV SSE 스트리밍.

@@ -29,7 +29,7 @@ except Exception as e:
 auth_router = Router()
 User = get_user_model()
 
-@auth_router.post("/google/")
+@auth_router.post("/google/", auth=None)
 def google_oauth_callback(request):
     """
     Google OAuth 콜백 처리 API
@@ -142,7 +142,7 @@ def google_oauth_callback(request):
         return JsonResponse({'error': f'인증 처리 중 오류가 발생했습니다: {str(e)}'}, status=500)
 
 
-@auth_router.post("/refresh/")
+@auth_router.post("/refresh/", auth=None)
 def refresh_token(request):
     """
     JWT 토큰 갱신 API
@@ -175,7 +175,7 @@ def refresh_token(request):
         return JsonResponse({'error': '토큰 갱신에 실패했습니다.'}, status=401)
 
 
-@auth_router.post("/logout/")
+@auth_router.post("/logout/", auth=None)
 def logout(request):
     """
     로그아웃 API (토큰 블랙리스트 처리)

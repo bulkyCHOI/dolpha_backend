@@ -17,11 +17,12 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path
 from .api import api  # api.py에서 정의한 api 임포트
+from .auth import require_approved_jwt
 
 from myweb import views
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', api.urls),  # API 엔드포인트 추가
-    path('api/market-indices/', views.market_indices, name='market_indices'),  # 새로운 지수 API
+    path('api/market-indices/', require_approved_jwt(views.market_indices), name='market_indices'),  # 새로운 지수 API
 ]
