@@ -477,5 +477,144 @@ class PartialFillReconciliationTest(TestCase):
         self.assertEqual(pos.avg_price, 50000)  # 평단가 유지
 
 
+class CommonRiskManagementTest(TestCase):
+    """공통 리스크 관리 (단일 종목 20% 비중 상한 & 피라미딩 리스크 중립화) 테스트"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="riskuser", email="risk@example.com", password="testpass"
+        )
+        self.engine = TradingEngine(self.user)
+
+    def test_position_cap_pct_for_all_strategies(self):
+        """모든 전략(htf, mtt, weekly_high, theme_surge 등)에 기본 20.0% 상한 적용 확인"""
+        from dolpha.theme_surge.config import DEFAULT_MAX_POSITION_PCT
+
+        for strat in ["htf", "mtt", "fifty_day_high", "weekly_high", "theme_surge"]:
+            config = TradingConfig.objects.create(
+                user=self.user,
+                stock_code="005930",
+                stock_name="삼성전자",
+                strategy_type=strat,
+                is_active=True,
+            )
+            cap = self.engine._position_cap_pct(config)
+            self.assertEqual(cap, DEFAULT_MAX_POSITION_PCT)
+            self.assertEqual(cap, 20.0)
+
+    def test_pyramiding_risk_neutral_stop_theme_surge(self):
+        """theme_surge 피라미딩 시 손절가(theme_pullback_low)가 최소 1차 매수가 또는 평단가로 상향되는지 검증"""
+        config = TradingConfig.objects.create(
+            user=self.user,
+            stock_code="005930",
+            stock_name="삼성전자",
+            strategy_type="theme_surge",
+            trading_mode="manual",
+            theme_pullback_low=48000.0,
+            is_active=True,
+        )
+        # 1차 매수: 50,000원에 10주
+        entry1 = TradeEntry.objects.create(
+            user=self.user,
+            trading_config=config,
+            stock_code="005930",
+            stock_name="삼성전자",
+            trade_type="BUY",
+            entry_type="INITIAL",
+            order_no="10001",
+            order_quantity=10,
+            filled_quantity=10,
+            filled_price=Decimal("50000"),
+            filled_amount=Decimal("500000"),
+            status="FILLED",
+            ordered_at=tz.now(),
+            filled_at=tz.now(),
+        )
+        # 2차 매수(피라미딩): 55,000원에 10주 -> 신규 평단 52,500원
+        entry2 = TradeEntry.objects.create(
+            user=self.user,
+            trading_config=config,
+            stock_code="005930",
+            stock_name="삼성전자",
+            trade_type="BUY",
+            entry_type="PYRAMIDING",
+            order_no="10002",
+            order_quantity=10,
+            filled_quantity=10,
+            filled_price=Decimal("55000"),
+            filled_amount=Decimal("550000"),
+            status="FILLED",
+            ordered_at=tz.now(),
+            filled_at=tz.now(),
+        )
+
+        fill = {"avg_price": 55000, "filled_qty": 10}
+        self.engine._apply_risk_neutral_pyramiding_stop(config, entry2, fill)
+
+        config.refresh_from_db()
+        entry2.refresh_from_db()
+        # 평단가 52,500원 > 1차 매수가 50,000원 -> 손절가가 52,500원으로 상향되어야 함
+        self.assertEqual(config.theme_pullback_low, 52500.0)
+        self.assertEqual(entry2.stop_price, Decimal("52500.00"))
+
+    def test_pyramiding_risk_neutral_stop_manual(self):
+        """manual 모드 피라미딩 시 stop_loss %가 본전(0.0%)으로 상향 조정되는지 검증"""
+        config = TradingConfig.objects.create(
+            user=self.user,
+            stock_code="005930",
+            stock_name="삼성전자",
+            strategy_type="mtt",
+            trading_mode="manual",
+            stop_loss=8.0,
+            is_active=True,
+        )
+        # 1차 매수: 50,000원에 10주
+        entry1 = TradeEntry.objects.create(
+            user=self.user,
+            trading_config=config,
+            stock_code="005930",
+            stock_name="삼성전자",
+            trade_type="BUY",
+            entry_type="INITIAL",
+            order_no="20001",
+            order_quantity=10,
+            filled_quantity=10,
+            filled_price=Decimal("50000"),
+            filled_amount=Decimal("500000"),
+            status="FILLED",
+            ordered_at=tz.now(),
+            filled_at=tz.now(),
+        )
+        # 2차 매수(피라미딩): 52,000원에 10주 -> 신규 평단 51,000원
+        entry2 = TradeEntry.objects.create(
+            user=self.user,
+            trading_config=config,
+            stock_code="005930",
+            stock_name="삼성전자",
+            trade_type="BUY",
+            entry_type="PYRAMIDING",
+            order_no="20002",
+            order_quantity=10,
+            filled_quantity=10,
+            filled_price=Decimal("52000"),
+            filled_amount=Decimal("520000"),
+            status="FILLED",
+            ordered_at=tz.now(),
+            filled_at=tz.now(),
+        )
+
+        fill = {"avg_price": 52000, "filled_qty": 10}
+        self.engine._apply_risk_neutral_pyramiding_stop(config, entry2, fill)
+
+        config.refresh_from_db()
+        entry2.refresh_from_db()
+        # 목표 손절가는 max(50,000, 51,000) = 51,000원 (신규 평단가 Break-even).
+        # 신규 평단가 이상 방어이므로 stop_loss는 0.0%로 상향
+        self.assertEqual(config.stop_loss, 0.0)
+        self.assertEqual(entry2.stop_price, Decimal("51000.00"))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+

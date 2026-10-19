@@ -156,7 +156,7 @@ class MorningPatternTests(TestCase):
             {"open": 10300, "high": 10550, "low": 10280, "close": 10520, "volume": 1000},
         ]
         swing = SwingHigh(index=1, price=10500)
-        breakout = analyze_morning_breakout(bars, swing, current_price=10520)
+        breakout = analyze_morning_breakout(bars, swing, current_price=10535)
         self.assertTrue(breakout.is_valid)
         self.assertGreater(breakout.volume_ratio, 2.0)
 
@@ -170,7 +170,7 @@ class MorningPatternTests(TestCase):
             {"open": 10300, "high": 10550, "low": 10280, "close": 10520, "volume": 700}, # 5봉 평균 ~425, 700 >= 425*1.5=637.5
         ]
         swing = SwingHigh(index=1, price=10500)
-        breakout = analyze_morning_breakout(bars, swing, current_price=10520)
+        breakout = analyze_morning_breakout(bars, swing, current_price=10535)
         self.assertTrue(breakout.is_valid)
 
 
@@ -283,7 +283,9 @@ class EntryDualModeTests(TestCase):
             {"time": "09:04", "open": 10300, "high": 10400, "low": 10280, "close": 10380, "volume": 300},
             {"time": "09:05", "open": 10380, "high": 10550, "low": 10350, "close": 10530, "volume": 1500},
         ]
-        decision = check_theme_surge_entry("005930", current_price=10530, bars=bars, use_foreign_filter=False)
+        from unittest.mock import patch
+        with patch("dolpha.theme_surge.entry._bar_age_minutes", return_value=0.0):
+            decision = check_theme_surge_entry("005930", current_price=10535, bars=bars, use_foreign_filter=False)
         self.assertTrue(decision.passed)
         self.assertTrue(decision.has_pullback)
         self.assertTrue(decision.has_breakout)

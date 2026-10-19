@@ -29,7 +29,7 @@ TOSS_MAX_PAGES = 10                   # 테마당 최대 100종목까지 수집
 TOSS_REQUEST_INTERVAL_SEC = 0.15      # 연속 호출 간 최소 간격 (과도한 부하 방지)
 
 # ── 급등 테마 판정 ──────────────────────────────────────────
-SURGE_MIN_FLUCTUATION_PCT = 3.0       # 테마 등락률 하한(%)
+SURGE_MIN_FLUCTUATION_PCT = 4.0       # 테마 등락률 하한(%) — 약한 테마 휩소 방지 (3.0→4.0)
 SURGE_MIN_TRADING_VALUE = 50_000_000_000   # 테마 거래대금 하한(원) = 500억
 SURGE_MIN_STOCK_COUNT = 3             # 구성 종목 3개 미만 테마는 노이즈로 제외
 SURGE_MIN_MOMENTUM_PCT = 0.3          # 모멘텀 비교 구간 대비 등락률 증가폭 하한(%p)
@@ -39,8 +39,8 @@ SURGE_MAX_THEMES_PER_SLOT = 3         # 한 슬롯에서 후보를 뽑을 최대
 THEME_PULLBACK_MOMENTUM_TOLERANCE_PCT = 1.5  # 테마 눌림목 모멘텀 보존 허용 오차(%p)
 
 # ── 1등 종목(주도주) 선정 ───────────────────────────────────
-LEADER_WEIGHT_TRADING_VALUE = 0.5     # 거래대금 가중치
-LEADER_WEIGHT_CHANGE_RATE = 0.5       # 상승률 가중치
+LEADER_WEIGHT_TRADING_VALUE = 0.7     # 거래대금 가중치 (실체 있는 수급 대장주 우선: 0.5→0.7)
+LEADER_WEIGHT_CHANGE_RATE = 0.3       # 상승률 가중치 (0.5→0.3)
 LEADER_MIN_CHANGE_RATE_PCT = 1.0      # 후보 최소 상승률(%) — P1.5: 2.0→1.0 (급등테마 51%가 후보 0명이던 문제)
 LEADER_MIN_CHANGE_RATE_THEME_RATIO = 0.35  # P1.5: 테마 등락률의 이 비율 미만인 종목은 후행주로 제외
 LEADER_MIN_TRADING_VALUE = 5_000_000_000   # 후보 최소 거래대금(원) = 50억
@@ -96,7 +96,7 @@ PULLBACK_MIN_PCT = 0.5                # 눌림목 최소 깊이(전고점 대비
 PULLBACK_MAX_PCT = 6.0                # 눌림목 최대 깊이(%) — 초과 시 추세 이탈로 간주
 PULLBACK_MIN_BARS = 2                 # 눌림 구간 최소 봉 수
 PULLBACK_VOLUME_RATIO_MAX = 1.05      # 눌림 구간 평균 거래량 / 상승 구간 평균 — P1: 0.9→1.05 (미진입 284건/30일 완화)
-BREAKOUT_BUFFER_PCT = 0.1             # 전고점 돌파 인정 여유(%)
+BREAKOUT_BUFFER_PCT = 0.3             # 전고점 돌파 인정 여유(%) — 허수 돌파(전고점 살짝 터치 후 밀림) 방지
 BREAKOUT_VOLUME_RATIO_MIN = 1.5       # 돌파봉 거래량 / 최근 평균 거래량 하한
 BREAKOUT_VOLUME_AVG_BARS = 20         # 평균 거래량 산출 구간
 

@@ -37,6 +37,7 @@ from dolpha.order_log import order_log
 from dolpha.stockCommon import GetOhlcv, GetNowDateStr
 from dolpha.strategy_account import get_active_accounts, resolve_account
 from dolpha import telegram_notifier
+from dolpha.theme_surge.config import DEFAULT_MAX_POSITION_PCT
 
 # 주문 접수 후 실제 체결을 확인할 때의 재시도 횟수·간격.
 # 접수 직후에는 체결 조회에 아직 잡히지 않는 경우가 있어 몇 번 더 본다.
@@ -341,11 +342,27 @@ class TradingEngine:
         return self._cap_position_amount(config, pos_amount, confirmed_capital)
 
     def _position_cap_pct(self, config: TradingConfig) -> float | None:
-        """이 설정에 적용할 1종목 최대 비중(%). 상한이 없으면 None."""
-        if config.strategy_type != "theme_surge":
-            return None
-        cap = self._theme_exit_settings().max_position_pct
-        return cap if cap and cap > 0 else None
+        """이 설정에 적용할 1종목 최대 비중(%).
+
+        theme_surge 뿐만 아니라 모든 전략(htf, mtt, fifty_day_high, weekly_high 등)에
+        계좌 대비 기본 최대 20.0% 상한을 적용합니다.
+        (TradingDefaults나 theme_exit_settings에 설정된 값이 있으면 우선 반영하되 기본 20.0%)
+        """
+        if config.strategy_type == "theme_surge":
+            cap = self._theme_exit_settings().max_position_pct
+            return cap if cap and cap > 0 else DEFAULT_MAX_POSITION_PCT
+
+        # 일반 전략 (htf, mtt, fifty_day_high, weekly_high 등)
+        try:
+            defaults = getattr(self.user, "trading_defaults", None)
+            if defaults is not None:
+                cap = getattr(defaults, "theme_surge_max_position_pct", None)
+                if cap and cap > 0:
+                    return float(cap)
+        except Exception:
+            pass
+
+        return DEFAULT_MAX_POSITION_PCT
 
     def _cap_position_amount(
         self, config: TradingConfig, pos_amount: float, confirmed_capital: float
@@ -1691,6 +1708,105 @@ class TradingEngine:
 
         return None, 0.0, ""
 
+    def _apply_risk_neutral_pyramiding_stop(
+        self,
+        config: TradingConfig,
+        current_entry: TradeEntry,
+        fill: dict | None,
+    ) -> None:
+        """피라미딩(추가매수) 체결 후 손절가를 최소 1차 매수가 또는 신규 평단가(Break-even) 이상으로 상향합니다.
+
+        추가 매수로 인해 포지션 규모가 커진 상태에서 급락이 발생할 경우
+        원금 손실이 확대되는 위험을 원천 차단(Risk-Neutralization)하기 위해:
+        1. 1차 매수 체결가와 피라미딩 후 신규 평단가 중 높은 가격을 목표 손절가로 설정.
+        2. 테마 전략(theme_surge): config.theme_pullback_low 상향 조정.
+        3. 일반 전략(manual/atr): 신규 평단가 대비 손절 비율(stop_loss %) 상향(손절폭 축소) 조정.
+        4. 현재 TradeEntry의 stop_price 필드 갱신.
+        """
+        try:
+            # 1. 이전 매수 체결 이력 확인
+            buys = list(self._buy_entries(config))
+            if not buys:
+                return
+
+            first_entry = buys[0]
+            first_buy_price = float(first_entry.filled_price) if first_entry.filled_price else float(first_entry.order_price)
+
+            # 2. 신규 평단가 산출
+            pos = self._config_net_position(config)
+            new_avg_price = pos.avg_price
+            if new_avg_price <= 0:
+                if fill and fill.get("avg_price"):
+                    new_avg_price = float(fill["avg_price"])
+                else:
+                    new_avg_price = float(current_entry.filled_price or current_entry.order_price)
+
+            if first_buy_price <= 0 or new_avg_price <= 0:
+                return
+
+            # 최소 1차 매수가 또는 신규 평단가(Break-even) 이상으로 손절가 설정
+            target_neutral_stop = max(first_buy_price, new_avg_price)
+
+            # 3. 전략별 손절 기준 상향
+            if self._uses_theme_exit(config):
+                current_stop = config.theme_pullback_low or 0.0
+                if target_neutral_stop > current_stop:
+                    config.theme_pullback_low = target_neutral_stop
+                    config.save(update_fields=["theme_pullback_low"])
+                    order_log(
+                        f"[피라미딩 리스크 중립화] {config.stock_name}({config.stock_code}) "
+                        f"손절가 상향: {current_stop:,.0f}원 → {target_neutral_stop:,.0f}원 "
+                        f"(1차매수가={first_buy_price:,.0f}원, 신규평단={new_avg_price:,.0f}원)"
+                    )
+            else:
+                mode = config.trading_mode
+                if mode == "manual":
+                    # manual 모드에서는 신규 평단가 대비 target_neutral_stop 이탈 시 손절되도록 stop_loss 퍼센트 조정
+                    # stop_line = avg_price * (1 - stop_loss / 100)
+                    # target_neutral_stop 이상이 되도록 하려면:
+                    # stop_loss_pct <= (avg_price - target_neutral_stop) / avg_price * 100
+                    if target_neutral_stop >= new_avg_price:
+                        # 평단가 이상(또는 본전)에서 즉시 방어: 손절폭을 0.0%(본전)으로 상향
+                        new_stop_loss_pct = 0.0
+                    else:
+                        new_stop_loss_pct = max(0.0, (new_avg_price - target_neutral_stop) / new_avg_price * 100.0)
+
+                    current_stop_loss = config.stop_loss if config.stop_loss is not None else 8.0
+                    if new_stop_loss_pct < current_stop_loss:
+                        config.stop_loss = round(new_stop_loss_pct, 2)
+                        config.save(update_fields=["stop_loss"])
+                        order_log(
+                            f"[피라미딩 리스크 중립화] {config.stock_name}({config.stock_code}) "
+                            f"Manual 손절폭 축소: {current_stop_loss:.2f}% → {config.stop_loss:.2f}% "
+                            f"(목표 손절가 {target_neutral_stop:,.0f}원 이상 방어)"
+                        )
+                elif mode == "atr":
+                    atr_val = self.get_atr(config.stock_code)
+                    if atr_val and atr_val > 0:
+                        # stop_line = avg_price - atr * stop_loss
+                        # target_neutral_stop 방어를 위해 stop_loss 배수 축소
+                        if target_neutral_stop >= new_avg_price:
+                            new_stop_loss_mul = 0.0
+                        else:
+                            new_stop_loss_mul = max(0.0, (new_avg_price - target_neutral_stop) / atr_val)
+
+                        current_stop_loss = config.stop_loss if config.stop_loss is not None else 2.0
+                        if new_stop_loss_mul < current_stop_loss:
+                            config.stop_loss = round(new_stop_loss_mul, 2)
+                            config.save(update_fields=["stop_loss"])
+                            order_log(
+                                f"[피라미딩 리스크 중립화] {config.stock_name}({config.stock_code}) "
+                                f"ATR 손절배수 축소: {current_stop_loss:.2f} → {config.stop_loss:.2f} ATR "
+                                f"(목표 손절가 {target_neutral_stop:,.0f}원 이상 방어)"
+                            )
+
+            # 4. 현재 체결된 TradeEntry의 stop_price 필드 갱신
+            current_entry.stop_price = Decimal(str(round(target_neutral_stop, 2)))
+            current_entry.save(update_fields=["stop_price"])
+
+        except Exception as e:
+            order_log(f"[피라미딩 리스크 중립화 실패] {config.stock_name}({config.stock_code}): {e}")
+
     # ──────────────────────────────────────────────
     # 매수 주문 실행
     # ──────────────────────────────────────────────
@@ -1857,6 +1973,11 @@ class TradingEngine:
                 config.save(update_fields=["trailing_stop_peak_price"])
                 order_log(f"[매수무체결] {stock_name}({stock_code}) {buy_qty}주 전량 미체결 — 취소됨")
                 return False
+
+            # 피라미딩(추가매수)인 경우 리스크 중립화(Risk-Neutral Stop) 적용:
+            # 2차 이상 매수 체결 시 손절가를 최소 1차 매수가 또는 신규 평단가 이상으로 상향 조정
+            if entry_type == "PYRAMIDING":
+                self._apply_risk_neutral_pyramiding_stop(config, entry, fill)
 
             # 체결 반영 후 요약을 갱신한다 (접수 시점엔 SUBMITTED 라 집계에 안 잡힌다)
             self._update_trading_summary(config, stock_code, stock_name)
