@@ -633,11 +633,19 @@ def GetOrderFill(
 
     # 잔여수량은 응답 값을 우선하되, 없으면 주문-체결로 유도한다.
     # 취소된 주문은 rmn_qty 가 0 으로 내려오므로 '주문-체결' 유도값을 쓰면 안 된다.
-    cancelled = any(str(row.get("cncl_yn", "")).upper() == "Y" for row in rows)
+    # 취소는 별도 '매도취소/매수취소' 주문(orgn_odno=원주문)으로 접수되고, 원주문 행은
+    # cncl_yn=N 그대로 cncl_cfrm_qty(취소확인수량)만 채워진다. 이를 놓치면 rmn_qty=0 을
+    # '값 없음'으로 보고 주문-체결로 유도해, 이미 취소된 잔량을 살아 있다고 오판한다.
+    cancel_confirmed = sum(_int(row.get("cncl_cfrm_qty")) for row in rows)
+    cancelled = cancel_confirmed > 0 or any(
+        str(row.get("cncl_yn", "")).upper() == "Y" for row in rows
+    )
     if cancelled:
         remain = 0
+    elif any("rmn_qty" in row for row in rows):
+        remain = sum(_int(row.get("rmn_qty")) for row in rows)
     else:
-        remain = sum(_int(row.get("rmn_qty")) for row in rows) or max(ordered - filled, 0)
+        remain = max(ordered - filled, 0)
 
     return {
         "cancelled": cancelled,

@@ -503,7 +503,7 @@ class CommonRiskManagementTest(TestCase):
             self.assertEqual(cap, 20.0)
 
     def test_pyramiding_risk_neutral_stop_theme_surge(self):
-        """theme_surge 피라미딩 시 손절가(theme_pullback_low)가 최소 1차 매수가 또는 평단가로 상향되는지 검증"""
+        """theme_surge 피라미딩 시 손절가(theme_pullback_low)는 진입 눌림저점 그대로 유지되는지 검증"""
         config = TradingConfig.objects.create(
             user=self.user,
             stock_code="005930",
@@ -553,9 +553,9 @@ class CommonRiskManagementTest(TestCase):
 
         config.refresh_from_db()
         entry2.refresh_from_db()
-        # 평단가 52,500원 > 1차 매수가 50,000원 -> 손절가가 52,500원으로 상향되어야 함
-        self.assertEqual(config.theme_pullback_low, 52500.0)
-        self.assertEqual(entry2.stop_price, Decimal("52500.00"))
+        # 급등테마주는 본전 상향 없이 눌림저점 48,000원 유지
+        self.assertEqual(config.theme_pullback_low, 48000.0)
+        self.assertIsNone(entry2.stop_price)
 
     def test_pyramiding_risk_neutral_stop_manual(self):
         """manual 모드 피라미딩 시 stop_loss %가 본전(0.0%)으로 상향 조정되는지 검증"""
@@ -618,3 +618,63 @@ if __name__ == "__main__":
     unittest.main()
 
 
+
+class GetOrderFillCancelParsingTest(TestCase):
+    """원주문 행은 cncl_yn=N 이고 cncl_cfrm_qty 로만 취소가 표시된다 (2026-10-19 삼성SDI 잔량 오판)."""
+
+    @patch("dolpha.kis.trade.requests.get")
+    @patch("dolpha.kis.trade.GetHeaders", return_value={})
+    @patch("dolpha.kis.trade._account_params", return_value={})
+    @patch("dolpha.kis.trade._sleep")
+    @patch("dolpha.kis.trade.resolve_credential")
+    def test_cancel_confirmed_qty_marks_cancelled(self, _cred, _sleep, _acct, _hdr, mock_get):
+        from dolpha.kis import trade as KIS
+
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = {
+            "rt_cd": "0",
+            "output1": [{
+                "odno": "0000023393", "pdno": "006400", "ord_gno_brno": "00950",
+                "ord_qty": "88", "tot_ccld_qty": "30", "tot_ccld_amt": "17027500",
+                "rmn_qty": "0", "cncl_yn": "N", "cncl_cfrm_qty": "58",
+            }],
+        }
+        fill = KIS.GetOrderFill("0000023393", stock_code="006400", order_date="20261019")
+        self.assertTrue(fill["cancelled"])
+        self.assertEqual(fill["remain_qty"], 0)
+        self.assertEqual(fill["filled_qty"], 30)
+
+
+class RefetchSellProfitLossTest(TestCase):
+    """재조회로 매도 체결수량이 늘면 손익도 늘어난 수량 기준으로 다시 계산돼야 한다 (2026-10-19 삼성SDI)."""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username="pl_user", password="pw")
+        self.engine = TradingEngine(self.user)
+
+    @patch("dolpha.kis.trade.GetOrderFill")
+    def test_profit_loss_rescaled_on_refetch(self, mock_fill):
+        config = TradingConfig.objects.create(
+            user=self.user, stock_code="006400", stock_name="삼성SDI",
+            strategy_type="theme_surge", is_active=True,
+        )
+        # 최초 확인 시 2주 @567,750 체결, 평단 568,739 → 손익 -1,978
+        entry = TradeEntry.objects.create(
+            user=self.user, trading_config=config, stock_code="006400", stock_name="삼성SDI",
+            trade_type="SELL", entry_type="STOP_LOSS", order_no="23393",
+            order_quantity=88, filled_quantity=2, filled_price=Decimal("567750"),
+            filled_amount=Decimal("1135500"), profit_loss=Decimal("-1978"),
+            status="FILLED", ordered_at=tz.now(), filled_at=tz.now(),
+        )
+        mock_fill.return_value = {
+            "filled_qty": 30, "avg_price": 567583, "filled_amount": 17027500,
+            "remain_qty": 0, "cancelled": True,
+        }
+        with patch.object(TradingEngine, "_credential_for", return_value=None):
+            self.assertTrue(self.engine._refetch_and_apply_fill(config, entry))
+
+        entry.refresh_from_db()
+        self.assertEqual(entry.filled_quantity, 30)
+        # 30주 × (567,583 - 568,739) ≈ -34,680
+        self.assertAlmostEqual(float(entry.profit_loss), 17027500 - 568739 * 30, delta=1)
+        self.assertAlmostEqual(entry.profit_loss_percent, -0.2033, places=2)

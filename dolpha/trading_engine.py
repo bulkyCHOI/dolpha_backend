@@ -1749,15 +1749,9 @@ class TradingEngine:
 
             # 3. 전략별 손절 기준 상향
             if self._uses_theme_exit(config):
-                current_stop = config.theme_pullback_low or 0.0
-                if target_neutral_stop > current_stop:
-                    config.theme_pullback_low = target_neutral_stop
-                    config.save(update_fields=["theme_pullback_low"])
-                    order_log(
-                        f"[피라미딩 리스크 중립화] {config.stock_name}({config.stock_code}) "
-                        f"손절가 상향: {current_stop:,.0f}원 → {target_neutral_stop:,.0f}원 "
-                        f"(1차매수가={first_buy_price:,.0f}원, 신규평단={new_avg_price:,.0f}원)"
-                    )
+                # 급등테마주는 진입 시 확정한 눌림저점 손절을 유지한다 — 본전으로
+                # 올리면 손절폭이 노이즈 수준(<1%)으로 좁아져 정상 등락에 털린다.
+                return
             else:
                 mode = config.trading_mode
                 if mode == "manual":
@@ -3108,6 +3102,7 @@ class TradingEngine:
             return False
 
         old_qty = entry.filled_quantity
+        cost_per_share = self._sell_cost_per_share(entry)
         entry.filled_quantity = fill["filled_qty"]
         entry.filled_price = Decimal(str(fill["avg_price"] or entry.filled_price))
         entry.filled_amount = Decimal(
@@ -3116,12 +3111,32 @@ class TradingEngine:
         entry.note = (f"{entry.note} " if entry.note else "") + (
             f"[재조회 보정: {old_qty}→{fill['filled_qty']}주]"
         )
-        entry.save(update_fields=["filled_quantity", "filled_price", "filled_amount", "note"])
+        update_fields = ["filled_quantity", "filled_price", "filled_amount", "note"]
+        # 매도 손익도 보정된 수량 기준으로 다시 계산한다 — 안 그러면 최초 조회
+        # 시점의 부분체결 수량(예: 2주)으로 계산된 손익이 그대로 남는다.
+        if cost_per_share:
+            cost = cost_per_share * entry.filled_quantity
+            profit_loss = float(entry.filled_amount) - cost
+            entry.profit_loss = Decimal(str(round(profit_loss, 2)))
+            entry.profit_loss_percent = profit_loss / cost * 100.0
+            update_fields += ["profit_loss", "profit_loss_percent"]
+        entry.save(update_fields=update_fields)
         order_log(
             f"[체결보정] {config.stock_name}({config.stock_code}) 주문 {entry.order_no}"
             f" {old_qty}→{fill['filled_qty']}주"
         )
         return True
+
+    @staticmethod
+    def _sell_cost_per_share(entry: TradeEntry) -> float | None:
+        """기록된 매도 손익에서 주당 매입원가(당시 평단)를 역산한다. 산출 불가면 None.
+
+        매도 시점의 평단을 따로 저장하지 않으므로 (체결금액 - 손익) / 체결수량 으로 복원한다.
+        """
+        if entry.trade_type != "SELL" or entry.profit_loss is None or not entry.filled_quantity:
+            return None
+        cost = float(entry.filled_amount or 0) - float(entry.profit_loss)
+        return cost / entry.filled_quantity if cost > 0 else None
 
     def _reconcile_partial_fills(self, config: TradingConfig) -> None:
         """계좌엔 이미 없는데(잔고 0) 장부는 부분체결로 남아 순보유가 있는 경우,
